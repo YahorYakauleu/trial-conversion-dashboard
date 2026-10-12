@@ -123,4 +123,9 @@ describe('getMetrics — по неделям и карточки', () => {
     expect(cards.rate_first_7d).toEqual({ rate: 1, from: '2026-09-27', to: '2026-10-03' });
     expect(cards.rate_retry_7d).toEqual({ rate: 1, from: '2026-09-01', to: '2026-09-04' });
   });
+
+  it('карточка без триалов в окончательных днях — «нет данных», а не пустой период', () => {
+    const { cards } = getMetrics(storeWith([trial('2026-10-01T12:00:00Z')]).db, opts);
+    expect(cards.rate_retry_7d).toEqual({ rate: null, from: null, to: null });
+  });
 });

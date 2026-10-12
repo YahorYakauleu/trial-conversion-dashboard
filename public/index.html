@@ -32,7 +32,8 @@
     .card { background: var(--card); border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; }
     .card b { font-size: 26px; font-weight: 600; }
     .chart { position: relative; height: 320px; margin: 24px 0 8px; }
-    .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+    .legend { display: flex; gap: 16px; flex-wrap: wrap; }
+    .note { margin: 16px 0 8px; max-width: 760px; }
     .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 6px; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -62,19 +63,27 @@
   </div>
 
   <div class="cards" id="cards"></div>
-  <div class="chart"><canvas id="chart" aria-label="Конверсия триалов в платные по дате окончания триала"></canvas></div>
-  <div class="legend muted">
-    <span><span class="swatch" style="background: var(--first)"></span>С первой попытки</span>
-    <span><span class="swatch" style="background: var(--retry)"></span>С учётом ретраев (<span id="window">30</span> дн)</span>
-    <span><span class="swatch" style="background: var(--bar); height: 10px; width: 10px"></span>Триалов закончилось</span>
-    <span>Пунктир и «≈» — цифра ещё меняется</span>
-  </div>
+
+  <p class="muted note">
+    Триалы сгруппированы по дню оформления (UTC). «Сконвертилось» — оплатили первый платный период
+    в течение <span id="window">30</span> дней после конца триала, с любой попытки.
+    «≈» и пунктир — по этому дню ещё идут триалы или ретраи, цифра будет расти.
+  </p>
 
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Конец триала</th><th>Триалов</th><th>С первой попытки</th><th>С учётом ретраев</th></tr></thead>
+      <thead>
+        <tr><th>Дата оформления</th><th>Оформлено триалов</th><th>Сконвертилось</th><th>из них с первой попытки</th></tr>
+      </thead>
       <tbody id="rows"></tbody>
     </table>
+  </div>
+
+  <div class="chart"><canvas id="chart" aria-label="Конверсия триалов в платные по дню оформления триала"></canvas></div>
+  <div class="legend muted">
+    <span><span class="swatch" style="background: var(--retry)"></span>Сконвертилось</span>
+    <span><span class="swatch" style="background: var(--first)"></span>С первой попытки</span>
+    <span><span class="swatch" style="background: var(--bar); height: 10px; width: 10px"></span>Оформлено триалов</span>
   </div>
 </main>
 
@@ -125,9 +134,9 @@
 
   function renderCards(c) {
     document.getElementById('cards').innerHTML = [
-      ['Триалов закончилось, 7 дн', num(c.ended_7d.value), range(c.ended_7d)],
-      ['С первой попытки, 7 дн', pct(c.rate_first_7d.rate), range(c.rate_first_7d)],
-      ['С учётом ретраев, дозревшие 7 дн', pct(c.rate_retry_7d.rate), range(c.rate_retry_7d)],
+      ['Оформлено триалов за 7 дней', num(c.started_7d.value), range(c.started_7d)],
+      ['Сконвертилось (окончательные 7 дней)', pct(c.rate_retry_7d.rate), range(c.rate_retry_7d)],
+      ['С первой попытки (окончательные 7 дней)', pct(c.rate_first_7d.rate), range(c.rate_first_7d)],
     ]
       .map(([label, value, period]) => `<div class="card"><span class="muted">${label}</span><b>${value}</b><span class="muted">${period}</span></div>`)
       .join('');
@@ -142,9 +151,9 @@
       tension: 0.2, spanGaps: true, segment: { borderDash: dashed(finalKey) },
     });
     const datasets = [
-      { type: 'bar', label: 'Триалов закончилось', data: series.map((p) => p.ended), backgroundColor: css('--bar'), yAxisID: 'count', order: 3 },
-      line('С первой попытки', 'rate_first', 'final_first', css('--first'), 1),
-      line('С учётом ретраев', 'rate_retry', 'final_retry', css('--retry'), 2),
+      { type: 'bar', label: 'Оформлено триалов', data: series.map((p) => p.started), backgroundColor: css('--bar'), yAxisID: 'count', order: 3 },
+      line('Сконвертилось', 'rate_retry', 'final_retry', css('--retry'), 1),
+      line('С первой попытки', 'rate_first', 'final_first', css('--first'), 2),
     ];
 
     Chart.defaults.color = css('--muted');
@@ -175,11 +184,16 @@
     });
   }
 
+  // Новые дни сверху: «1 сентября оформлено N триалов, из них сконвертилось M (x%)»
   function renderTable(series) {
     const cell = (n, r, final) => `<td class="${final ? '' : 'pending'}">${final ? '' : '≈ '}${num(n)} (${pct(r)})</td>`;
+    const label = (p) => (state.granularity === 'week' ? `неделя с ${p.period}` : p.period);
     document.getElementById('rows').innerHTML = [...series]
       .reverse()
-      .map((p) => `<tr><td>${p.period}</td><td>${num(p.ended)}</td>${cell(p.paid_first, p.rate_first, p.final_first)}${cell(p.paid_retry, p.rate_retry, p.final_retry)}</tr>`)
+      .map(
+        (p) =>
+          `<tr><td>${label(p)}</td><td>${num(p.started)}</td>${cell(p.paid_retry, p.rate_retry, p.final_retry)}${cell(p.paid_first, p.rate_first, p.final_first)}</tr>`,
+      )
       .join('');
   }
 

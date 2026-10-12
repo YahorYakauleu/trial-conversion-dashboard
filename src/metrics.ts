@@ -117,11 +117,12 @@ function groupByWeek(days: Point[]): Point[] {
 
 function cards(days: Point[]): Cards {
   const sum = (pts: Point[], key: 'started' | 'paid_first' | 'paid_retry') => pts.reduce((s, p) => s + p[key], 0);
-  const rateCard = (pts: Point[], key: 'paid_first' | 'paid_retry'): RateCard => ({
-    rate: rate(sum(pts, key), sum(pts, 'started')),
-    from: pts[0]?.period ?? null,
-    to: pts.at(-1)?.period ?? null,
-  });
+  // Окончательные дни без единого триала (например, до запуска канала) — это «нет данных», а не период
+  const rateCard = (pts: Point[], key: 'paid_first' | 'paid_retry'): RateCard => {
+    const started = sum(pts, 'started');
+    if (started === 0) return { rate: null, from: null, to: null };
+    return { rate: rate(sum(pts, key), started), from: pts[0].period, to: pts.at(-1)!.period };
+  };
   const last7 = days.slice(-7);
   return {
     started_7d: { value: sum(last7, 'started'), from: last7[0]?.period ?? '', to: last7.at(-1)?.period ?? '' },
