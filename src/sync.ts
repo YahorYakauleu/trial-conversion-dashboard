@@ -1,5 +1,6 @@
 import type { Config } from './config.js';
 import { nowSec, type Provider, type Store } from './db.js';
+import { syncSolidgateAccount } from './providers/solidgate.js';
 import { createStripeClient, syncStripeAccount } from './providers/stripe.js';
 
 export interface Source {
@@ -37,11 +38,16 @@ export async function runSync(store: Store, sources: Source[]): Promise<boolean>
 }
 
 export function buildSources(config: Config): Source[] {
-  if (config.solidgateAccounts.length > 0) {
-    console.warn('SOLIDGATE_KEYS заданы, но синк Solidgate ещё не подключён — пропускаю');
-  }
-  return config.stripeAccounts.map(({ account, key }): Source => {
+  const stripe = config.stripeAccounts.map(({ account, key }): Source => {
     const client = createStripeClient(key);
     return { provider: 'stripe', account, run: (store, now) => syncStripeAccount(store, client, account, config, now) };
   });
+  const solidgate = config.solidgateAccounts.map(
+    (acc): Source => ({
+      provider: 'solidgate',
+      account: acc.account,
+      run: (store, now) => syncSolidgateAccount(store, acc, config, now),
+    }),
+  );
+  return [...stripe, ...solidgate];
 }
