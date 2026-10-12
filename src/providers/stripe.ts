@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { toAlpha2 } from '../countries.js';
 import type { AttemptRow, CardDetails, Store, TrialRow } from '../db.js';
-import { forEachDay } from '../days.js';
+import { forEachWindow } from '../days.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 
 export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds'>;
@@ -10,8 +10,12 @@ interface StripeSyncConfig {
   historyFrom: number;
 }
 
-// Сколько дней выгружать одновременно: каждый день — отдельная цепочка запросов
-const PARALLEL_DAYS = 8;
+// Сколько окон выгружать одновременно: каждое окно — отдельная цепочка запросов
+const PARALLEL = 8;
+const HOUR = 3_600;
+// Ежедневный синк берёт данные с прошлого синка с запасом в час: Stripe отдаёт объекты сразу после создания.
+// (Раньше запас был сутки — у Corp это ~15 тыс. списаний и столько же событий, и синк шёл ~10 минут даже сразу после предыдущего.)
+const SYNC_OVERLAP = HOUR;
 // Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк и попытки списания.
 // База, выгруженная раньше, один раз догружает недостающее (подписки и списания, без инвойсов).
 const DETAILS_VERSION = 2;
@@ -115,7 +119,7 @@ export function createStripeClient(key: string): StripeLike {
 }
 
 // Без курсора — бэкфилл с HISTORY_FROM по дням (несколько дней параллельно, прогресс сохраняется);
-// затем всегда инкремент с (курсор − 1 день): новые подписки, события по инвойсам, списания и рефанды.
+// затем всегда инкремент с (курсор − 1 час): новые подписки, события по инвойсам, списания и рефанды.
 export async function syncStripeAccount(
   store: Store,
   stripe: StripeLike,
@@ -145,10 +149,11 @@ export async function syncStripeAccount(
 
   // Все подписки (триалы) с HISTORY_FROM; прогресс по дням хранится под progressKey
   const subscriptionsPass = (progressKey: string) =>
-    forEachDay(
+    forEachWindow(
       store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       today,
-      PARALLEL_DAYS,
+      DAY,
+      PARALLEL,
       async (day) => {
         const params = { status: 'all' as const, created: { gte: day, lt: day + DAY }, limit: 100, expand: SUBSCRIPTION_EXPAND };
         for await (const sub of stripe.subscriptions.list(params)) saveSubscription(sub);
@@ -168,10 +173,11 @@ export async function syncStripeAccount(
     stripe.charges.list({ created, limit: 100 }, { apiVersion: CHARGES_API_VERSION }) as AsyncIterable<LegacyCharge>;
 
   const invoicesPass = (progressKey: string) =>
-    forEachDay(
+    forEachWindow(
       store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       today,
-      PARALLEL_DAYS,
+      DAY,
+      PARALLEL,
       async (day) => {
         for await (const invoice of stripe.invoices.list({ created: { gte: day, lt: day + DAY }, limit: 100 })) saveInvoice(invoice);
         console.log(`[stripe:${account}] инвойсы ${dayKey(day)} готово`);
@@ -179,10 +185,11 @@ export async function syncStripeAccount(
       (next) => store.setState('stripe', account, progressKey, next),
     );
   const chargesPass = (progressKey: string) =>
-    forEachDay(
+    forEachWindow(
       store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       today,
-      PARALLEL_DAYS,
+      DAY,
+      PARALLEL,
       async (day) => {
         for await (const charge of listCharges({ gte: day, lt: day + DAY })) saveCharge(charge);
         console.log(`[stripe:${account}] списания ${dayKey(day)} готово`);
@@ -203,18 +210,21 @@ export async function syncStripeAccount(
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
   }
 
-  const since = (cursor ?? today) - DAY;
-  for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: since }, limit: 100, expand: SUBSCRIPTION_EXPAND })) {
-    saveSubscription(sub);
-  }
-  for await (const event of stripe.events.list({
-    types: ['invoice.paid', 'invoice.payment_failed'],
-    created: { gte: since },
-    limit: 100,
-  })) {
-    saveInvoice(event.data.object as Stripe.Invoice);
-  }
-  for await (const charge of listCharges({ gte: since })) saveCharge(charge);
+  // Инкремент: часовыми окнами параллельно; шаги по порядку — подписки → инвойсы (события) → списания,
+  // потому что каждый опирается на предыдущий (инвойс — на триал, списание — на первый инвойс)
+  const since = (cursor ?? today) - SYNC_OVERLAP;
+  const hourly = (fn: (from: number) => Promise<void>) => forEachWindow(since, now, HOUR, PARALLEL, fn);
+  await hourly(async (from) => {
+    const params = { status: 'all' as const, created: { gte: from, lt: from + HOUR }, limit: 100, expand: SUBSCRIPTION_EXPAND };
+    for await (const sub of stripe.subscriptions.list(params)) saveSubscription(sub);
+  });
+  await hourly(async (from) => {
+    const params = { types: ['invoice.paid', 'invoice.payment_failed'], created: { gte: from, lt: from + HOUR }, limit: 100 };
+    for await (const event of stripe.events.list(params)) saveInvoice(event.data.object as Stripe.Invoice);
+  });
+  await hourly(async (from) => {
+    for await (const charge of listCharges({ gte: from, lt: from + HOUR })) saveCharge(charge);
+  });
   for await (const refund of stripe.refunds.list({ created: { gte: since }, limit: 100 })) {
     const chargeId = typeof refund.charge === 'string' ? refund.charge : refund.charge?.id;
     if (chargeId && refund.status !== 'failed' && refund.status !== 'canceled') store.markRefunded('stripe', chargeId);

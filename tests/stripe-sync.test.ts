@@ -7,6 +7,9 @@ const NOW = Date.parse('2026-10-12T10:00:00Z') / 1000;
 const TODAY = NOW - (NOW % DAY);
 const HISTORY_FROM = Date.parse('2026-09-01T00:00:00Z') / 1000;
 const cfg = { historyFrom: HISTORY_FROM };
+const HOUR = 3600;
+// Окна бэкфилла — сутки, окна ежедневного синка — час
+const isWindow = (c: { params: { created: Range } }, size: number) => c.params.created.lt! - c.params.created.gte! === size;
 
 type Range = { gte?: number; lt?: number };
 type Call = { method: string; params: { created: Range; [key: string]: unknown }; options?: { apiVersion?: string } };
@@ -72,7 +75,7 @@ describe('syncStripeAccount', () => {
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
 
     const backfillDays = (method: string) =>
-      calls.filter((c) => c.method === method && c.params.created.lt !== undefined).map((c) => c.params.created.gte!);
+      calls.filter((c) => c.method === method && isWindow(c, DAY)).map((c) => c.params.created.gte!);
     const expected = Array.from({ length: (TODAY - HISTORY_FROM) / DAY }, (_, i) => HISTORY_FROM + i * DAY);
     expect(backfillDays('subscriptions').sort()).toEqual(expected);
     expect(backfillDays('invoices').sort()).toEqual(expected);
@@ -106,10 +109,12 @@ describe('syncStripeAccount', () => {
 
     expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ first_attempt_succeeded: false, paid_at: later - 3600 });
     expect(calls.some((c) => c.method === 'invoices')).toBe(false);
-    expect(calls.find((c) => c.method === 'events')!.params).toMatchObject({
-      types: ['invoice.paid', 'invoice.payment_failed'],
-      created: { gte: NOW - DAY },
-    });
+    // с прошлого синка с запасом в час, часовыми окнами без пропусков до текущего момента
+    const eventWindows = calls.filter((c) => c.method === 'events').map((c) => c.params.created);
+    expect(calls.find((c) => c.method === 'events')!.params).toMatchObject({ types: ['invoice.paid', 'invoice.payment_failed'] });
+    expect(eventWindows[0]).toEqual({ gte: NOW - HOUR, lt: NOW });
+    expect(eventWindows.every((w, i) => i === 0 || w.gte === eventWindows[i - 1].lt)).toBe(true);
+    expect(eventWindows.at(-1)!.lt!).toBeGreaterThanOrEqual(later);
   });
 
   it('события по чужим подпискам и инвойсам без подписки пропускаются', async () => {
@@ -174,13 +179,27 @@ describe('syncStripeAccount', () => {
       created: { gte: HISTORY_FROM, lt: HISTORY_FROM + DAY },
       expand: ['data.customer.invoice_settings.default_payment_method'],
     });
-    expect(calls.filter((c) => c.method === 'charges' && c.params.created.lt !== undefined)).toHaveLength((TODAY - HISTORY_FROM) / DAY);
+    expect(calls.filter((c) => c.method === 'charges' && isWindow(c, DAY))).toHaveLength((TODAY - HISTORY_FROM) / DAY);
     expect(calls.some((c) => c.method === 'invoices')).toBe(false);
     expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ country: 'SA', payment_method: 'google_pay', card_brand: 'visa' });
     expect(store.getState('stripe', 'corp', 'details_version')).toBe(2);
 
     calls.length = 0;
     await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);
-    expect(calls.filter((c) => c.method === 'subscriptions')).toHaveLength(1); // второй раз — только свежие
+    expect(calls.filter((c) => c.method === 'subscriptions').every((c) => isWindow(c, HOUR))).toBe(true); // второй раз — только свежие
+  });
+
+  it('повторный синк сразу после предыдущего читает только последний час, а не сутки', async () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'details_version', 2);
+    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    for (const method of ['subscriptions', 'events', 'charges']) {
+      const windows = calls.filter((c) => c.method === method).map((c) => c.params.created);
+      expect(windows).toEqual([{ gte: NOW - 60 - HOUR, lt: NOW - 60 }, { gte: NOW - 60, lt: NOW - 60 + HOUR }]);
+    }
+    expect(calls.find((c) => c.method === 'refunds')!.params.created).toEqual({ gte: NOW - 60 - HOUR });
   });
 });
