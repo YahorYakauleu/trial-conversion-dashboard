@@ -86,6 +86,30 @@ describe('Store', () => {
     expect(store.subscriptionByFirstInvoice('stripe', 'in_x')).toBeNull();
   });
 
+  it('рядом с unix-секундами есть читаемые даты (UTC) — для просмотра базы глазами', () => {
+    const store = openStore(':memory:');
+    store.upsertTrial({ ...row, trial_started_at: 1788393385, trial_ended_at: 1788393385 + 7 * 86_400, paid_at: null }, 1788393385);
+    store.upsertAttempt({ provider: 'stripe', attempt_id: 'ch_1', subscription_id: 'sub_1', attempted_at: 1788393385, approved: true, reason: null, refunded: false });
+    store.finishRun(store.startRun('stripe', 'org', 'daily', 1788393385), 'ok', 1, null, 1788393445);
+    store.setState('stripe', 'org', 'cursor', 1788393385);
+    store.setState('stripe', 'org', 'details_version', 2);
+    const one = (sql: string) => ({ ...(store.db.prepare(sql).get() as object) });
+    expect(one('SELECT trial_started_utc, trial_ended_utc, paid_utc, synced_utc FROM trials')).toEqual({
+      trial_started_utc: '2026-09-02 23:56:25',
+      trial_ended_utc: '2026-09-09 23:56:25',
+      paid_utc: null,
+      synced_utc: '2026-09-02 23:56:25',
+    });
+    expect(one('SELECT attempted_utc FROM attempts')).toEqual({ attempted_utc: '2026-09-02 23:56:25' });
+    expect(one('SELECT started_utc, finished_utc FROM sync_runs')).toEqual({ started_utc: '2026-09-02 23:56:25', finished_utc: '2026-09-02 23:57:25' });
+    expect(store.db.prepare('SELECT key, value_utc FROM sync_state ORDER BY key').all().map((r) => ({ ...r }))).toEqual([
+      { key: 'cursor', value_utc: '2026-09-02 23:56:25' },
+      { key: 'details_version', value_utc: null }, // не время — даты нет
+    ]);
+    // в объектах приложения вычисляемых колонок нет
+    expect(Object.keys(store.getAttempts('stripe', 'sub_1')[0])).not.toContain('attempted_utc');
+  });
+
   it('старая база без колонок карты получает их при открытии', () => {
     const file = `/tmp/trial-dashboard-migration-${process.pid}.sqlite`;
     const legacy = new DatabaseSync(file);
@@ -96,6 +120,7 @@ describe('Store', () => {
     const store = openStore(file);
     store.upsertTrial({ ...row, bank: 'Capitec' });
     expect(store.getTrial('stripe', 'sub_1')?.bank).toBe('Capitec');
+    expect(({ ...(store.db.prepare('SELECT trial_started_utc FROM trials').get() as object) })).toEqual({ trial_started_utc: '1970-01-01 00:16:40' });
     store.db.close();
     rmSync(file, { force: true });
     rmSync(`${file}-wal`, { force: true });

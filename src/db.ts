@@ -46,6 +46,20 @@ export interface LatestRun {
 }
 
 export type Db = DatabaseSync;
+
+// Читаемые даты (UTC) рядом с unix-секундами — чтобы базу можно было смотреть глазами (DBeaver и т.п.).
+// Вычисляемые колонки: места не занимают, в коде приложения не используются.
+const READABLE_DATES: [table: string, column: string, expression: string][] = [
+  ['trials', 'trial_started_utc', "datetime(trial_started_at, 'unixepoch')"],
+  ['trials', 'trial_ended_utc', "datetime(trial_ended_at, 'unixepoch')"],
+  ['trials', 'paid_utc', "datetime(paid_at, 'unixepoch')"],
+  ['trials', 'synced_utc', "datetime(synced_at, 'unixepoch')"],
+  ['attempts', 'attempted_utc', "datetime(attempted_at, 'unixepoch')"],
+  ['sync_runs', 'started_utc', "datetime(started_at, 'unixepoch')"],
+  ['sync_runs', 'finished_utc', "datetime(finished_at, 'unixepoch')"],
+  // в sync_state лежат и моменты времени (курсоры), и просто числа (версия данных) — дату показываем только для первых
+  ['sync_state', 'value_utc', "CASE WHEN value > 1000000000 THEN datetime(value, 'unixepoch') END"],
+];
 export type Store = ReturnType<typeof openStore>;
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
@@ -107,6 +121,11 @@ export function openStore(file: string) {
     );
     CREATE INDEX IF NOT EXISTS attempts_subscription_idx ON attempts (provider, subscription_id);
   `);
+  for (const [table, column, expression] of READABLE_DATES) {
+    // table_xinfo, а не table_info: вычисляемые колонки table_info не показывает
+    const existing = (db.prepare(`PRAGMA table_xinfo(${table})`).all() as { name: string }[]).some((c) => c.name === column);
+    if (!existing) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT GENERATED ALWAYS AS (${expression}) VIRTUAL`);
+  }
 
   // Поля оплаты сливаются через COALESCE: повторная выгрузка без инвойса не стирает уже известную оплату.
   // Неудачная первая попытка необратима: события Stripe приходят в любом порядке, а ручная оплата
@@ -201,7 +220,10 @@ export function openStore(file: string) {
 
     getAttempts(provider: Provider, subscriptionId: string): AttemptRow[] {
       const rows = db
-        .prepare('SELECT * FROM attempts WHERE provider = ? AND subscription_id = ? ORDER BY attempted_at')
+        .prepare(
+          `SELECT provider, attempt_id, subscription_id, attempted_at, approved, reason, refunded
+           FROM attempts WHERE provider = ? AND subscription_id = ? ORDER BY attempted_at`,
+        )
         .all(provider, subscriptionId) as unknown as (Omit<AttemptRow, 'approved' | 'refunded'> & { approved: number; refunded: number })[];
       return rows.map((r) => ({ ...r, approved: r.approved === 1, refunded: r.refunded === 1 }));
     },
