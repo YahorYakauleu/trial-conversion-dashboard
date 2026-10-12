@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SgSubscription } from '../src/providers/solidgate-client.js';
-import { parseSgDate, trialFromSolidgate } from '../src/providers/solidgate.js';
+import { orderCardCountry, parseSgDate, trialFromSolidgate } from '../src/providers/solidgate.js';
 
 const T0 = '2026-10-01 10:00:00';
 const T_END = '2026-10-04 10:00:00'; // 3 дня = 4320 минут
@@ -43,6 +43,14 @@ describe('parseSgDate', () => {
   });
 });
 
+describe('orderCardCountry', () => {
+  it('страна карты из транзакции, трёхбуквенный код → двухбуквенный', () => {
+    expect(orderCardCountry({ order_id: 'o', transactions: [{ card: { country: 'ZAF' } }] })).toBe('ZA');
+    expect(orderCardCountry({ order_id: 'o', transactions: { t1: {}, t2: { card: { country: 'USA' } } } })).toBe('US');
+    expect(orderCardCountry({ order_id: 'o', geo_country: 'USA' })).toBeNull(); // гео — не страна карты
+  });
+});
+
 describe('trialFromSolidgate', () => {
   it('null без триала', () => {
     expect(trialFromSolidgate(sub({}, { trial: false }), 'sgH2H')).toBeNull();
@@ -59,6 +67,7 @@ describe('trialFromSolidgate', () => {
       first_invoice_id: null,
       first_attempt_succeeded: null,
       paid_at: null,
+      country: null,
     });
   });
 
@@ -138,6 +147,7 @@ describe('trialFromSolidgate', () => {
       first_invoice_id: 'i',
       first_attempt_succeeded: null,
       paid_at: null,
+      country: null,
     });
   });
 

@@ -29,6 +29,7 @@ const trial: TrialRow = {
   first_invoice_id: null,
   first_attempt_succeeded: null,
   paid_at: null,
+  country: null,
 };
 
 describe('trialFromSubscription', () => {
@@ -39,6 +40,16 @@ describe('trialFromSubscription', () => {
 
   it('строка триала с пустыми полями оплаты', () => {
     expect(trialFromSubscription(sub({ trial_start: 1_000, trial_end: 10_000 }), 'org')).toEqual(trial);
+  });
+
+  it('страна карты — из карты клиента по умолчанию (развёрнутой в списке) или карты подписки', () => {
+    const withTrial = { trial_start: 1_000, trial_end: 10_000 };
+    const customer = { id: 'cus', invoice_settings: { default_payment_method: { card: { country: 'sa' } } } };
+    expect(trialFromSubscription(sub({ ...withTrial, customer } as never), 'corp')?.country).toBe('SA');
+    expect(
+      trialFromSubscription(sub({ ...withTrial, customer, default_payment_method: { card: { country: 'GB' } } } as never), 'corp')?.country,
+    ).toBe('GB');
+    expect(trialFromSubscription(sub({ ...withTrial, customer: 'cus_not_expanded' } as never), 'corp')?.country).toBeNull();
   });
 });
 

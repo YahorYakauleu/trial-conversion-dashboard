@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type RequestHandler } from 'express';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
-import { getMetrics, resolveRange, type Granularity, type ProviderFilter } from './metrics.js';
+import { getCountries, getMetrics, resolveRange, type Granularity, type ProviderFilter } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
 import { localDay } from './time.js';
 
@@ -23,24 +23,21 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(express.static(PUBLIC_DIR));
 
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
-  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom). Дни — местные сутки в config.timeZone.
+  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&country=all|none|US… Дни — местные сутки в config.timeZone.
+  //  countries — разбивка за период по всем странам (без фильтра страны), чтобы было из чего выбирать.
   app.get('/api/metrics', (req, res) => {
     const now = nowSec();
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
     const granularity = GRANULARITIES.find((g) => g === req.query.granularity) ?? 'day';
+    const rawCountry = typeof req.query.country === 'string' ? req.query.country.toUpperCase() : '';
+    const country = /^[A-Z]{2}$/.test(rawCountry) ? rawCountry : rawCountry === 'NONE' ? 'none' : 'all';
     const range = resolveRange(config.historyFrom, now, config.timeZone, {
       period: req.query.period,
       from: req.query.from,
       to: req.query.to,
     });
-    const { totals, series } = getMetrics(store.db, {
-      provider,
-      granularity,
-      now,
-      ...range,
-      timeZone: config.timeZone,
-      retryWindowDays: config.retryWindowDays,
-    });
+    const options = { provider, now, ...range, timeZone: config.timeZone, retryWindowDays: config.retryWindowDays };
+    const { totals, series } = getMetrics(store.db, { ...options, granularity, country });
     res.json({
       generated_at: now,
       retry_window_days: config.retryWindowDays,
@@ -48,6 +45,8 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       history_from: localDay(config.historyFrom, config.timeZone),
       today: localDay(now, config.timeZone),
       range,
+      country,
+      countries: getCountries(store.db, options),
       sync_running: isSyncRunning(),
       sync: store.latestRuns(),
       totals,

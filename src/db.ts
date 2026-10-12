@@ -13,6 +13,7 @@ export interface TrialRow {
   first_invoice_id: string | null;
   first_attempt_succeeded: boolean | null;
   paid_at: number | null;
+  country: string | null; // страна карты, двухбуквенный код (US, GB, …)
 }
 
 export interface LatestRun {
@@ -65,15 +66,19 @@ export function openStore(file: string) {
       PRIMARY KEY (provider, account, key)
     );
   `);
+  // Колонка страны появилась позже — добавляем в уже существующую базу
+  const columns = db.prepare('PRAGMA table_info(trials)').all() as { name: string }[];
+  if (!columns.some((c) => c.name === 'country')) db.exec('ALTER TABLE trials ADD COLUMN country TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS trials_started_idx ON trials (trial_started_at)');
 
   // Поля оплаты сливаются через COALESCE: повторная выгрузка без инвойса не стирает уже известную оплату.
   // Неудачная первая попытка необратима: события Stripe приходят в любом порядке, а ручная оплата
   // после отказа выглядит как успешный инвойс с attempt_count = 1.
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
-                        first_invoice_id, first_attempt_succeeded, paid_at, synced_at)
+                        first_invoice_id, first_attempt_succeeded, paid_at, country, synced_at)
     VALUES (@provider, @account, @subscription_id, @trial_started_at, @trial_ended_at,
-            @first_invoice_id, @first_attempt_succeeded, @paid_at, @synced_at)
+            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @synced_at)
     ON CONFLICT (provider, subscription_id) DO UPDATE SET
       account = excluded.account,
       trial_started_at = excluded.trial_started_at,
@@ -82,8 +87,13 @@ export function openStore(file: string) {
       first_attempt_succeeded = CASE WHEN trials.first_attempt_succeeded = 0 THEN 0
                                      ELSE COALESCE(excluded.first_attempt_succeeded, trials.first_attempt_succeeded) END,
       paid_at = COALESCE(excluded.paid_at, trials.paid_at),
+      country = COALESCE(excluded.country, trials.country),
       synced_at = excluded.synced_at
   `);
+  // Страна из отдельного источника (заказы Solidgate) — только если её ещё нет
+  const updateCountry = db.prepare(
+    'UPDATE trials SET country = ? WHERE provider = ? AND subscription_id = ? AND country IS NULL',
+  );
   const selectTrial = db.prepare('SELECT * FROM trials WHERE provider = ? AND subscription_id = ?');
   const selectState = db.prepare('SELECT value FROM sync_state WHERE provider = ? AND account = ? AND key = ?');
   const upsertState = db.prepare(`
@@ -105,8 +115,13 @@ export function openStore(file: string) {
         first_invoice_id: row.first_invoice_id,
         first_attempt_succeeded: row.first_attempt_succeeded === null ? null : Number(row.first_attempt_succeeded),
         paid_at: row.paid_at,
+        country: row.country,
         synced_at: now,
       });
+    },
+
+    setCountry(provider: Provider, subscriptionId: string, country: string): boolean {
+      return Number(updateCountry.run(country, provider, subscriptionId).changes) > 0;
     },
 
     getTrial(provider: Provider, subscriptionId: string): TrialRow | null {
@@ -123,6 +138,7 @@ export function openStore(file: string) {
         first_invoice_id: r.first_invoice_id,
         first_attempt_succeeded: r.first_attempt_succeeded === null ? null : r.first_attempt_succeeded === 1,
         paid_at: r.paid_at,
+        country: r.country,
       };
     },
 

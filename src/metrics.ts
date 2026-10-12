@@ -30,11 +30,44 @@ export interface Point extends Totals {
 export interface MetricsOptions {
   provider: ProviderFilter;
   granularity: Granularity;
+  country: string; // 'all', двухбуквенный код или 'none' (страна не определена)
   now: number;
   from: string; // первый день периода (YYYY-MM-DD, местные сутки)
   to: string; // последний день периода включительно
   timeZone: string;
   retryWindowDays: number;
+}
+
+export interface CountryRow extends Totals {
+  country: string | null;
+}
+
+type RangeOptions = Omit<MetricsOptions, 'granularity' | 'country'>;
+
+// Общий фильтр по периоду (местные сутки), провайдеру и стране
+function rangeFilter(o: RangeOptions & { country?: string }) {
+  return {
+    params: {
+      from: localMidnight(o.from, o.timeZone),
+      until: localMidnight(addDays(o.to, 1), o.timeZone),
+      provider: o.provider,
+      country: o.country ?? 'all',
+    },
+    sql: `trial_started_at >= @from AND trial_started_at < @until
+          AND (@provider = 'all' OR provider = @provider)
+          AND (@country = 'all' OR (@country = 'none' AND country IS NULL) OR country = @country)`,
+  };
+}
+
+const PAID_COLUMNS = `COUNT(*) AS started,
+  SUM(CASE WHEN first_attempt_succeeded = 1 THEN 1 ELSE 0 END) AS paid_first,
+  SUM(CASE WHEN paid_at IS NOT NULL AND paid_at <= trial_ended_at + @window THEN 1 ELSE 0 END) AS paid_retry`;
+
+function maxTrialLength(db: Db, filter: ReturnType<typeof rangeFilter>): number {
+  const r = db
+    .prepare(`SELECT COALESCE(MAX(trial_ended_at - trial_started_at), 0) AS max_len FROM trials WHERE ${filter.sql}`)
+    .get(filter.params) as { max_len: number };
+  return r.max_len;
 }
 
 export const startOfUtcDay = (ts: number) => Math.floor(ts / DAY) * DAY;
@@ -82,23 +115,10 @@ export function getMetrics(db: Db, o: MetricsOptions): { totals: Totals; series:
 }
 
 function dailyPoints(db: Db, o: MetricsOptions): Point[] {
-  const params = {
-    from: localMidnight(o.from, o.timeZone),
-    until: localMidnight(addDays(o.to, 1), o.timeZone),
-    provider: o.provider,
-  };
-  const filter = `trial_started_at >= @from AND trial_started_at < @until AND (@provider = 'all' OR provider = @provider)`;
-
+  const filter = rangeFilter(o);
   const buckets = db
-    .prepare(
-      `SELECT (trial_started_at / ${BUCKET}) * ${BUCKET} AS bucket,
-              COUNT(*) AS started,
-              SUM(CASE WHEN first_attempt_succeeded = 1 THEN 1 ELSE 0 END) AS paid_first,
-              SUM(CASE WHEN paid_at IS NOT NULL AND paid_at <= trial_ended_at + @window THEN 1 ELSE 0 END) AS paid_retry
-       FROM trials WHERE ${filter}
-       GROUP BY bucket`,
-    )
-    .all({ ...params, window: o.retryWindowDays * DAY }) as unknown as {
+    .prepare(`SELECT (trial_started_at / ${BUCKET}) * ${BUCKET} AS bucket, ${PAID_COLUMNS} FROM trials WHERE ${filter.sql} GROUP BY bucket`)
+    .all({ ...filter.params, window: o.retryWindowDays * DAY }) as unknown as {
     bucket: number;
     started: number;
     paid_first: number;
@@ -115,14 +135,12 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
   }
 
   // День окончателен, когда даже самый длинный его триал закончился и прошло окно ожидания оплаты
-  const { max_len: maxTrialLength } = db
-    .prepare(`SELECT COALESCE(MAX(trial_ended_at - trial_started_at), 0) AS max_len FROM trials WHERE ${filter}`)
-    .get(params) as { max_len: number };
+  const maxLength = maxTrialLength(db, filter);
 
   const points: Point[] = [];
   for (let day = o.from; day <= o.to; day = addDays(day, 1)) {
     const r = byDay.get(day) ?? { started: 0, paid_first: 0, paid_retry: 0 };
-    const lastTrialEnd = localMidnight(addDays(day, 1), o.timeZone) + maxTrialLength;
+    const lastTrialEnd = localMidnight(addDays(day, 1), o.timeZone) + maxLength;
     points.push(
       withRates({
         period: day,
@@ -138,6 +156,30 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
     );
   }
   return points;
+}
+
+// Разбивка по странам за период: по убыванию числа триалов; «окончательность» — как у итога за период
+export function getCountries(db: Db, o: RangeOptions): CountryRow[] {
+  const filter = rangeFilter(o);
+  const rows = db
+    .prepare(
+      `SELECT country, ${PAID_COLUMNS} FROM trials WHERE ${filter.sql}
+       GROUP BY country ORDER BY started DESC, country IS NULL, country`,
+    )
+    .all({ ...filter.params, window: o.retryWindowDays * DAY }) as unknown as Omit<CountryRow, 'rate_first' | 'rate_retry' | 'final_first' | 'final_retry'>[];
+  const lastTrialEnd = localMidnight(addDays(o.to, 1), o.timeZone) + maxTrialLength(db, filter);
+  return rows.map((r) =>
+    withRates({
+      country: r.country,
+      started: r.started,
+      paid_first: r.paid_first,
+      paid_retry: r.paid_retry,
+      rate_first: null,
+      rate_retry: null,
+      final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,
+      final_retry: lastTrialEnd + o.retryWindowDays * DAY <= o.now,
+    }),
+  );
 }
 
 // Неделя — ISO (с понедельника), месяц — календарный; края, обрезанные периодом, подписаны его днями

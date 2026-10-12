@@ -42,6 +42,9 @@
     th { color: var(--muted); font-weight: 500; }
     th:first-child, td:first-child { text-align: left; }
     .pending { color: var(--muted); }
+    tr.link { cursor: pointer; }
+    tr.link:hover td { background: var(--card); }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -59,8 +62,9 @@
       <button data-v="all">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
     </div>
     <div class="seg" id="granularity">
-      <button data-v="day">По дням</button><button data-v="week">По неделям</button><button data-v="month">По месяцам</button>
+      <button data-v="day">По дням</button><button data-v="week">По неделям</button><button data-v="month">По месяцам</button><button data-v="country">По странам</button>
     </div>
+    <select id="country" aria-label="Страна"></select>
     <div class="period">
       <select id="preset" aria-label="Период">
         <option value="last7">Последние 7 дней</option>
@@ -86,8 +90,8 @@
     </table>
   </div>
 
-  <div class="chart"><canvas id="chart" aria-label="Конверсия триалов в платные по дню оформления триала"></canvas></div>
-  <div class="legend muted">
+  <div class="chart" id="chart-box"><canvas id="chart" aria-label="Конверсия триалов в платные по дню оформления триала"></canvas></div>
+  <div class="legend muted" id="legend">
     <span><span class="swatch" style="background: var(--retry)"></span>Сконвертилось</span>
     <span><span class="swatch" style="background: var(--first)"></span>С первой попытки</span>
     <span><span class="swatch" style="background: var(--bar); height: 10px; width: 10px"></span>Оформлено триалов</span>
@@ -105,7 +109,8 @@
   const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
   const state = {
     provider: pick(params.get('provider'), ['all', 'stripe', 'solidgate'], 'all'),
-    granularity: pick(params.get('granularity'), ['day', 'week', 'month'], 'day'),
+    granularity: pick(params.get('granularity'), ['day', 'week', 'month', 'country'], 'day'),
+    country: /^([A-Z]{2}|none)$/.test(params.get('country') ?? '') ? params.get('country') : 'all',
     preset: pick(params.get('period'), PRESETS, params.get('from') ? 'custom' : 'all'),
     from: params.get('from') ?? '',
     to: params.get('to') ?? '',
@@ -129,14 +134,29 @@
   const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
   const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
   const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
+  const regionNames = new Intl.DisplayNames(['ru'], { type: 'region' });
+  const countryName = (code) => {
+    if (!code || code === 'none') return 'Не определена';
+    try {
+      return `${regionNames.of(code)} (${code})`;
+    } catch {
+      return code;
+    }
+  };
 
-  function syncUrl() {
+  // Параметры запроса и адреса страницы; режим «По странам» берёт разбивку из того же ответа
+  function query() {
     const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, period: state.preset });
     if (state.preset === 'custom') {
       q.set('from', state.from);
       q.set('to', state.to);
     }
-    history.replaceState(null, '', `${location.pathname}?${q}`);
+    if (state.country !== 'all') q.set('country', state.country);
+    return q;
+  }
+
+  function syncUrl() {
+    history.replaceState(null, '', `${location.pathname}?${query()}`);
   }
 
   async function load() {
@@ -144,19 +164,23 @@
     syncUrl();
     try {
       // Пресет («последние 7 дней» и т.п.) разбирает сервер — по «сегодня» в часовом поясе дашборда
-      const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, period: state.preset });
-      if (state.preset === 'custom') {
-        q.set('from', state.from);
-        q.set('to', state.to);
-      }
+      const q = query();
+      if (state.granularity === 'country') q.set('granularity', 'day');
       const res = await api(`/api/metrics?${q}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       renderControls(data);
       renderStatus(data);
       renderCards(data.totals, data.range);
-      renderTable(data.series);
-      renderChart(data.series);
+      const byCountry = state.granularity === 'country';
+      document.getElementById('chart-box').hidden = byCountry;
+      document.getElementById('legend').hidden = byCountry;
+      if (byCountry) {
+        renderCountryTable(data.countries);
+      } else {
+        renderTable(data.series);
+        renderChart(data.series);
+      }
       if (data.sync_running) pollTimer = setTimeout(load, 10_000);
     } catch (error) {
       document.getElementById('status').innerHTML = `<span class="err">Не удалось загрузить данные: ${esc(error.message)}</span>`;
@@ -177,7 +201,17 @@
       input.value = data.range[id];
     }
     document.getElementById('period-head').textContent =
-      { day: 'Дата оформления', week: 'Неделя оформления', month: 'Месяц оформления' }[state.granularity];
+      { day: 'Дата оформления', week: 'Неделя оформления', month: 'Месяц оформления', country: 'Страна карты' }[state.granularity];
+
+    // Страны за выбранный период, по убыванию числа триалов; выбранная остаётся в списке, даже если в периоде её нет
+    const select = document.getElementById('country');
+    const codes = data.countries.map((c) => c.country ?? 'none');
+    if (state.country !== 'all' && !codes.includes(state.country)) codes.push(state.country);
+    select.innerHTML = ['<option value="all">Все страны</option>']
+      .concat(codes.map((code) => `<option value="${code}">${esc(countryName(code))}</option>`))
+      .join('');
+    select.value = state.country;
+    select.hidden = state.granularity === 'country';
   }
 
   // Под заголовком — только ошибки синка; когда всё в порядке, строка пустая
@@ -219,6 +253,17 @@
       .map(
         (p) =>
           `<tr><td>${rowLabel(p)}</td><td>${num(p.started)}</td>${cell(p.paid_retry, p.rate_retry, p.final_retry)}${cell(p.paid_first, p.rate_first, p.final_first)}</tr>`,
+      )
+      .join('');
+  }
+
+  // Режим «По странам»: клик по строке — динамика этой страны по дням
+  function renderCountryTable(countries) {
+    const cell = (n, r, final) => `<td class="${final ? '' : 'pending'}">${final ? '' : '≈ '}${num(n)} (${pct(r)})</td>`;
+    document.getElementById('rows').innerHTML = countries
+      .map(
+        (c) =>
+          `<tr class="link" data-country="${c.country ?? 'none'}"><td>${esc(countryName(c.country))}</td><td>${num(c.started)}</td>${cell(c.paid_retry, c.rate_retry, c.final_retry)}${cell(c.paid_first, c.rate_first, c.final_first)}</tr>`,
       )
       .join('');
   }
@@ -272,9 +317,23 @@
       const value = event.target.dataset?.v;
       if (!value) return;
       state[id] = value;
+      if (value === 'country') state.country = 'all'; // разбивка — по всем странам
       load();
     });
   }
+
+  document.getElementById('country').addEventListener('change', (event) => {
+    state.country = event.target.value;
+    load();
+  });
+
+  document.getElementById('rows').addEventListener('click', (event) => {
+    const row = event.target.closest('tr[data-country]');
+    if (!row) return;
+    state.country = row.dataset.country;
+    state.granularity = 'day';
+    load();
+  });
 
   document.getElementById('preset').addEventListener('change', (event) => {
     state.preset = event.target.value;

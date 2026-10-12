@@ -132,4 +132,28 @@ describe('syncStripeAccount', () => {
     await syncStripeAccount(store, client, 'org', cfg, NOW);
     expect(calls.filter((c) => c.method === 'subscriptions')[0].params.created.gte).toBe(TODAY - 2 * DAY);
   });
+
+  it('база без стран: один раз проходит подписки с HISTORY_FROM (с картой клиента), инвойсы не трогает', async () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - 3600);
+    const withCard = {
+      ...subscription,
+      customer: { id: 'cus_1', invoice_settings: { default_payment_method: { card: { country: 'SA' } } } },
+    };
+    const { client, calls } = fakeStripe({ subs: [withCard], invoices: [], events: [] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    const subsCalls = calls.filter((c) => c.method === 'subscriptions');
+    expect(subsCalls[0].params).toMatchObject({
+      created: { gte: HISTORY_FROM, lt: HISTORY_FROM + DAY },
+      expand: ['data.customer.invoice_settings.default_payment_method'],
+    });
+    expect(calls.some((c) => c.method === 'invoices')).toBe(false);
+    expect(store.getTrial('stripe', 'sub_1')?.country).toBe('SA');
+    expect(store.getState('stripe', 'corp', 'country_done')).toBe(1);
+
+    calls.length = 0;
+    await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);
+    expect(calls.filter((c) => c.method === 'subscriptions')).toHaveLength(1); // второй раз — только свежие
+  });
 });

@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { toAlpha2 } from '../countries.js';
 import type { Store, TrialRow } from '../db.js';
 import { forEachDay } from '../days.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
@@ -15,6 +16,8 @@ const PARALLEL_DAYS = 4;
 // Всё, что создано позже суток после конца триала, — уже не первый платный инвойс.
 const FIRST_INVOICE_TOLERANCE = 3_600;
 const FIRST_INVOICE_MAX_DELAY = DAY;
+// Подписки Toggle не хранят карту — она висит на клиенте; разворачиваем её прямо в списке, без лишних запросов
+const SUBSCRIPTION_EXPAND = ['data.customer.invoice_settings.default_payment_method'];
 // Первая автоматическая попытка идёт сразу при финализации инвойса. Оплата сильно позже —
 // это ретрай или ручная оплата после отказа (последняя не увеличивает attempt_count).
 const FIRST_ATTEMPT_MAX_DELAY = 3_600;
@@ -30,7 +33,17 @@ export function trialFromSubscription(sub: Stripe.Subscription, account: string)
     first_invoice_id: null,
     first_attempt_succeeded: null,
     paid_at: null,
+    country: cardCountry(sub),
   };
+}
+
+// Страна карты: карта подписки, иначе карта клиента по умолчанию (если развёрнуты в ответе)
+function cardCountry(sub: Stripe.Subscription): string | null {
+  const own = typeof sub.default_payment_method === 'object' ? sub.default_payment_method : null;
+  const customer = typeof sub.customer === 'object' && !sub.customer.deleted ? sub.customer : null;
+  const customerDefault = customer?.invoice_settings?.default_payment_method;
+  const fromCustomer = typeof customerDefault === 'object' ? customerDefault : null;
+  return toAlpha2((own ?? fromCustomer)?.card?.country);
 }
 
 export function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
@@ -97,20 +110,24 @@ export async function syncStripeAccount(
     items++;
   };
 
-  if (cursor === null) {
-    // Сначала все подписки (триалы), потом инвойсы — инвойс применяется только к уже известному триалу
-    await forEachDay(
-      store.getState('stripe', account, 'subs_day') ?? cfg.historyFrom,
+  // Все подписки (триалы) с HISTORY_FROM; прогресс по дням хранится под progressKey
+  const subscriptionsPass = (progressKey: string) =>
+    forEachDay(
+      store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       today,
       PARALLEL_DAYS,
       async (day) => {
-        for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
-          saveSubscription(sub);
-        }
+        const params = { status: 'all' as const, created: { gte: day, lt: day + DAY }, limit: 100, expand: SUBSCRIPTION_EXPAND };
+        for await (const sub of stripe.subscriptions.list(params)) saveSubscription(sub);
         console.log(`[stripe:${account}] подписки ${dayKey(day)} готово`);
       },
-      (next) => store.setState('stripe', account, 'subs_day', next),
+      (next) => store.setState('stripe', account, progressKey, next),
     );
+
+  if (cursor === null) {
+    // Сначала все подписки (триалы), потом инвойсы — инвойс применяется только к уже известному триалу
+    await subscriptionsPass('subs_day');
+    store.setState('stripe', account, 'country_done', 1);
 
     await forEachDay(
       store.getState('stripe', account, 'invoices_day') ?? cfg.historyFrom,
@@ -126,8 +143,14 @@ export async function syncStripeAccount(
     );
   }
 
+  // База выгружена до появления стран — один раз проходим подписки заново, без инвойсов
+  if (cursor !== null && store.getState('stripe', account, 'country_done') === null) {
+    await subscriptionsPass('country_day');
+    store.setState('stripe', account, 'country_done', 1);
+  }
+
   const since = (cursor ?? today) - DAY;
-  for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: since }, limit: 100 })) {
+  for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: since }, limit: 100, expand: SUBSCRIPTION_EXPAND })) {
     saveSubscription(sub);
   }
   for await (const event of stripe.events.list({

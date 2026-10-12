@@ -10,6 +10,7 @@ const row: TrialRow = {
   first_invoice_id: null,
   first_attempt_succeeded: null,
   paid_at: null,
+  country: null,
 };
 
 describe('Store', () => {
@@ -38,6 +39,17 @@ describe('Store', () => {
     store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: false });
     store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: true, paid_at: 2_500 });
     expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ first_attempt_succeeded: false, paid_at: 2_500 });
+  });
+
+  it('страна: известная не стирается пустой; setCountry — только если страны ещё нет', () => {
+    const store = openStore(':memory:');
+    store.upsertTrial({ ...row, country: 'US' });
+    store.upsertTrial(row);
+    expect(store.getTrial('stripe', 'sub_1')?.country).toBe('US');
+    expect(store.setCountry('stripe', 'sub_1', 'GB')).toBe(false);
+    store.upsertTrial({ ...row, subscription_id: 'sub_2' });
+    expect(store.setCountry('stripe', 'sub_2', 'GB')).toBe(true);
+    expect(store.getTrial('stripe', 'sub_2')?.country).toBe('GB');
   });
 
   it('getTrial возвращает null для неизвестной подписки', () => {

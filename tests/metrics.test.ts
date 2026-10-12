@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type TrialRow } from '../src/db.js';
-import { DAY, getMetrics, resolveRange } from '../src/metrics.js';
+import { DAY, getCountries, getMetrics, resolveRange } from '../src/metrics.js';
 
 // «Сегодня» = понедельник 2026-10-12, история с 1 сентября, триалы по 7 дней, окно ретраев 30 дней
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -14,6 +14,7 @@ const opts = {
   from: '2026-09-01',
   to: '2026-10-11',
   timeZone: 'UTC',
+  country: 'all',
   retryWindowDays: 30,
 };
 
@@ -29,6 +30,7 @@ function trial(startedIso: string, patch: Partial<TrialRow> = {}): TrialRow {
     first_invoice_id: null,
     first_attempt_succeeded: null,
     paid_at: null,
+    country: 'US',
     ...patch,
   };
 }
@@ -149,6 +151,38 @@ describe('getMetrics — недели, месяцы, итоги', () => {
       final_retry: true,
     });
     expect(getMetrics(store.db, opts).totals).toMatchObject({ started: 4, final_first: false, final_retry: false });
+  });
+});
+
+describe('страны', () => {
+  const s = '2026-10-01T12:00:00Z';
+  const paid = { first_invoice_id: 'in', first_attempt_succeeded: true, paid_at: ts(s) + 7 * DAY + 60 };
+  const rows = () => [
+    trial(s, { country: 'US', ...paid }),
+    trial(s, { country: 'US' }),
+    trial(s, { country: 'SA', ...paid }),
+    trial(s, { country: null }),
+    trial(s, { country: 'GB', provider: 'solidgate', account: 'sgH2H' }),
+  ];
+
+  it('фильтр страны применяется к ряду и итогам; none — страна не определена', () => {
+    const store = storeWith(rows());
+    expect(getMetrics(store.db, { ...opts, country: 'US' }).totals).toMatchObject({ started: 2, paid_first: 1, rate_first: 0.5 });
+    expect(getMetrics(store.db, { ...opts, country: 'none' }).totals.started).toBe(1);
+    expect(getMetrics(store.db, opts).totals.started).toBe(5);
+  });
+
+  it('разбивка по странам: по убыванию числа триалов, с учётом провайдера и периода', () => {
+    const store = storeWith([...rows(), trial('2026-09-15T12:00:00Z', { country: 'FR' })]);
+    const range = { ...opts, from: '2026-10-01', to: '2026-10-11' };
+    expect(getCountries(store.db, range).map((c) => [c.country, c.started, c.paid_retry])).toEqual([
+      ['US', 2, 1],
+      ['GB', 1, 0],
+      ['SA', 1, 1],
+      [null, 1, 0],
+    ]);
+    expect(getCountries(store.db, { ...range, provider: 'solidgate' }).map((c) => c.country)).toEqual(['GB']);
+    expect(getCountries(store.db, range)[0]).toMatchObject({ rate_retry: 0.5, final_first: false, final_retry: false });
   });
 });
 

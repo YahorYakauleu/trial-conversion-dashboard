@@ -47,6 +47,31 @@ describe('server', () => {
     });
     expect(body.series).toHaveLength(1);
     expect(body.series[0]).toMatchObject({ period: '2026-09-10', period_end: '2026-09-20' });
+    expect(body).toMatchObject({ country: 'all', countries: [] });
+  });
+
+  it('/api/metrics: фильтр страны и разбивка по странам', async () => {
+    const store = openStore(':memory:');
+    const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    for (const [id, country] of [['a', 'US'], ['b', 'US'], ['c', null]] as const) {
+      store.upsertTrial({
+        provider: 'stripe', account: 'corp', subscription_id: id, trial_started_at: started, trial_ended_at: started + 7 * 86_400,
+        first_invoice_id: null, first_attempt_succeeded: null, paid_at: null, country,
+      });
+    }
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const get = async (q: string) => (await fetch(`${url}/api/metrics?period=custom&from=2026-09-10&to=2026-09-10&${q}`, { headers: auth })).json();
+
+    expect((await get('country=us')).totals.started).toBe(2);
+    expect((await get('country=none')).totals.started).toBe(1);
+    expect((await get('country=<script>')).country).toBe('all');
+    expect((await get('')).countries.map((c: { country: string | null; started: number }) => [c.country, c.started])).toEqual([
+      ['US', 2],
+      [null, 1],
+    ]);
   });
 
   it('/api/sync: 202, а во время синка — 409', async () => {
