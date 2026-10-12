@@ -36,8 +36,8 @@
 - **rate_first = paid_first / ended**, **rate_retry = paid_retry / ended**. Для «Все» числитель и знаменатель суммируются по провайдерам; проценты не усредняются.
 - **Окончательность цифры:**
   - rate_first окончательна, когда D + 2 дня ≤ сегодня (первая попытка проходит в течение суток после конца триала);
-  - rate_retry окончательна, когда D + `RETRY_WINDOW_DAYS` ≤ сегодня.
-- **Неделя** — ISO-неделя (с понедельника, UTC). Цифра за неделю окончательна, когда окончательны все её дни.
+  - rate_retry окончательна, когда D + `RETRY_WINDOW_DAYS` + 1 ≤ сегодня (последний триал дня D заканчивается в 23:59, и ему тоже нужно полное окно).
+- **Неделя** — ISO-неделя (с понедельника, UTC). Цифра за неделю окончательна, когда окончательны все её дни. Первая неполная неделя в начале истории не показывается, чтобы не занижать `ended`.
 
 ## 4. Архитектура
 
@@ -80,17 +80,17 @@ trial-conversion-dashboard/
 | поле | тип | смысл |
 |---|---|---|
 | `provider` | `'stripe' \| 'solidgate'` | |
-| `account` | string | `org`, `corp`, … для Stripe; `sg` для Solidgate |
+| `account` | string | `org`, `corp`, … для Stripe; `sg`, `sgH2H` для Solidgate |
 | `subscription_id` | string | id подписки у провайдера |
-| `trial_started_at` | ISO UTC | |
-| `trial_ended_at` | ISO UTC | плановый конец триала на момент выгрузки |
+| `trial_started_at` | unix-секунды (UTC) | |
+| `trial_ended_at` | unix-секунды (UTC) | плановый конец триала на момент выгрузки |
 | `first_invoice_id` | string \| null | первый платный инвойс, если уже создан |
-| `first_attempt_succeeded` | boolean \| null | `null`, пока первой попытки не было |
-| `paid_at` | ISO UTC \| null | когда первый платный инвойс оплачен |
+| `first_attempt_succeeded` | boolean \| null | `null`, пока первой попытки не было (или она ещё в процессе) |
+| `paid_at` | unix-секунды \| null | когда первый платный инвойс оплачен |
 
 ### Схема SQLite
 
-- `trials` — колонки TrialRow + `synced_at`; первичный ключ `(provider, subscription_id)`; индекс по `trial_ended_at`.
+- `trials` — колонки TrialRow + `synced_at`; первичный ключ `(provider, subscription_id)`; индекс по `trial_ended_at`. При upsert поля оплаты сливаются через `COALESCE`: повторная выгрузка без данных об оплате не стирает уже известные.
 - `sync_runs` — `id, provider, account, kind ('backfill'|'daily'), started_at, finished_at, status ('running'|'ok'|'error'), error, items`.
 - `sync_state` — `(provider, account, key) → value`: курсор ежедневного синка и прогресс бэкфилла (последний обработанный день).
 
@@ -102,7 +102,7 @@ Email, имена и данные карт не хранятся.
 
 ### Stripe (на каждый аккаунт из `STRIPE_KEYS`)
 
-Ключ — restricted, read-only: Subscriptions, Invoices, Events.
+Ключ — restricted, read-only: Subscriptions, Invoices, Events. SDK `stripe@18` с API `2025-08-27.basil`, как в workflow-service. В basil id подписки у инвойса лежит в `parent.subscription_details.subscription`; события могут прийти в старой версии API, поэтому читаем и `invoice.subscription`.
 
 **Бэкфилл**
 1. `GET /v1/subscriptions?status=all&created[gte]&created[lt]` по дням за `HISTORY_DAYS + TRIAL_LOOKBACK_DAYS` (по умолчанию 90 + 31). Берём только подписки с непустыми `trial_start` и `trial_end`. Строки с `trial_end` в будущем тоже сохраняем: это триалы, которые ещё идут.
@@ -121,16 +121,16 @@ Email, имена и данные карт не хранятся.
 
 ### Solidgate
 
-Ключи — live merchant (public) key и secret key с доступом к Reports API.
+Мерчантов несколько, как в workflow-service: `sg` (платёжная форма) и `sgH2H` (wallet, host-to-host). Для каждого — live public и secret key с доступом к Reports API.
 
 **Бэкфилл и ежедневно**
-1. Reports API: отчёт по подпискам за период по `updated_at`, с пагинацией. Бэкфилл — за `HISTORY_DAYS + TRIAL_LOOKBACK_DAYS`, ежедневно — с `курсор − 1 день`.
-2. Берём подписки с триалом: `trial_started_at` и `trial_ended_at` из подписки (или `product.trial` + `trial_period`).
+1. Reports API v1: `POST https://reports.solidgate.com/api/v1/subscriptions` с `filter: updated_at`, пагинация через `next_page_iterator`, подпись как в workflow-service. Отчёт отдаёт подписку вместе с `invoices` → `orders` (`status`, `retry_attempt`, `processed_at`). Окна по 1 дню: бэкфилл — за `HISTORY_DAYS + TRIAL_LOOKBACK_DAYS`, ежедневно — с `курсор − 1 день`.
+2. Берём подписки с триалом: `product.trial = true` и `product.trial_period > 0` (минуты). `trial_started_at = started_at`, `trial_ended_at = started_at + trial_period`. Единицы и смысл полей подтверждаются на живых данных скриптом разведки до написания нормализатора.
 3. Первый платный инвойс — первый инвойс с `billing_period_started_at ≥ trial_ended_at` и `amount > 0`.
    - `first_attempt_succeeded` — самая ранняя попытка оплаты (order) этого инвойса успешна.
    - `paid_at` — время первой успешной попытки оплаты этого инвойса.
 
-**Источник деталей инвойса.** В первый день реализации проверяем, отдаёт ли Reports API инвойсы с попытками оплаты (отчёт по инвойсам в v1 или CSV-отчёт `INVOICES` в v2). Если нет — для подписок, у которых `trial_ended_at` попадает в окно `[сегодня − HISTORY_DAYS, сегодня]` и `paid_at` ещё пуст, детали берём через `POST /subscription/status` (ответ содержит `invoices` с `orders`). Объёмы Solidgate пока небольшие, поэтому это приемлемо.
+**Источник деталей инвойса.** По документации отчёт уже содержит инвойсы и попытки оплаты. Если на живых данных их нет — для подписок, у которых `trial_ended_at` попадает в окно `[сегодня − HISTORY_DAYS, сегодня]` и `paid_at` ещё пуст, детали берём через `POST /subscription/status` (ответ содержит `invoices` с `orders`). Объёмы Solidgate пока небольшие, поэтому это приемлемо.
 
 ## 6. HTTP API и UI
 
@@ -191,7 +191,7 @@ Email, имена и данные карт не хранятся.
 | переменная | по умолчанию | смысл |
 |---|---|---|
 | `STRIPE_KEYS` | — | `org=rk_live_…,corp=rk_live_…` |
-| `SOLIDGATE_PUBLIC_KEY`, `SOLIDGATE_SECRET_KEY` | — | live, доступ к Reports API |
+| `SOLIDGATE_KEYS` | — | `sg=<public>:<secret>,sgH2H=<public>:<secret>`, live, доступ к Reports API |
 | `RETRY_WINDOW_DAYS` | 30 | окно ретраев |
 | `HISTORY_DAYS` | 90 | глубина истории |
 | `TRIAL_LOOKBACK_DAYS` | 31 | запас на длину триала при выгрузке подписок |
@@ -204,7 +204,7 @@ Email, имена и данные карт не хранятся.
 
 | риск | что делаем |
 |---|---|
-| Reports API Solidgate не отдаёт попытки оплаты по инвойсу | запасной путь через `/subscription/status` (раздел 5) |
+| Реальный ответ Reports API расходится с документацией (нет `invoices`/`orders`, другие единицы `trial_period`) | скрипт разведки до нормализатора; запасной путь через `/subscription/status` (раздел 5) |
 | Нет доступа к Reports API у текущих ключей | запросить доступ в Solidgate Hub до начала работ над `providers/solidgate.ts`; Stripe-часть от этого не зависит |
 | Бэкфилл Stripe упирается в rate limit | запросы идут последовательно, SDK повторяет при 429, прогресс бэкфилла сохраняется по дням |
 | Триал продлили или завершили досрочно | v1 берёт `trial_end` на момент выгрузки подписки (ограничение зафиксировано в скоупе) |
