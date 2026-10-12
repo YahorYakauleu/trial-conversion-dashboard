@@ -1,0 +1,68 @@
+import { describe, expect, it } from 'vitest';
+import { openStore, type TrialRow } from '../src/db.js';
+
+const row: TrialRow = {
+  provider: 'stripe',
+  account: 'org',
+  subscription_id: 'sub_1',
+  trial_started_at: 1_000,
+  trial_ended_at: 2_000,
+  first_invoice_id: null,
+  first_attempt_succeeded: null,
+  paid_at: null,
+};
+
+describe('Store', () => {
+  it('upsert идемпотентен и не затирает данные об оплате пустыми значениями', () => {
+    const store = openStore(':memory:');
+    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: false, paid_at: 3_000 });
+    store.upsertTrial(row); // повторная выгрузка подписки без инвойса
+    expect(store.getTrial('stripe', 'sub_1')).toEqual({
+      ...row,
+      first_invoice_id: 'in_1',
+      first_attempt_succeeded: false,
+      paid_at: 3_000,
+    });
+    expect(store.countTrials()).toBe(1);
+  });
+
+  it('новое непустое значение перезаписывает старое', () => {
+    const store = openStore(':memory:');
+    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: null });
+    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: true, paid_at: 2_100 });
+    expect(store.getTrial('stripe', 'sub_1')?.first_attempt_succeeded).toBe(true);
+  });
+
+  it('getTrial возвращает null для неизвестной подписки', () => {
+    expect(openStore(':memory:').getTrial('stripe', 'nope')).toBeNull();
+  });
+
+  it('хранит курсоры', () => {
+    const store = openStore(':memory:');
+    expect(store.getState('stripe', 'org', 'cursor')).toBeNull();
+    store.setState('stripe', 'org', 'cursor', 123);
+    store.setState('stripe', 'org', 'cursor', 456);
+    expect(store.getState('stripe', 'org', 'cursor')).toBe(456);
+  });
+
+  it('журнал синков: последний статус и последний успех', () => {
+    const store = openStore(':memory:');
+    const ok = store.startRun('stripe', 'org', 'backfill', 100);
+    store.finishRun(ok, 'ok', 5, null, 200);
+    const failed = store.startRun('stripe', 'org', 'daily', 300);
+    store.finishRun(failed, 'error', 0, 'boom', 400);
+    expect(store.latestRuns()).toEqual([
+      { provider: 'stripe', account: 'org', last_status: 'error', last_error: 'boom', last_success_at: 200 },
+    ]);
+  });
+
+  it('при старте помечает зависшие running как error', () => {
+    const store = openStore(':memory:');
+    store.startRun('solidgate', 'sg', 'daily', 100);
+    store.failStaleRuns(500);
+    expect(store.latestRuns()[0]).toMatchObject({
+      last_status: 'error',
+      last_error: 'процесс остановился во время синка',
+    });
+  });
+});
