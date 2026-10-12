@@ -1,0 +1,47 @@
+import type { Config } from './config.js';
+import { nowSec, type Provider, type Store } from './db.js';
+import { createStripeClient, syncStripeAccount } from './providers/stripe.js';
+
+export interface Source {
+  provider: Provider;
+  account: string;
+  run: (store: Store, now: number) => Promise<number>;
+}
+
+let running = false;
+
+export const isSyncRunning = () => running;
+
+// Источники синкаются по очереди; ошибка одного пишется в журнал и не трогает остальные.
+export async function runSync(store: Store, sources: Source[]): Promise<boolean> {
+  if (running) return false;
+  running = true;
+  try {
+    for (const source of sources) {
+      const kind = store.getState(source.provider, source.account, 'cursor') === null ? 'backfill' : 'daily';
+      const runId = store.startRun(source.provider, source.account, kind);
+      try {
+        const items = await source.run(store, nowSec());
+        store.finishRun(runId, 'ok', items, null);
+        console.log(`[${source.provider}:${source.account}] ${kind}: ${items} записей`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        store.finishRun(runId, 'error', 0, message);
+        console.error(`[${source.provider}:${source.account}] ${kind} упал: ${message}`);
+      }
+    }
+    return true;
+  } finally {
+    running = false;
+  }
+}
+
+export function buildSources(config: Config): Source[] {
+  if (config.solidgateAccounts.length > 0) {
+    console.warn('SOLIDGATE_KEYS заданы, но синк Solidgate ещё не подключён — пропускаю');
+  }
+  return config.stripeAccounts.map(({ account, key }): Source => {
+    const client = createStripeClient(key);
+    return { provider: 'stripe', account, run: (store, now) => syncStripeAccount(store, client, account, config, now) };
+  });
+}
