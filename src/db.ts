@@ -67,6 +67,8 @@ export function openStore(file: string) {
   `);
 
   // Поля оплаты сливаются через COALESCE: повторная выгрузка без инвойса не стирает уже известную оплату.
+  // Неудачная первая попытка необратима: события Stripe приходят в любом порядке, а ручная оплата
+  // после отказа выглядит как успешный инвойс с attempt_count = 1.
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
                         first_invoice_id, first_attempt_succeeded, paid_at, synced_at)
@@ -77,7 +79,8 @@ export function openStore(file: string) {
       trial_started_at = excluded.trial_started_at,
       trial_ended_at = excluded.trial_ended_at,
       first_invoice_id = COALESCE(excluded.first_invoice_id, trials.first_invoice_id),
-      first_attempt_succeeded = COALESCE(excluded.first_attempt_succeeded, trials.first_attempt_succeeded),
+      first_attempt_succeeded = CASE WHEN trials.first_attempt_succeeded = 0 THEN 0
+                                     ELSE COALESCE(excluded.first_attempt_succeeded, trials.first_attempt_succeeded) END,
       paid_at = COALESCE(excluded.paid_at, trials.paid_at),
       synced_at = excluded.synced_at
   `);

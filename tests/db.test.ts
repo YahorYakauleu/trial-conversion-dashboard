@@ -33,6 +33,13 @@ describe('Store', () => {
     expect(store.getTrial('stripe', 'sub_1')?.first_attempt_succeeded).toBe(true);
   });
 
+  it('«первая попытка не удалась» необратимо — порядок событий не важен', () => {
+    const store = openStore(':memory:');
+    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: false });
+    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: true, paid_at: 2_500 });
+    expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ first_attempt_succeeded: false, paid_at: 2_500 });
+  });
+
   it('getTrial возвращает null для неизвестной подписки', () => {
     expect(openStore(':memory:').getTrial('stripe', 'nope')).toBeNull();
   });
