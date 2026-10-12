@@ -33,11 +33,10 @@
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
     .card { background: var(--card); border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; }
     .card b { font-size: 26px; font-weight: 600; }
-    .note { margin: 16px 0 8px; max-width: 760px; }
     .chart { position: relative; height: 320px; margin: 24px 0 8px; }
     .legend { display: flex; gap: 16px; flex-wrap: wrap; }
     .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 6px; }
-    .table-wrap { overflow-x: auto; }
+    .table-wrap { overflow-x: auto; margin-top: 20px; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
     th { color: var(--muted); font-weight: 500; }
@@ -77,13 +76,6 @@
   </div>
 
   <div class="cards" id="cards"></div>
-
-  <p class="muted note">
-    Триалы сгруппированы по дню оформления по времени <span id="tz">America/New_York</span> (как в Stripe).
-    «Сконвертилось» — оплатили первый платный период
-    в течение <span id="window">30</span> дней после конца триала, с любой попытки.
-    «≈» и пунктир — по этим дням ещё идут триалы или ретраи, цифра будет расти.
-  </p>
 
   <div class="table-wrap">
     <table>
@@ -173,8 +165,6 @@
 
   function renderControls(data) {
     timeZone = data.time_zone;
-    document.getElementById('tz').textContent = data.time_zone;
-    document.getElementById('window').textContent = data.retry_window_days;
     for (const id of ['provider', 'granularity']) {
       document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
     }
