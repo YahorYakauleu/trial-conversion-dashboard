@@ -4,12 +4,13 @@ import { fileURLToPath } from 'node:url';
 import express, { type RequestHandler } from 'express';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
-import { getMetrics, type ProviderFilter } from './metrics.js';
+import { dayKey, getMetrics, resolveRange, type Granularity, type ProviderFilter } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
+const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
 
 export function createApp({ store, config, sources }: { store: Store; config: Config; sources: Source[] }) {
   const app = express();
@@ -20,22 +21,27 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(basicAuth(config.basicAuth.user, config.basicAuth.password));
   app.use(express.static(PUBLIC_DIR));
 
+  // ?provider=all|stripe|solidgate&granularity=day|week|month&from=YYYY-MM-DD&to=YYYY-MM-DD
   app.get('/api/metrics', (req, res) => {
+    const now = nowSec();
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
-    const granularity = req.query.granularity === 'week' ? 'week' : 'day';
-    const { cards, series } = getMetrics(store.db, {
+    const granularity = GRANULARITIES.find((g) => g === req.query.granularity) ?? 'day';
+    const range = resolveRange(config.historyFrom, now, req.query.from, req.query.to);
+    const { totals, series } = getMetrics(store.db, {
       provider,
       granularity,
-      now: nowSec(),
-      historyFrom: config.historyFrom,
+      now,
+      ...range,
       retryWindowDays: config.retryWindowDays,
     });
     res.json({
-      generated_at: nowSec(),
+      generated_at: now,
       retry_window_days: config.retryWindowDays,
+      history_from: dayKey(config.historyFrom),
+      range: { from: dayKey(range.from), to: dayKey(range.to) },
       sync_running: isSyncRunning(),
       sync: store.latestRuns(),
-      cards,
+      totals,
       series,
     });
   });

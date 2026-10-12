@@ -33,12 +33,20 @@ describe('server', () => {
     expect((await fetch(`${url}/`, { headers: auth })).status).toBe(200);
   });
 
-  it('/api/metrics отдаёт карточки, ряд и статус синка', async () => {
+  it('/api/metrics отдаёт итоги за период, ряд и статус синка', async () => {
     const url = await start();
-    const body = await (await fetch(`${url}/api/metrics?provider=stripe&granularity=week`, { headers: auth })).json();
-    expect(body).toMatchObject({ retry_window_days: 30, sync_running: false, sync: [] });
-    expect(body.cards).toHaveProperty('started_7d');
-    expect(Array.isArray(body.series)).toBe(true);
+    const query = 'provider=stripe&granularity=month&from=2026-09-10&to=2026-09-20';
+    const body = await (await fetch(`${url}/api/metrics?${query}`, { headers: auth })).json();
+    expect(body).toMatchObject({
+      retry_window_days: 30,
+      history_from: '2026-09-01',
+      range: { from: '2026-09-10', to: '2026-09-20' },
+      sync_running: false,
+      sync: [],
+      totals: { started: 0 },
+    });
+    expect(body.series).toHaveLength(1);
+    expect(body.series[0]).toMatchObject({ period: '2026-09-10', period_end: '2026-09-20' });
   });
 
   it('/api/sync: 202, а во время синка — 409', async () => {

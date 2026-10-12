@@ -5,10 +5,9 @@ export const DAY = 86_400;
 const FIRST_ATTEMPT_SETTLE = DAY;
 
 export type ProviderFilter = Provider | 'all';
-export type Granularity = 'day' | 'week';
+export type Granularity = 'day' | 'week' | 'month';
 
-export interface Point {
-  period: string; // YYYY-MM-DD — день оформления триала; для недели — первый её день в истории
+export interface Totals {
   started: number;
   paid_first: number;
   paid_retry: number;
@@ -18,23 +17,17 @@ export interface Point {
   final_retry: boolean;
 }
 
-export interface RateCard {
-  rate: number | null;
-  from: string | null;
-  to: string | null;
-}
-
-export interface Cards {
-  started_7d: { value: number; from: string; to: string };
-  rate_first_7d: RateCard;
-  rate_retry_7d: RateCard;
+export interface Point extends Totals {
+  period: string; // первый день группы внутри периода (YYYY-MM-DD)
+  period_end: string; // последний день группы внутри периода
 }
 
 export interface MetricsOptions {
   provider: ProviderFilter;
   granularity: Granularity;
   now: number;
-  historyFrom: number;
+  from: number; // первый день периода, полночь UTC
+  to: number; // последний день периода включительно
   retryWindowDays: number;
 }
 
@@ -42,15 +35,25 @@ export const startOfUtcDay = (ts: number) => Math.floor(ts / DAY) * DAY;
 export const dayKey = (ts: number) => new Date(ts * 1000).toISOString().slice(0, 10);
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
 
-export function getMetrics(db: Db, o: MetricsOptions): { cards: Cards; series: Point[] } {
+// Период из адреса страницы: YYYY-MM-DD, обрезается по началу истории и вчерашнему (последнему полному) дню
+export function resolveRange(historyFrom: number, now: number, from?: unknown, to?: unknown): { from: number; to: number } {
+  const lastDay = Math.max(historyFrom, startOfUtcDay(now) - DAY);
+  const parse = (value: unknown) =>
+    typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? Date.parse(`${value}T00:00:00Z`) / 1000 : NaN;
+  const clamp = (value: number, fallback: number) =>
+    Number.isNaN(value) ? fallback : Math.min(Math.max(value, historyFrom), lastDay);
+  const end = clamp(parse(to), lastDay);
+  return { from: Math.min(clamp(parse(from), historyFrom), end), to: end };
+}
+
+export function getMetrics(db: Db, o: MetricsOptions): { totals: Totals; series: Point[] } {
   const days = dailyPoints(db, o);
-  return { cards: cards(days), series: o.granularity === 'week' ? groupByWeek(days) : days };
+  return { totals: totals(days), series: o.granularity === 'day' ? days : group(days, o.granularity) };
 }
 
 function dailyPoints(db: Db, o: MetricsOptions): Point[] {
-  const today = startOfUtcDay(o.now);
-  const params = { from: o.historyFrom, today, provider: o.provider };
-  const filter = `trial_started_at >= @from AND trial_started_at < @today AND (@provider = 'all' OR provider = @provider)`;
+  const params = { from: o.from, until: o.to + DAY, provider: o.provider };
+  const filter = `trial_started_at >= @from AND trial_started_at < @until AND (@provider = 'all' OR provider = @provider)`;
 
   const rows = db
     .prepare(
@@ -75,58 +78,64 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
     .get(params) as { max_len: number };
 
   const points: Point[] = [];
-  for (let day = o.historyFrom; day < today; day += DAY) {
+  for (let day = o.from; day <= o.to; day += DAY) {
     const r = byDay.get(dayKey(day)) ?? { started: 0, paid_first: 0, paid_retry: 0 };
     const lastTrialEnd = day + DAY + maxTrialLength;
-    points.push({
-      period: dayKey(day),
-      started: r.started,
-      paid_first: r.paid_first,
-      paid_retry: r.paid_retry,
-      rate_first: rate(r.paid_first, r.started),
-      rate_retry: rate(r.paid_retry, r.started),
-      final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,
-      final_retry: lastTrialEnd + o.retryWindowDays * DAY <= o.now,
-    });
+    points.push(
+      withRates({
+        period: dayKey(day),
+        period_end: dayKey(day),
+        started: r.started,
+        paid_first: r.paid_first,
+        paid_retry: r.paid_retry,
+        rate_first: null,
+        rate_retry: null,
+        final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,
+        final_retry: lastTrialEnd + o.retryWindowDays * DAY <= o.now,
+      }),
+    );
   }
   return points;
 }
 
-function groupByWeek(days: Point[]): Point[] {
-  const weeks = new Map<string, Point>();
+// Неделя — ISO (с понедельника), месяц — календарный; края, обрезанные периодом, подписаны его днями
+function group(days: Point[], granularity: 'week' | 'month'): Point[] {
+  const groups = new Map<string, Point>();
   for (const d of days) {
-    const ts = Date.parse(`${d.period}T00:00:00Z`) / 1000;
-    const monday = dayKey(ts - ((new Date(ts * 1000).getUTCDay() + 6) % 7) * DAY);
-    const w = weeks.get(monday);
-    if (!w) {
-      weeks.set(monday, { ...d });
+    const key = granularity === 'month' ? d.period.slice(0, 7) : mondayOf(d.period);
+    const g = groups.get(key);
+    if (!g) {
+      groups.set(key, { ...d });
       continue;
     }
-    w.started += d.started;
-    w.paid_first += d.paid_first;
-    w.paid_retry += d.paid_retry;
-    w.final_first &&= d.final_first;
-    w.final_retry &&= d.final_retry;
+    g.period_end = d.period;
+    g.started += d.started;
+    g.paid_first += d.paid_first;
+    g.paid_retry += d.paid_retry;
+    g.final_first &&= d.final_first;
+    g.final_retry &&= d.final_retry;
   }
-  return [...weeks.values()].map((w) => ({
-    ...w,
-    rate_first: rate(w.paid_first, w.started),
-    rate_retry: rate(w.paid_retry, w.started),
-  }));
+  return [...groups.values()].map(withRates);
 }
 
-function cards(days: Point[]): Cards {
-  const sum = (pts: Point[], key: 'started' | 'paid_first' | 'paid_retry') => pts.reduce((s, p) => s + p[key], 0);
-  // Окончательные дни без единого триала (например, до запуска канала) — это «нет данных», а не период
-  const rateCard = (pts: Point[], key: 'paid_first' | 'paid_retry'): RateCard => {
-    const started = sum(pts, 'started');
-    if (started === 0) return { rate: null, from: null, to: null };
-    return { rate: rate(sum(pts, key), started), from: pts[0].period, to: pts.at(-1)!.period };
-  };
-  const last7 = days.slice(-7);
-  return {
-    started_7d: { value: sum(last7, 'started'), from: last7[0]?.period ?? '', to: last7.at(-1)?.period ?? '' },
-    rate_first_7d: rateCard(days.filter((p) => p.final_first).slice(-7), 'paid_first'),
-    rate_retry_7d: rateCard(days.filter((p) => p.final_retry).slice(-7), 'paid_retry'),
-  };
+function totals(days: Point[]): Totals {
+  const sum = (key: 'started' | 'paid_first' | 'paid_retry') => days.reduce((s, p) => s + p[key], 0);
+  return withRates({
+    started: sum('started'),
+    paid_first: sum('paid_first'),
+    paid_retry: sum('paid_retry'),
+    rate_first: null,
+    rate_retry: null,
+    final_first: days.every((p) => p.final_first),
+    final_retry: days.every((p) => p.final_retry),
+  });
+}
+
+function withRates<T extends Totals>(p: T): T {
+  return { ...p, rate_first: rate(p.paid_first, p.started), rate_retry: rate(p.paid_retry, p.started) };
+}
+
+function mondayOf(period: string): string {
+  const ts = Date.parse(`${period}T00:00:00Z`) / 1000;
+  return dayKey(ts - ((new Date(ts * 1000).getUTCDay() + 6) % 7) * DAY);
 }

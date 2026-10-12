@@ -8,6 +8,7 @@
     :root {
       --text: #1f1f1d; --muted: #6b6b66; --line: #e6e6e1; --card: #f5f5f1; --bg: #ffffff;
       --ok: #0f6e56; --err: #a32d2d; --bar: #d3d1c7; --first: #1d9e75; --retry: #534ab7;
+      color-scheme: light dark;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -20,20 +21,22 @@
     main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
     header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
     h1 { font-size: 20px; font-weight: 600; margin: 0 0 2px; }
-    button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+    button, select, input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+    button { cursor: pointer; }
     button:hover { background: var(--card); }
     .muted { color: var(--muted); font-size: 13px; }
     .ok { color: var(--ok); }
     .err { color: var(--err); }
-    .controls { display: flex; gap: 16px; margin: 20px 0 16px; flex-wrap: wrap; }
+    .controls { display: flex; gap: 12px 20px; margin: 20px 0 16px; flex-wrap: wrap; align-items: center; }
     .seg { display: flex; gap: 4px; }
     .seg button.on { background: var(--card); font-weight: 600; }
+    .period { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
     .card { background: var(--card); border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; }
     .card b { font-size: 26px; font-weight: 600; }
+    .note { margin: 16px 0 8px; max-width: 760px; }
     .chart { position: relative; height: 320px; margin: 24px 0 8px; }
     .legend { display: flex; gap: 16px; flex-wrap: wrap; }
-    .note { margin: 16px 0 8px; max-width: 760px; }
     .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 6px; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -55,10 +58,22 @@
 
   <div class="controls">
     <div class="seg" id="provider">
-      <button data-v="all" class="on">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
+      <button data-v="all">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
     </div>
     <div class="seg" id="granularity">
-      <button data-v="day" class="on">День</button><button data-v="week">Неделя</button>
+      <button data-v="day">По дням</button><button data-v="week">По неделям</button><button data-v="month">По месяцам</button>
+    </div>
+    <div class="period">
+      <select id="preset" aria-label="Период">
+        <option value="last7">Последние 7 дней</option>
+        <option value="last30">Последние 30 дней</option>
+        <option value="thisMonth">Этот месяц</option>
+        <option value="prevMonth">Прошлый месяц</option>
+        <option value="all">Всё время</option>
+        <option value="custom">Свой период</option>
+      </select>
+      <label class="muted">с <input type="date" id="from" /></label>
+      <label class="muted">по <input type="date" id="to" /></label>
     </div>
   </div>
 
@@ -67,13 +82,13 @@
   <p class="muted note">
     Триалы сгруппированы по дню оформления (UTC). «Сконвертилось» — оплатили первый платный период
     в течение <span id="window">30</span> дней после конца триала, с любой попытки.
-    «≈» и пунктир — по этому дню ещё идут триалы или ретраи, цифра будет расти.
+    «≈» и пунктир — по этим дням ещё идут триалы или ретраи, цифра будет расти.
   </p>
 
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Дата оформления</th><th>Оформлено триалов</th><th>Сконвертилось</th><th>из них с первой попытки</th></tr>
+        <tr><th id="period-head">Дата оформления</th><th>Оформлено триалов</th><th>Сконвертилось</th><th>из них с первой попытки</th></tr>
       </thead>
       <tbody id="rows"></tbody>
     </table>
@@ -89,7 +104,21 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
-  const state = { provider: 'all', granularity: 'day' };
+  const DAY_MS = 86_400_000;
+  const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+  const PRESETS = ['last7', 'last30', 'thisMonth', 'prevMonth', 'all', 'custom'];
+
+  // Выбор хранится в адресе страницы — ссылкой можно поделиться
+  const params = new URLSearchParams(location.search);
+  const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
+  const state = {
+    provider: pick(params.get('provider'), ['all', 'stripe', 'solidgate'], 'all'),
+    granularity: pick(params.get('granularity'), ['day', 'week', 'month'], 'day'),
+    preset: pick(params.get('period'), PRESETS, params.get('from') ? 'custom' : 'all'),
+    from: params.get('from') ?? '',
+    to: params.get('to') ?? '',
+  };
+
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   // От origin, а не от адреса страницы: если дашборд открыт как user:pass@host, fetch отвергает относительный URL
   const api = (path, init) => fetch(new URL(path, location.origin), init);
@@ -100,23 +129,71 @@
   const num = (n) => n.toLocaleString('ru-RU');
   const utc = (ts) => (ts ? `${new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'ещё не было');
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-  const range = (c) => (c.from ? `${c.from} — ${c.to}` : 'нет окончательных данных');
+  const iso = (date) => date.toISOString().slice(0, 10);
+  const ddmm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
+  const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
+  const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
+  const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
+
+  // Пресеты считаются от вчера (последний полный день, UTC); сервер обрежет по началу истории
+  function presetRange(preset) {
+    const today = new Date(Date.now());
+    const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - DAY_MS);
+    const y = today.getUTCFullYear();
+    const m = today.getUTCMonth();
+    switch (preset) {
+      case 'last7': return { from: iso(new Date(yesterday - 6 * DAY_MS)), to: iso(yesterday) };
+      case 'last30': return { from: iso(new Date(yesterday - 29 * DAY_MS)), to: iso(yesterday) };
+      case 'thisMonth': return { from: iso(new Date(Date.UTC(y, m, 1))), to: iso(yesterday) };
+      case 'prevMonth': return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: iso(new Date(Date.UTC(y, m, 0))) };
+      default: return { from: '', to: '' }; // «всё время» — сервер возьмёт всю историю
+    }
+  }
+
+  function syncUrl() {
+    const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, period: state.preset });
+    if (state.preset === 'custom') {
+      q.set('from', state.from);
+      q.set('to', state.to);
+    }
+    history.replaceState(null, '', `${location.pathname}?${q}`);
+  }
 
   async function load() {
     clearTimeout(pollTimer);
+    if (state.preset !== 'custom') Object.assign(state, presetRange(state.preset));
+    syncUrl();
     try {
-      const res = await api(`/api/metrics?provider=${state.provider}&granularity=${state.granularity}`);
+      const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, from: state.from, to: state.to });
+      const res = await api(`/api/metrics?${q}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      document.getElementById('window').textContent = data.retry_window_days;
+      renderControls(data);
       renderStatus(data);
-      renderCards(data.cards);
-      renderChart(data.series);
+      renderCards(data.totals, data.range);
       renderTable(data.series);
+      renderChart(data.series);
       if (data.sync_running) pollTimer = setTimeout(load, 10_000);
     } catch (error) {
       document.getElementById('status').innerHTML = `<span class="err">Не удалось загрузить данные: ${esc(error.message)}</span>`;
     }
+  }
+
+  function renderControls(data) {
+    document.getElementById('window').textContent = data.retry_window_days;
+    for (const id of ['provider', 'granularity']) {
+      document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
+    }
+    document.getElementById('preset').value = state.preset;
+    // В полях — фактический период после обрезки сервером
+    for (const id of ['from', 'to']) {
+      const input = document.getElementById(id);
+      input.min = data.history_from;
+      input.max = presetRange('last7').to;
+      input.value = data.range[id];
+    }
+    document.getElementById('period-head').textContent =
+      { day: 'Дата оформления', week: 'Неделя оформления', month: 'Месяц оформления' }[state.granularity];
   }
 
   function renderStatus(data) {
@@ -132,13 +209,34 @@
     document.getElementById('refresh').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
   }
 
-  function renderCards(c) {
+  function renderCards(t, range) {
+    const approx = (final) => (final ? '' : '≈ ');
     document.getElementById('cards').innerHTML = [
-      ['Оформлено триалов за 7 дней', num(c.started_7d.value), range(c.started_7d)],
-      ['Сконвертилось (окончательные 7 дней)', pct(c.rate_retry_7d.rate), range(c.rate_retry_7d)],
-      ['С первой попытки (окончательные 7 дней)', pct(c.rate_first_7d.rate), range(c.rate_first_7d)],
+      ['Оформлено триалов', num(t.started), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
+      ['Сконвертилось', `${approx(t.final_retry)}${pct(t.rate_retry)}`, `${num(t.paid_retry)} из ${num(t.started)}`],
+      ['Из них с первой попытки', `${approx(t.final_first)}${pct(t.rate_first)}`, `${num(t.paid_first)} из ${num(t.started)}`],
     ]
-      .map(([label, value, period]) => `<div class="card"><span class="muted">${label}</span><b>${value}</b><span class="muted">${period}</span></div>`)
+      .map(([label, value, sub]) => `<div class="card"><span class="muted">${label}</span><b>${value}</b><span class="muted">${sub}</span></div>`)
+      .join('');
+  }
+
+  function rowLabel(p) {
+    if (state.granularity === 'day') return ddmmyyyy(p.period);
+    if (state.granularity === 'week') return `${ddmm(p.period)} — ${ddmm(p.period_end)}`;
+    const name = monthName(p.period);
+    const full = p.period.endsWith('-01') && isMonthEnd(p.period_end);
+    return full ? name : `${name} (${ddmm(p.period)} — ${ddmm(p.period_end)})`;
+  }
+
+  // Новые периоды сверху: «01.09 оформлено N триалов, из них сконвертилось M (x%)»
+  function renderTable(series) {
+    const cell = (n, r, final) => `<td class="${final ? '' : 'pending'}">${final ? '' : '≈ '}${num(n)} (${pct(r)})</td>`;
+    document.getElementById('rows').innerHTML = [...series]
+      .reverse()
+      .map(
+        (p) =>
+          `<tr><td>${rowLabel(p)}</td><td>${num(p.started)}</td>${cell(p.paid_retry, p.rate_retry, p.final_retry)}${cell(p.paid_first, p.rate_first, p.final_first)}</tr>`,
+      )
       .join('');
   }
 
@@ -147,7 +245,7 @@
     const toPct = (r) => (r === null ? null : +(r * 100).toFixed(1));
     const line = (label, key, finalKey, color, order) => ({
       type: 'line', label, data: series.map((p) => toPct(p[key])), yAxisID: 'rate', order,
-      borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: series.length > 40 ? 0 : 2,
+      borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: series.length > 40 ? 0 : 3,
       tension: 0.2, spanGaps: true, segment: { borderDash: dashed(finalKey) },
     });
     const datasets = [
@@ -155,13 +253,14 @@
       line('Сконвертилось', 'rate_retry', 'final_retry', css('--retry'), 1),
       line('С первой попытки', 'rate_first', 'final_first', css('--first'), 2),
     ];
+    const labels = series.map((p) => (state.granularity === 'month' ? monthName(p.period) : ddmm(p.period)));
 
     Chart.defaults.color = css('--muted');
     Chart.defaults.borderColor = css('--line');
     if (chart) chart.destroy();
     chart = new Chart(document.getElementById('chart'), {
       type: 'bar',
-      data: { labels: series.map((p) => p.period), datasets },
+      data: { labels, datasets },
       options: {
         animation: false,
         responsive: true,
@@ -171,6 +270,7 @@
           legend: { display: false },
           tooltip: {
             callbacks: {
+              title: (items) => rowLabel(series[items[0].dataIndex]),
               label: (c) => (c.datasetIndex === 0 ? `${c.dataset.label}: ${num(c.raw)}` : `${c.dataset.label}: ${c.raw ?? '—'}%`),
             },
           },
@@ -184,25 +284,27 @@
     });
   }
 
-  // Новые дни сверху: «1 сентября оформлено N триалов, из них сконвертилось M (x%)»
-  function renderTable(series) {
-    const cell = (n, r, final) => `<td class="${final ? '' : 'pending'}">${final ? '' : '≈ '}${num(n)} (${pct(r)})</td>`;
-    const label = (p) => (state.granularity === 'week' ? `неделя с ${p.period}` : p.period);
-    document.getElementById('rows').innerHTML = [...series]
-      .reverse()
-      .map(
-        (p) =>
-          `<tr><td>${label(p)}</td><td>${num(p.started)}</td>${cell(p.paid_retry, p.rate_retry, p.final_retry)}${cell(p.paid_first, p.rate_first, p.final_first)}</tr>`,
-      )
-      .join('');
-  }
-
   for (const id of ['provider', 'granularity']) {
     document.getElementById(id).addEventListener('click', (event) => {
       const value = event.target.dataset?.v;
       if (!value) return;
       state[id] = value;
-      document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === value));
+      load();
+    });
+  }
+
+  document.getElementById('preset').addEventListener('change', (event) => {
+    state.preset = event.target.value;
+    if (state.preset === 'custom') return; // ждём, пока выберут даты
+    load();
+  });
+
+  for (const id of ['from', 'to']) {
+    document.getElementById(id).addEventListener('change', (event) => {
+      if (!event.target.value) return;
+      state.preset = 'custom';
+      state.from = document.getElementById('from').value;
+      state.to = document.getElementById('to').value;
       load();
     });
   }
