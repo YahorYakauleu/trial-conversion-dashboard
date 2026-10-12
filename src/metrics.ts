@@ -12,9 +12,17 @@ const BUCKET = 900;
 export type ProviderFilter = Provider | 'all';
 export type Granularity = 'day' | 'week' | 'month';
 export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'custom';
-// Измерения для разбивки и фильтров — это колонки trials
-export const DIMENSIONS = ['country', 'payment_method', 'bank', 'card_brand'] as const;
+// Измерения для разбивки и фильтров и их значение в SQL по триалу (алиас t)
+export const DIMENSIONS = ['account', 'country', 'payment_method', 'bank', 'card_brand'] as const;
 export type Dimension = (typeof DIMENSIONS)[number];
+const DIMENSION_SQL: Record<Dimension, string> = {
+  // провайдер вместе с аккаунтом: одинаковые имена у Stripe и Solidgate не склеиваются (stripe:corp, solidgate:sgH2H)
+  account: "t.provider || ':' || t.account",
+  country: 't.country',
+  payment_method: 't.payment_method',
+  bank: 't.bank',
+  card_brand: 't.card_brand',
+};
 // Фильтр по измерению: значение или 'none' — «не определено»
 export type Filters = Partial<Record<Dimension, string>>;
 
@@ -118,9 +126,9 @@ function trialFilter(o: RangeOptions) {
     const value = o.filters[dimension];
     if (!value) continue;
     if (value === 'none') {
-      clauses.push(`t.${dimension} IS NULL`);
+      clauses.push(`${DIMENSION_SQL[dimension]} IS NULL`);
     } else {
-      clauses.push(`t.${dimension} = @f_${dimension}`);
+      clauses.push(`${DIMENSION_SQL[dimension]} = @f_${dimension}`);
       params[`f_${dimension}`] = value;
     }
   }
@@ -221,7 +229,7 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
 // (у Stripe банк пуст у всех — иначе эта строка заслоняла бы остальные)
 export function getBreakdown(db: Db, o: RangeOptions, dimension: Dimension): BreakdownRow[] {
   const { final_first, final_retry } = finality(db, o, o.to);
-  return [...aggregate(db, o, `t.${dimension}`)]
+  return [...aggregate(db, o, DIMENSION_SQL[dimension])]
     .map(([value, counts]) => withRates({ value: value === null ? null : String(value), ...counts, final_first, final_retry }))
     .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.started - a.started || String(a.value).localeCompare(String(b.value)));
 }

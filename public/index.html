@@ -318,6 +318,7 @@
 
     <nav class="tabs" id="view" aria-label="Разрез">
       <button data-v="time">Динамика</button>
+      <button data-v="account">Аккаунты</button>
       <button data-v="country">Страны</button>
       <button data-v="payment_method">Способы оплаты</button>
       <button data-v="bank">Банки</button>
@@ -379,9 +380,18 @@
   const DAY_MS = 86_400_000;
   const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
   const PRESETS = ['last7', 'last30', 'thisMonth', 'prevMonth', 'all', 'custom'];
-  const DIMENSIONS = ['country', 'payment_method', 'bank', 'card_brand'];
+  const DIMENSIONS = ['account', 'country', 'payment_method', 'bank', 'card_brand'];
   const VIEWS = ['time', ...DIMENSIONS, 'decline_reason'];
-  const DIMENSION_TITLES = { country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
+  const DIMENSION_TITLES = { account: 'Аккаунт', country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
+  const ACCOUNT_NAMES = {
+    'stripe:corp': 'Stripe · Toggle Corp',
+    'stripe:org': 'Stripe · Toggle Org',
+    'stripe:inc': 'Stripe · Toggle Inc',
+    'stripe:incorp': 'Stripe · Toggle Incorp',
+    'stripe:eu': 'Stripe · Toggle EU',
+    'solidgate:sg': 'Solidgate · платёжная форма',
+    'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
+  };
   const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Карта', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
   const BRAND_NAMES = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', discover: 'Discover', jcb: 'JCB', unionpay: 'UnionPay', diners: 'Diners Club', maestro: 'Maestro' };
   const ROW_LIMIT = 50;
@@ -420,6 +430,10 @@
     if (value === null || value === 'none') return dimension === 'country' || dimension === 'card_brand' ? 'Не определена' : 'Не определён';
     if (dimension === 'country') {
       try { return `${regionNames.of(value)} (${value})`; } catch { return value; }
+    }
+    if (dimension === 'account') {
+      const [provider, account] = value.split(':');
+      return ACCOUNT_NAMES[value] ?? `${provider === 'stripe' ? 'Stripe' : 'Solidgate'} · ${account}`;
     }
     if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
     if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);

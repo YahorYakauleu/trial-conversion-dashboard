@@ -77,6 +77,10 @@ describe('server', () => {
     expect((await get('country=US&payment_method=google_pay')).totals.started).toBe(1);
     expect((await get(`bank=${encodeURIComponent('SUTTON BANK')}`)).totals.started).toBe(1);
     expect((await get('country=<script>')).filters).toEqual({});
+    expect((await get('account=stripe:corp')).totals.started).toBe(3);
+    expect((await get('account=stripe:org')).totals.started).toBe(0);
+    expect((await get('account=corp')).filters).toEqual({}); // без провайдера — не принимается
+    expect((await get('view=account')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['stripe:corp']);
 
     const byMethod = await get('view=payment_method');
     expect(byMethod.breakdown.map((r: { value: string | null; started: number }) => [r.value, r.started])).toEqual([

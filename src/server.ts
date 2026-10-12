@@ -24,6 +24,7 @@ const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
 const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
 const FILTER_FORMAT: Record<Dimension, RegExp> = {
+  account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
   country: /^[A-Z]{2}$/,
   payment_method: /^[a-z_]{1,32}$/,
   card_brand: /^[a-z_ ]{1,32}$/,
@@ -52,8 +53,8 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(express.static(PUBLIC_DIR));
 
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
-  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
-  //  &view=time|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки в config.timeZone.
+  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&account=stripe:corp&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
+  //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки в config.timeZone.
   app.get('/api/metrics', (req, res) => {
     const now = nowSec();
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';

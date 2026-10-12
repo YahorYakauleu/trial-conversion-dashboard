@@ -177,6 +177,23 @@ describe('измерения: фильтры и разбивки', () => {
     expect(getMetrics(store.db, opts).totals.started).toBe(5);
   });
 
+  it('аккаунт — провайдер и аккаунт вместе: разбивка и фильтр', () => {
+    const store = storeWith([
+      ...rows(),
+      trial(s, { account: 'org' }),
+      trial(s, { provider: 'solidgate', account: 'corp' }), // то же имя у другого провайдера — отдельная строка
+    ]);
+    const range = { ...opts, from: '2026-10-01', to: '2026-10-11' };
+    expect(getBreakdown(store.db, range, 'account').map((c) => [c.value, c.started])).toEqual([
+      ['stripe:corp', 4],
+      ['solidgate:corp', 1],
+      ['solidgate:sgH2H', 1],
+      ['stripe:org', 1],
+    ]);
+    expect(getMetrics(store.db, { ...range, filters: { account: 'stripe:org' } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...range, filters: { account: 'solidgate:corp' } }).totals.started).toBe(1);
+  });
+
   it('разбивка: по убыванию числа триалов, «не определено» в конце, с учётом провайдера и периода', () => {
     const store = storeWith([...rows(), trial('2026-09-15T12:00:00Z', { country: 'FR' })]);
     const range = { ...opts, from: '2026-10-01', to: '2026-10-11' };
