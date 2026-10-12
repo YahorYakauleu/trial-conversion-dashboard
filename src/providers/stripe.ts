@@ -1,5 +1,13 @@
 import Stripe from 'stripe';
-import type { TrialRow } from '../db.js';
+import type { Store, TrialRow } from '../db.js';
+import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
+
+export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events'>;
+
+interface StripeSyncConfig {
+  historyDays: number;
+  trialLookbackDays: number;
+}
 
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
 const FIRST_INVOICE_TOLERANCE = 3_600;
@@ -49,4 +57,74 @@ export function applyInvoice(trial: TrialRow, invoice: Stripe.Invoice): TrialRow
     first_attempt_succeeded: invoice.attempt_count === 0 ? null : paidRightAway,
     paid_at: paid ? (paidAt ?? invoice.created) : null,
   };
+}
+
+export function createStripeClient(key: string): StripeLike {
+  return new Stripe(key, { apiVersion: '2025-08-27.basil', maxNetworkRetries: 3 });
+}
+
+// Без курсора — бэкфилл по дням с сохранением прогресса; затем всегда инкремент:
+// новые подписки и события об оплате/отказе с (курсор − 1 день).
+export async function syncStripeAccount(
+  store: Store,
+  stripe: StripeLike,
+  account: string,
+  cfg: StripeSyncConfig,
+  now: number,
+): Promise<number> {
+  const today = startOfUtcDay(now);
+  const cursor = store.getState('stripe', account, 'cursor');
+  let items = 0;
+
+  const saveSubscription = (sub: Stripe.Subscription) => {
+    const row = trialFromSubscription(sub, account);
+    if (!row) return;
+    store.upsertTrial(row);
+    items++;
+  };
+  const saveInvoice = (invoice: Stripe.Invoice) => {
+    const subscriptionId = invoiceSubscriptionId(invoice);
+    const trial = subscriptionId ? store.getTrial('stripe', subscriptionId) : null;
+    if (!trial) return;
+    const next = applyInvoice(trial, invoice);
+    if (next === trial) return;
+    store.upsertTrial(next);
+    items++;
+  };
+
+  if (cursor === null) {
+    const subsFrom =
+      store.getState('stripe', account, 'subs_day') ?? today - (cfg.historyDays + cfg.trialLookbackDays) * DAY;
+    for (let day = subsFrom; day < today; day += DAY) {
+      for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
+        saveSubscription(sub);
+      }
+      store.setState('stripe', account, 'subs_day', day + DAY);
+      console.log(`[stripe:${account}] подписки ${dayKey(day)} готово`);
+    }
+
+    const invoicesFrom = store.getState('stripe', account, 'invoices_day') ?? today - (cfg.historyDays + 1) * DAY;
+    for (let day = invoicesFrom; day < today; day += DAY) {
+      for await (const invoice of stripe.invoices.list({ created: { gte: day, lt: day + DAY }, limit: 100 })) {
+        saveInvoice(invoice);
+      }
+      store.setState('stripe', account, 'invoices_day', day + DAY);
+      console.log(`[stripe:${account}] инвойсы ${dayKey(day)} готово`);
+    }
+  }
+
+  const since = (cursor ?? today) - DAY;
+  for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: since }, limit: 100 })) {
+    saveSubscription(sub);
+  }
+  for await (const event of stripe.events.list({
+    types: ['invoice.paid', 'invoice.payment_failed'],
+    created: { gte: since },
+    limit: 100,
+  })) {
+    saveInvoice(event.data.object as Stripe.Invoice);
+  }
+
+  store.setState('stripe', account, 'cursor', now);
+  return items;
 }
