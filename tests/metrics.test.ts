@@ -60,6 +60,12 @@ describe('getMetrics — по дню оформления триала', () => {
     });
   });
 
+  it('сегодняшний день считается как обычный и помечен неокончательным', () => {
+    const store = storeWith([trial('2026-10-12T01:00:00Z'), trial('2026-10-12T09:00:00Z')]);
+    const { series } = getMetrics(store.db, { ...opts, to: d('2026-10-12') });
+    expect(series.at(-1)).toMatchObject({ period: '2026-10-12', started: 2, final_first: false, final_retry: false });
+  });
+
   it('период from..to включительно, границы суток UTC', () => {
     const store = storeWith([
       trial('2026-09-30T23:59:59Z'), // до периода
@@ -146,13 +152,13 @@ describe('getMetrics — недели, месяцы, итоги', () => {
 });
 
 describe('resolveRange', () => {
-  const lastDay = d('2026-10-11');
+  const lastDay = d('2026-10-12'); // сегодня, неполный день — показывается как обычный
 
-  it('по умолчанию — вся история до вчера', () => {
+  it('по умолчанию — вся история по сегодня', () => {
     expect(resolveRange(HISTORY_FROM, NOW)).toEqual({ from: HISTORY_FROM, to: lastDay });
   });
 
-  it('принимает YYYY-MM-DD и обрезает по истории и вчерашнему дню', () => {
+  it('принимает YYYY-MM-DD и обрезает по истории и сегодняшнему дню', () => {
     expect(resolveRange(HISTORY_FROM, NOW, '2026-10-01', '2026-10-05')).toEqual({ from: d('2026-10-01'), to: d('2026-10-05') });
     expect(resolveRange(HISTORY_FROM, NOW, '2026-08-01', '2026-12-31')).toEqual({ from: HISTORY_FROM, to: lastDay });
   });

@@ -35,9 +35,10 @@ export const startOfUtcDay = (ts: number) => Math.floor(ts / DAY) * DAY;
 export const dayKey = (ts: number) => new Date(ts * 1000).toISOString().slice(0, 10);
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
 
-// Период из адреса страницы: YYYY-MM-DD, обрезается по началу истории и вчерашнему (последнему полному) дню
+// Период из адреса страницы: YYYY-MM-DD, обрезается по началу истории и сегодняшнему дню.
+// Сегодня — неполный день, но показывается как обычный (его цифры неокончательные, «≈»).
 export function resolveRange(historyFrom: number, now: number, from?: unknown, to?: unknown): { from: number; to: number } {
-  const lastDay = Math.max(historyFrom, startOfUtcDay(now) - DAY);
+  const lastDay = Math.max(historyFrom, startOfUtcDay(now));
   const parse = (value: unknown) =>
     typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? Date.parse(`${value}T00:00:00Z`) / 1000 : NaN;
   const clamp = (value: number, fallback: number) =>

@@ -135,16 +135,16 @@
   const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
   const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
 
-  // Пресеты считаются от вчера (последний полный день, UTC); сервер обрежет по началу истории
+  // Пресеты считаются по сегодня включительно (UTC); сервер обрежет по началу истории
   function presetRange(preset) {
-    const today = new Date(Date.now());
-    const yesterday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - DAY_MS);
-    const y = today.getUTCFullYear();
-    const m = today.getUTCMonth();
+    const now = new Date(Date.now());
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth();
+    const today = new Date(Date.UTC(y, m, now.getUTCDate()));
     switch (preset) {
-      case 'last7': return { from: iso(new Date(yesterday - 6 * DAY_MS)), to: iso(yesterday) };
-      case 'last30': return { from: iso(new Date(yesterday - 29 * DAY_MS)), to: iso(yesterday) };
-      case 'thisMonth': return { from: iso(new Date(Date.UTC(y, m, 1))), to: iso(yesterday) };
+      case 'last7': return { from: iso(new Date(today - 6 * DAY_MS)), to: iso(today) };
+      case 'last30': return { from: iso(new Date(today - 29 * DAY_MS)), to: iso(today) };
+      case 'thisMonth': return { from: iso(new Date(Date.UTC(y, m, 1))), to: iso(today) };
       case 'prevMonth': return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: iso(new Date(Date.UTC(y, m, 0))) };
       default: return { from: '', to: '' }; // «всё время» — сервер возьмёт всю историю
     }
