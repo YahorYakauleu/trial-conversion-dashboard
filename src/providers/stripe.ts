@@ -1,16 +1,20 @@
 import Stripe from 'stripe';
 import type { Store, TrialRow } from '../db.js';
+import { forEachDay } from '../days.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 
 export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events'>;
 
 interface StripeSyncConfig {
-  historyDays: number;
-  trialLookbackDays: number;
+  historyFrom: number;
 }
 
+// Сколько дней выгружать одновременно: каждый день — отдельная цепочка запросов
+const PARALLEL_DAYS = 4;
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
+// Всё, что создано позже суток после конца триала, — уже не первый платный инвойс.
 const FIRST_INVOICE_TOLERANCE = 3_600;
+const FIRST_INVOICE_MAX_DELAY = DAY;
 // Первая автоматическая попытка идёт сразу при финализации инвойса. Оплата сильно позже —
 // это ретрай или ручная оплата после отказа (последняя не увеличивает attempt_count).
 const FIRST_ATTEMPT_MAX_DELAY = 3_600;
@@ -42,7 +46,8 @@ export function applyInvoice(trial: TrialRow, invoice: Stripe.Invoice): TrialRow
     !!invoice.id &&
     invoice.billing_reason === 'subscription_cycle' &&
     invoice.amount_due > 0 &&
-    invoice.created >= trial.trial_ended_at - FIRST_INVOICE_TOLERANCE;
+    invoice.created >= trial.trial_ended_at - FIRST_INVOICE_TOLERANCE &&
+    invoice.created <= trial.trial_ended_at + FIRST_INVOICE_MAX_DELAY;
   const isSameInvoice = trial.first_invoice_id === null || trial.first_invoice_id === invoice.id;
   if (!isFirstPaidCandidate || !isSameInvoice) return trial;
 
@@ -63,8 +68,8 @@ export function createStripeClient(key: string): StripeLike {
   return new Stripe(key, { apiVersion: '2025-08-27.basil', maxNetworkRetries: 3 });
 }
 
-// Без курсора — бэкфилл по дням с сохранением прогресса; затем всегда инкремент:
-// новые подписки и события об оплате/отказе с (курсор − 1 день).
+// Без курсора — бэкфилл с HISTORY_FROM по дням (несколько дней параллельно, прогресс сохраняется);
+// затем всегда инкремент: новые подписки и события об оплате/отказе с (курсор − 1 день).
 export async function syncStripeAccount(
   store: Store,
   stripe: StripeLike,
@@ -93,24 +98,32 @@ export async function syncStripeAccount(
   };
 
   if (cursor === null) {
-    const subsFrom =
-      store.getState('stripe', account, 'subs_day') ?? today - (cfg.historyDays + cfg.trialLookbackDays) * DAY;
-    for (let day = subsFrom; day < today; day += DAY) {
-      for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
-        saveSubscription(sub);
-      }
-      store.setState('stripe', account, 'subs_day', day + DAY);
-      console.log(`[stripe:${account}] подписки ${dayKey(day)} готово`);
-    }
+    // Сначала все подписки (триалы), потом инвойсы — инвойс применяется только к уже известному триалу
+    await forEachDay(
+      store.getState('stripe', account, 'subs_day') ?? cfg.historyFrom,
+      today,
+      PARALLEL_DAYS,
+      async (day) => {
+        for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
+          saveSubscription(sub);
+        }
+        console.log(`[stripe:${account}] подписки ${dayKey(day)} готово`);
+      },
+      (next) => store.setState('stripe', account, 'subs_day', next),
+    );
 
-    const invoicesFrom = store.getState('stripe', account, 'invoices_day') ?? today - (cfg.historyDays + 1) * DAY;
-    for (let day = invoicesFrom; day < today; day += DAY) {
-      for await (const invoice of stripe.invoices.list({ created: { gte: day, lt: day + DAY }, limit: 100 })) {
-        saveInvoice(invoice);
-      }
-      store.setState('stripe', account, 'invoices_day', day + DAY);
-      console.log(`[stripe:${account}] инвойсы ${dayKey(day)} готово`);
-    }
+    await forEachDay(
+      store.getState('stripe', account, 'invoices_day') ?? cfg.historyFrom,
+      today,
+      PARALLEL_DAYS,
+      async (day) => {
+        for await (const invoice of stripe.invoices.list({ created: { gte: day, lt: day + DAY }, limit: 100 })) {
+          saveInvoice(invoice);
+        }
+        console.log(`[stripe:${account}] инвойсы ${dayKey(day)} готово`);
+      },
+      (next) => store.setState('stripe', account, 'invoices_day', next),
+    );
   }
 
   const since = (cursor ?? today) - DAY;

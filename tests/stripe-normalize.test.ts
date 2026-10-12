@@ -87,6 +87,7 @@ describe('applyInvoice', () => {
     expect(applyInvoice(trial, inv({ billing_reason: 'subscription_create', amount_due: 0 }))).toBe(trial);
     expect(applyInvoice(trial, inv({ amount_due: 0 }))).toBe(trial);
     expect(applyInvoice(trial, inv({ created: 10_000 - 3_601 }))).toBe(trial);
+    expect(applyInvoice(trial, inv({ created: 10_000 + 86_401 }))).toBe(trial); // инвойс второго месяца
     expect(applyInvoice({ ...trial, first_invoice_id: 'in_0' }, inv({}))).toEqual({ ...trial, first_invoice_id: 'in_0' });
   });
 });

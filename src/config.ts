@@ -15,8 +15,7 @@ export interface Config {
   stripeAccounts: StripeAccount[];
   solidgateAccounts: SolidgateAccount[];
   retryWindowDays: number;
-  historyDays: number;
-  trialLookbackDays: number;
+  historyFrom: number; // unix-секунды, полночь UTC
   syncCron: string;
   basicAuth: { user: string; password: string };
   dataDir: string;
@@ -47,8 +46,7 @@ export function loadConfig(env: Env = process.env): Config {
     stripeAccounts,
     solidgateAccounts,
     retryWindowDays: positiveInt(env, 'RETRY_WINDOW_DAYS', 30),
-    historyDays: positiveInt(env, 'HISTORY_DAYS', 90),
-    trialLookbackDays: positiveInt(env, 'TRIAL_LOOKBACK_DAYS', 31),
+    historyFrom: utcDate(env, 'HISTORY_FROM'),
     syncCron: env.SYNC_CRON?.trim() || '0 5 * * *',
     basicAuth: { user: required(env, 'BASIC_AUTH_USER'), password: required(env, 'BASIC_AUTH_PASSWORD') },
     dataDir: env.DATA_DIR?.trim() || './data',
@@ -69,6 +67,13 @@ function required(env: Env, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new Error(`Не задана переменная ${name}`);
   return value;
+}
+
+function utcDate(env: Env, name: string): number {
+  const raw = required(env, name);
+  const ms = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? Date.parse(`${raw}T00:00:00Z`) : NaN;
+  if (Number.isNaN(ms)) throw new Error(`${name} должна быть датой в формате YYYY-MM-DD`);
+  return ms / 1000;
 }
 
 function positiveInt(env: Env, name: string, fallback: number): number {

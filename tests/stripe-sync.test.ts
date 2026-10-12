@@ -5,7 +5,8 @@ import { syncStripeAccount, type StripeLike } from '../src/providers/stripe.js';
 
 const NOW = Date.parse('2026-10-12T10:00:00Z') / 1000;
 const TODAY = NOW - (NOW % DAY);
-const cfg = { historyDays: 90, trialLookbackDays: 31 };
+const HISTORY_FROM = Date.parse('2026-09-01T00:00:00Z') / 1000;
+const cfg = { historyFrom: HISTORY_FROM };
 
 type Range = { gte?: number; lt?: number };
 type Call = { method: string; params: { created: Range; [key: string]: unknown } };
@@ -56,10 +57,23 @@ describe('syncStripeAccount', () => {
     expect(store.getState('stripe', 'org', 'cursor')).toBe(NOW);
     expect(calls.find((c) => c.method === 'subscriptions')!.params).toMatchObject({
       status: 'all',
-      created: { gte: TODAY - 121 * DAY, lt: TODAY - 120 * DAY },
+      created: { gte: HISTORY_FROM, lt: HISTORY_FROM + DAY },
     });
-    expect(calls.find((c) => c.method === 'invoices')!.params.created.gte).toBe(TODAY - 91 * DAY);
+    expect(calls.find((c) => c.method === 'invoices')!.params.created.gte).toBe(HISTORY_FROM);
     expect(items).toBe(2); // подписка + первый платный инвойс
+  });
+
+  it('бэкфилл обходит каждый день с HISTORY_FROM до вчера ровно один раз', async () => {
+    const store = openStore(':memory:');
+    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    const backfillDays = (method: string) =>
+      calls.filter((c) => c.method === method && c.params.created.lt !== undefined).map((c) => c.params.created.gte!);
+    const expected = Array.from({ length: (TODAY - HISTORY_FROM) / DAY }, (_, i) => HISTORY_FROM + i * DAY);
+    expect(backfillDays('subscriptions').sort()).toEqual(expected);
+    expect(backfillDays('invoices').sort()).toEqual(expected);
+    expect(store.getState('stripe', 'corp', 'subs_day')).toBe(TODAY);
   });
 
   it('ежедневно: события об оплате на ретрае обновляют paid_at', async () => {

@@ -5,7 +5,12 @@ import { openStore } from '../src/db.js';
 import { createApp } from '../src/server.js';
 import type { Source } from '../src/sync.js';
 
-const config = loadConfig({ STRIPE_KEYS: 'org=rk', BASIC_AUTH_USER: 'billing', BASIC_AUTH_PASSWORD: 'p:ss' });
+const config = loadConfig({
+  STRIPE_KEYS: 'org=rk',
+  BASIC_AUTH_USER: 'billing',
+  BASIC_AUTH_PASSWORD: 'p:ss',
+  HISTORY_FROM: '2026-09-01',
+});
 const auth = { authorization: `Basic ${Buffer.from('billing:p:ss').toString('base64')}` };
 let close: () => void = () => {};
 
@@ -32,7 +37,7 @@ describe('server', () => {
     const url = await start();
     const body = await (await fetch(`${url}/api/metrics?provider=stripe&granularity=week`, { headers: auth })).json();
     expect(body).toMatchObject({ retry_window_days: 30, sync_running: false, sync: [] });
-    expect(body.cards).toHaveProperty('ended_7d');
+    expect(body.cards).toHaveProperty('started_7d');
     expect(Array.isArray(body.series)).toBe(true);
   });
 

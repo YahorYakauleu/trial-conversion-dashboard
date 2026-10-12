@@ -6,6 +6,7 @@ const base = {
   SOLIDGATE_KEYS: 'sg=api_pk_1:api_sk_1',
   BASIC_AUTH_USER: 'billing',
   BASIC_AUTH_PASSWORD: 'secret',
+  HISTORY_FROM: '2026-09-01',
 };
 
 describe('loadConfig', () => {
@@ -18,8 +19,7 @@ describe('loadConfig', () => {
     expect(c.solidgateAccounts).toEqual([{ account: 'sg', publicKey: 'api_pk_1', secretKey: 'api_sk_1' }]);
     expect(c).toMatchObject({
       retryWindowDays: 30,
-      historyDays: 90,
-      trialLookbackDays: 31,
+      historyFrom: Date.parse('2026-09-01T00:00:00Z') / 1000,
       syncCron: '0 5 * * *',
       dataDir: './data',
       port: 3000,
@@ -31,13 +31,16 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ BASIC_AUTH_USER: 'u', BASIC_AUTH_PASSWORD: 'p' })).toThrow(/STRIPE_KEYS или SOLIDGATE_KEYS/);
   });
 
-  it('требует basic auth', () => {
-    expect(() => loadConfig({ STRIPE_KEYS: 'org=rk' })).toThrow(/BASIC_AUTH_USER/);
+  it('требует basic auth и дату начала истории', () => {
+    expect(() => loadConfig({ STRIPE_KEYS: 'org=rk', HISTORY_FROM: '2026-09-01' })).toThrow(/BASIC_AUTH_USER/);
+    expect(() => loadConfig({ ...base, HISTORY_FROM: undefined })).toThrow(/HISTORY_FROM/);
   });
 
   it('ругается на кривой формат', () => {
     expect(() => loadConfig({ ...base, STRIPE_KEYS: 'rk_live_a' })).toThrow(/name=value/);
     expect(() => loadConfig({ ...base, SOLIDGATE_KEYS: 'sg=only_public' })).toThrow(/public:secret/);
     expect(() => loadConfig({ ...base, RETRY_WINDOW_DAYS: '0' })).toThrow(/RETRY_WINDOW_DAYS/);
+    expect(() => loadConfig({ ...base, HISTORY_FROM: '01.09.2026' })).toThrow(/YYYY-MM-DD/);
+    expect(() => loadConfig({ ...base, HISTORY_FROM: '2026-13-01' })).toThrow(/YYYY-MM-DD/);
   });
 });

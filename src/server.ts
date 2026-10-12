@@ -27,7 +27,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       provider,
       granularity,
       now: nowSec(),
-      historyDays: config.historyDays,
+      historyFrom: config.historyFrom,
       retryWindowDays: config.retryWindowDays,
     });
     res.json({
