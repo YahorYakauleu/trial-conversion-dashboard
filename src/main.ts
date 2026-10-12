@@ -2,9 +2,9 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import cron from 'node-cron';
 import { loadConfig, loadEnvFile } from './config.js';
-import { openStore } from './db.js';
+import { nowSec, openStore } from './db.js';
 import { createApp } from './server.js';
-import { buildSources, runSync } from './sync.js';
+import { buildSources, needsStartupSync, runSync } from './sync.js';
 
 loadEnvFile();
 const config = loadConfig();
@@ -21,7 +21,7 @@ createApp({ store, config, sources }).listen(config.port, () => {
 
 cron.schedule(config.syncCron, () => void runSync(store, sources), { timezone: 'UTC' });
 
-// Первый запуск или прерванный бэкфилл — сразу догружаем
-if (sources.some((s) => store.getState(s.provider, s.account, 'cursor') === null)) {
+if (needsStartupSync(store, sources, nowSec())) {
+  console.log('Данные устарели или первая выгрузка не закончена — запускаю синк');
   void runSync(store, sources);
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openStore } from '../src/db.js';
-import { isSyncRunning, runSync, type Source } from '../src/sync.js';
+import { DAY } from '../src/metrics.js';
+import { isSyncRunning, needsStartupSync, runSync, type Source } from '../src/sync.js';
 
 const source = (provider: Source['provider'], account: string, run: Source['run']): Source => ({ provider, account, run });
 
@@ -41,5 +42,30 @@ describe('runSync', () => {
     release();
     expect(await first).toBe(true);
     expect(isSyncRunning()).toBe(false);
+  });
+});
+
+describe('needsStartupSync', () => {
+  const NOW = 1_800_000_000;
+  const sources = [source('stripe', 'corp', async () => 0), source('solidgate', 'sgH2H', async () => 0)];
+
+  it('нужен, если первая выгрузка какого-то источника не закончена', () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - 3600);
+    expect(needsStartupSync(store, sources, NOW)).toBe(true);
+  });
+
+  it('нужен, если последний успешный синк любого источника старше суток', () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - 3600);
+    store.setState('solidgate', 'sgH2H', 'cursor', NOW - DAY - 1);
+    expect(needsStartupSync(store, sources, NOW)).toBe(true);
+  });
+
+  it('не нужен, если все синкались меньше суток назад', () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - DAY);
+    store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
+    expect(needsStartupSync(store, sources, NOW)).toBe(false);
   });
 });

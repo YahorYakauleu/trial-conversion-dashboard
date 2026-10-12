@@ -1,5 +1,6 @@
 import type { Config } from './config.js';
 import { nowSec, type Provider, type Store } from './db.js';
+import { DAY } from './metrics.js';
 import { syncSolidgateAccount } from './providers/solidgate.js';
 import { createStripeClient, syncStripeAccount } from './providers/stripe.js';
 
@@ -12,6 +13,15 @@ export interface Source {
 let running = false;
 
 export const isSyncRunning = () => running;
+
+// Синк при старте: первая выгрузка не закончена или данные старше суток —
+// например, сервер был выключен во время планового синка. Курсор = время последнего успешного синка.
+export function needsStartupSync(store: Store, sources: Source[], now: number): boolean {
+  return sources.some((s) => {
+    const cursor = store.getState(s.provider, s.account, 'cursor');
+    return cursor === null || now - cursor > DAY;
+  });
+}
 
 // Источники синкаются по очереди; ошибка одного пишется в журнал и не трогает остальные.
 export async function runSync(store: Store, sources: Source[]): Promise<boolean> {
