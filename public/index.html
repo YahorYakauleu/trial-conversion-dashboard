@@ -1,2 +1,204 @@
 <!doctype html>
-<title>Trial → Paid</title>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trial → Paid</title>
+  <style>
+    :root {
+      --text: #1f1f1d; --muted: #6b6b66; --line: #e6e6e1; --card: #f5f5f1; --bg: #ffffff;
+      --ok: #0f6e56; --err: #a32d2d; --bar: #d3d1c7; --first: #1d9e75; --retry: #534ab7;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --text: #ecebe6; --muted: #9c9b95; --line: #34332f; --card: #24231f; --bg: #171614;
+        --ok: #5dcaa5; --err: #f09595; --bar: #3a3935; --first: #5dcaa5; --retry: #afa9ec;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 system-ui, -apple-system, sans-serif; color: var(--text); background: var(--bg); }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+    h1 { font-size: 20px; font-weight: 600; margin: 0 0 2px; }
+    button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+    button:hover { background: var(--card); }
+    .muted { color: var(--muted); font-size: 13px; }
+    .ok { color: var(--ok); }
+    .err { color: var(--err); }
+    .controls { display: flex; gap: 16px; margin: 20px 0 16px; flex-wrap: wrap; }
+    .seg { display: flex; gap: 4px; }
+    .seg button.on { background: var(--card); font-weight: 600; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .card { background: var(--card); border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; }
+    .card b { font-size: 26px; font-weight: 600; }
+    .chart { position: relative; height: 320px; margin: 24px 0 8px; }
+    .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+    .swatch { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 6px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+    th { color: var(--muted); font-weight: 500; }
+    th:first-child, td:first-child { text-align: left; }
+    .pending { color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Trial → Paid</h1>
+      <div class="muted" id="status">Загрузка…</div>
+    </div>
+    <button id="refresh">Обновить</button>
+  </header>
+
+  <div class="controls">
+    <div class="seg" id="provider">
+      <button data-v="all" class="on">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
+    </div>
+    <div class="seg" id="granularity">
+      <button data-v="day" class="on">День</button><button data-v="week">Неделя</button>
+    </div>
+  </div>
+
+  <div class="cards" id="cards"></div>
+  <div class="chart"><canvas id="chart" aria-label="Конверсия триалов в платные по дате окончания триала"></canvas></div>
+  <div class="legend muted">
+    <span><span class="swatch" style="background: var(--first)"></span>С первой попытки</span>
+    <span><span class="swatch" style="background: var(--retry)"></span>С учётом ретраев (<span id="window">30</span> дн)</span>
+    <span><span class="swatch" style="background: var(--bar); height: 10px; width: 10px"></span>Триалов закончилось</span>
+    <span>Пунктир и «≈» — цифра ещё меняется</span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Конец триала</th><th>Триалов</th><th>С первой попытки</th><th>С учётом ретраев</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+  const state = { provider: 'all', granularity: 'day' };
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // От origin, а не от адреса страницы: если дашборд открыт как user:pass@host, fetch отвергает относительный URL
+  const api = (path, init) => fetch(new URL(path, location.origin), init);
+  let chart;
+  let pollTimer;
+
+  const pct = (r) => (r === null ? '—' : `${(r * 100).toFixed(1)}%`);
+  const num = (n) => n.toLocaleString('ru-RU');
+  const utc = (ts) => (ts ? `${new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'ещё не было');
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const range = (c) => (c.from ? `${c.from} — ${c.to}` : 'нет окончательных данных');
+
+  async function load() {
+    clearTimeout(pollTimer);
+    try {
+      const res = await api(`/api/metrics?provider=${state.provider}&granularity=${state.granularity}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      document.getElementById('window').textContent = data.retry_window_days;
+      renderStatus(data);
+      renderCards(data.cards);
+      renderChart(data.series);
+      renderTable(data.series);
+      if (data.sync_running) pollTimer = setTimeout(load, 10_000);
+    } catch (error) {
+      document.getElementById('status').innerHTML = `<span class="err">Не удалось загрузить данные: ${esc(error.message)}</span>`;
+    }
+  }
+
+  function renderStatus(data) {
+    const parts = data.sync.map((s) => {
+      const label = `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}`;
+      if (s.last_status === 'running') return `${label}: идёт синк`;
+      if (s.last_status === 'error') {
+        return `<span class="err" title="${esc(s.last_error ?? '')}">${label}: ошибка — ${esc(s.last_error ?? '')}</span> (успешно: ${utc(s.last_success_at)})`;
+      }
+      return `<span class="ok">${label}</span> ${utc(s.last_success_at)}`;
+    });
+    document.getElementById('status').innerHTML = parts.join(' · ') || 'Синков ещё не было';
+    document.getElementById('refresh').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
+  }
+
+  function renderCards(c) {
+    document.getElementById('cards').innerHTML = [
+      ['Триалов закончилось, 7 дн', num(c.ended_7d.value), range(c.ended_7d)],
+      ['С первой попытки, 7 дн', pct(c.rate_first_7d.rate), range(c.rate_first_7d)],
+      ['С учётом ретраев, дозревшие 7 дн', pct(c.rate_retry_7d.rate), range(c.rate_retry_7d)],
+    ]
+      .map(([label, value, period]) => `<div class="card"><span class="muted">${label}</span><b>${value}</b><span class="muted">${period}</span></div>`)
+      .join('');
+  }
+
+  function renderChart(series) {
+    const dashed = (key) => (ctx) => (series[ctx.p1DataIndex][key] ? undefined : [5, 4]);
+    const toPct = (r) => (r === null ? null : +(r * 100).toFixed(1));
+    const line = (label, key, finalKey, color, order) => ({
+      type: 'line', label, data: series.map((p) => toPct(p[key])), yAxisID: 'rate', order,
+      borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: series.length > 40 ? 0 : 2,
+      tension: 0.2, spanGaps: true, segment: { borderDash: dashed(finalKey) },
+    });
+    const datasets = [
+      { type: 'bar', label: 'Триалов закончилось', data: series.map((p) => p.ended), backgroundColor: css('--bar'), yAxisID: 'count', order: 3 },
+      line('С первой попытки', 'rate_first', 'final_first', css('--first'), 1),
+      line('С учётом ретраев', 'rate_retry', 'final_retry', css('--retry'), 2),
+    ];
+
+    Chart.defaults.color = css('--muted');
+    Chart.defaults.borderColor = css('--line');
+    if (chart) chart.destroy();
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'bar',
+      data: { labels: series.map((p) => p.period), datasets },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (c) => (c.datasetIndex === 0 ? `${c.dataset.label}: ${num(c.raw)}` : `${c.dataset.label}: ${c.raw ?? '—'}%`),
+            },
+          },
+        },
+        scales: {
+          x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkipPadding: 16 } },
+          rate: { position: 'left', min: 0, ticks: { callback: (v) => `${v}%` } },
+          count: { position: 'right', grid: { display: false }, ticks: { callback: (v) => num(v) } },
+        },
+      },
+    });
+  }
+
+  function renderTable(series) {
+    const cell = (n, r, final) => `<td class="${final ? '' : 'pending'}">${final ? '' : '≈ '}${num(n)} (${pct(r)})</td>`;
+    document.getElementById('rows').innerHTML = [...series]
+      .reverse()
+      .map((p) => `<tr><td>${p.period}</td><td>${num(p.ended)}</td>${cell(p.paid_first, p.rate_first, p.final_first)}${cell(p.paid_retry, p.rate_retry, p.final_retry)}</tr>`)
+      .join('');
+  }
+
+  for (const id of ['provider', 'granularity']) {
+    document.getElementById(id).addEventListener('click', (event) => {
+      const value = event.target.dataset?.v;
+      if (!value) return;
+      state[id] = value;
+      document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === value));
+      load();
+    });
+  }
+
+  document.getElementById('refresh').addEventListener('click', async () => {
+    await api('/api/sync', { method: 'POST' });
+    load();
+  });
+
+  load();
+</script>
+</body>
+</html>
