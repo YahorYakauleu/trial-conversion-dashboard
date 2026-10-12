@@ -230,7 +230,10 @@
       background: var(--bg); border-left: 1px solid var(--border); box-shadow: -20px 0 60px rgba(0, 0, 0, 0.25);
       padding: 20px 24px 48px;
     }
-    .drawer-head { display: flex; justify-content: flex-end; position: sticky; top: -20px; padding-top: 4px; }
+    .drawer-head {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px; position: sticky; top: -20px;
+      margin: -20px -24px 16px; padding: 16px 24px 12px; background: var(--bg); border-bottom: 1px solid var(--border); z-index: 1;
+    }
     .doc { line-height: 1.6; color: var(--text-2); }
     .doc h1 { font-size: 20px; color: var(--text); margin: 0 0 12px; letter-spacing: -0.01em; }
     .doc h2 { font-size: 15px; color: var(--text); margin: 24px 0 8px; }
@@ -238,8 +241,13 @@
     .doc ul { padding-left: 20px; margin: 8px 0; }
     .doc li { margin: 4px 0; }
     .doc code { font-size: 12px; padding: 1px 5px; border-radius: 6px; background: var(--surface-sunken); border: 1px solid var(--border); }
+    .doc pre {
+      margin: 12px 0; padding: 12px 14px; overflow-x: auto; border-radius: 12px;
+      background: var(--surface-sunken); border: 1px solid var(--border); font-size: 12px; line-height: 1.5; color: var(--text);
+    }
+    .doc pre code { padding: 0; border: 0; background: transparent; font-size: inherit; }
     .doc table { margin: 8px 0; font-variant-numeric: normal; }
-    .doc th, .doc td { white-space: normal; text-align: left; padding: 8px 10px; vertical-align: top; }
+    .doc th, .doc td { white-space: normal; text-align: left; padding: 8px 10px; vertical-align: top; overflow-wrap: anywhere; }
     .doc td:first-child { font-weight: 400; max-width: none; }
     .doc tbody tr:hover td { background: transparent; }
     #content { transition: opacity 0.2s; }
@@ -248,6 +256,8 @@
       .actions .btn span { display: none; }
       .actions .btn { padding: 0 10px; }
       .drawer { padding: 16px; }
+      .drawer-head { margin: -16px -16px 12px; padding: 12px 16px; top: -16px; }
+      .doc th, .doc td { padding: 6px; }
       .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
       .kpi { padding: 12px; border-radius: 14px; }
       .kpi .value { font-size: 21px; }
@@ -354,7 +364,12 @@
 
 <div class="overlay" id="help-overlay" hidden></div>
 <aside class="drawer" id="help" role="dialog" aria-modal="true" aria-label="Как считаются метрики" hidden>
-  <div class="drawer-head"><button class="btn" id="help-close" aria-label="Закрыть">✕</button></div>
+  <div class="drawer-head">
+    <div class="seg" id="help-tabs" role="tablist" aria-label="Раздел">
+      <button data-v="metrics" role="tab">Метрики</button><button data-v="data-sources" role="tab">Откуда данные</button>
+    </div>
+    <button class="btn" id="help-close" aria-label="Закрыть">✕</button>
+  </div>
   <article class="doc" id="help-body">Загрузка…</article>
 </aside>
 
@@ -664,21 +679,34 @@
     if (currentTheme() === 'auto' && lastData && state.view === 'time') renderCharts(lastData.series);
   });
 
-  // «Как считается»: текст — public/metrics.md, один источник для дашборда и репозитория
-  let helpLoaded = false;
-  async function openHelp() {
+  // «Как считается»: тексты — public/metrics.md и public/data-sources.md, один источник для дашборда и репозитория
+  const helpCache = {};
+  let helpTab = 'metrics';
+  async function showHelpTab(tab) {
+    helpTab = tab;
+    document.querySelectorAll('#help-tabs button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.v === tab);
+      b.setAttribute('aria-selected', String(b.dataset.v === tab));
+    });
+    const body = document.getElementById('help-body');
+    try {
+      if (!helpCache[tab]) {
+        body.textContent = 'Загрузка…';
+        const res = await api(`/${tab}.md`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        helpCache[tab] = marked.parse(await res.text());
+      }
+      if (helpTab === tab) body.innerHTML = helpCache[tab];
+      document.getElementById('help').scrollTop = 0;
+    } catch (error) {
+      body.textContent = `Не удалось загрузить описание: ${error.message}`;
+    }
+  }
+  function openHelp() {
     document.getElementById('help').hidden = false;
     document.getElementById('help-overlay').hidden = false;
     document.getElementById('help-close').focus();
-    if (helpLoaded) return;
-    try {
-      const res = await api('/metrics.md');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      document.getElementById('help-body').innerHTML = marked.parse(await res.text());
-      helpLoaded = true;
-    } catch (error) {
-      document.getElementById('help-body').textContent = `Не удалось загрузить описание: ${error.message}`;
-    }
+    showHelpTab(helpTab);
   }
   function closeHelp() {
     document.getElementById('help').hidden = true;
@@ -686,6 +714,10 @@
     document.getElementById('help-open').focus();
   }
   document.getElementById('help-open').addEventListener('click', openHelp);
+  document.getElementById('help-tabs').addEventListener('click', (event) => {
+    const tab = event.target.closest('button')?.dataset.v;
+    if (tab) showHelpTab(tab);
+  });
   document.getElementById('help-close').addEventListener('click', closeHelp);
   document.getElementById('help-overlay').addEventListener('click', closeHelp);
   document.addEventListener('keydown', (event) => {
