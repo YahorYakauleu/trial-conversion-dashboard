@@ -14,6 +14,27 @@ export interface TrialRow {
   first_attempt_succeeded: boolean | null;
   paid_at: number | null;
   country: string | null; // страна карты, двухбуквенный код (US, GB, …)
+  payment_method: string | null; // apple_pay, google_pay, card, paypal…
+  card_brand: string | null; // visa, mastercard…
+  bank: string | null; // банк-эмитент (есть только у Solidgate)
+}
+
+// Одна попытка списания первого платного периода (Stripe charge / Solidgate order)
+export interface AttemptRow {
+  provider: Provider;
+  attempt_id: string;
+  subscription_id: string;
+  attempted_at: number;
+  approved: boolean;
+  reason: string | null; // код причины отказа провайдера
+  refunded: boolean;
+}
+
+export interface CardDetails {
+  country: string | null;
+  payment_method: string | null;
+  card_brand: string | null;
+  bank: string | null;
 }
 
 export interface LatestRun {
@@ -66,19 +87,35 @@ export function openStore(file: string) {
       PRIMARY KEY (provider, account, key)
     );
   `);
-  // Колонка страны появилась позже — добавляем в уже существующую базу
-  const columns = db.prepare('PRAGMA table_info(trials)').all() as { name: string }[];
-  if (!columns.some((c) => c.name === 'country')) db.exec('ALTER TABLE trials ADD COLUMN country TEXT');
-  db.exec('CREATE INDEX IF NOT EXISTS trials_started_idx ON trials (trial_started_at)');
+  // Колонки карты появились позже — добавляем в уже существующую базу
+  const columns = new Set((db.prepare('PRAGMA table_info(trials)').all() as { name: string }[]).map((c) => c.name));
+  for (const column of ['country', 'payment_method', 'card_brand', 'bank']) {
+    if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} TEXT`);
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS trials_started_idx ON trials (trial_started_at);
+    CREATE INDEX IF NOT EXISTS trials_first_invoice_idx ON trials (provider, first_invoice_id);
+    CREATE TABLE IF NOT EXISTS attempts (
+      provider TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      subscription_id TEXT NOT NULL,
+      attempted_at INTEGER NOT NULL,
+      approved INTEGER NOT NULL,
+      reason TEXT,
+      refunded INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (provider, attempt_id)
+    );
+    CREATE INDEX IF NOT EXISTS attempts_subscription_idx ON attempts (provider, subscription_id);
+  `);
 
   // Поля оплаты сливаются через COALESCE: повторная выгрузка без инвойса не стирает уже известную оплату.
   // Неудачная первая попытка необратима: события Stripe приходят в любом порядке, а ручная оплата
   // после отказа выглядит как успешный инвойс с attempt_count = 1.
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
-                        first_invoice_id, first_attempt_succeeded, paid_at, country, synced_at)
+                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, synced_at)
     VALUES (@provider, @account, @subscription_id, @trial_started_at, @trial_ended_at,
-            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @synced_at)
+            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @synced_at)
     ON CONFLICT (provider, subscription_id) DO UPDATE SET
       account = excluded.account,
       trial_started_at = excluded.trial_started_at,
@@ -88,12 +125,29 @@ export function openStore(file: string) {
                                      ELSE COALESCE(excluded.first_attempt_succeeded, trials.first_attempt_succeeded) END,
       paid_at = COALESCE(excluded.paid_at, trials.paid_at),
       country = COALESCE(excluded.country, trials.country),
+      payment_method = COALESCE(excluded.payment_method, trials.payment_method),
+      card_brand = COALESCE(excluded.card_brand, trials.card_brand),
+      bank = COALESCE(excluded.bank, trials.bank),
       synced_at = excluded.synced_at
   `);
-  // Страна из отдельного источника (заказы Solidgate) — только если её ещё нет
-  const updateCountry = db.prepare(
-    'UPDATE trials SET country = ? WHERE provider = ? AND subscription_id = ? AND country IS NULL',
-  );
+  // Данные карты из отдельного источника (заказы Solidgate) — заполняют только пустые поля
+  const updateCardDetails = db.prepare(`
+    UPDATE trials SET country = COALESCE(country, @country), payment_method = COALESCE(payment_method, @payment_method),
+                      card_brand = COALESCE(card_brand, @card_brand), bank = COALESCE(bank, @bank)
+    WHERE provider = @provider AND subscription_id = @subscription_id
+  `);
+  // Попытка: результат обновляется, причина и рефанд не стираются
+  const upsertAttemptStmt = db.prepare(`
+    INSERT INTO attempts (provider, attempt_id, subscription_id, attempted_at, approved, reason, refunded)
+    VALUES (@provider, @attempt_id, @subscription_id, @attempted_at, @approved, @reason, @refunded)
+    ON CONFLICT (provider, attempt_id) DO UPDATE SET
+      subscription_id = excluded.subscription_id,
+      attempted_at = excluded.attempted_at,
+      approved = excluded.approved,
+      reason = COALESCE(excluded.reason, attempts.reason),
+      refunded = MAX(excluded.refunded, attempts.refunded)
+  `);
+  const selectByInvoice = db.prepare('SELECT subscription_id FROM trials WHERE provider = ? AND first_invoice_id = ?');
   const selectTrial = db.prepare('SELECT * FROM trials WHERE provider = ? AND subscription_id = ?');
   const selectState = db.prepare('SELECT value FROM sync_state WHERE provider = ? AND account = ? AND key = ?');
   const upsertState = db.prepare(`
@@ -116,12 +170,40 @@ export function openStore(file: string) {
         first_attempt_succeeded: row.first_attempt_succeeded === null ? null : Number(row.first_attempt_succeeded),
         paid_at: row.paid_at,
         country: row.country,
+        payment_method: row.payment_method,
+        card_brand: row.card_brand,
+        bank: row.bank,
         synced_at: now,
       });
     },
 
-    setCountry(provider: Provider, subscriptionId: string, country: string): boolean {
-      return Number(updateCountry.run(country, provider, subscriptionId).changes) > 0;
+    setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails): void {
+      updateCardDetails.run({ provider, subscription_id: subscriptionId, ...details });
+    },
+
+    upsertAttempt(a: AttemptRow): void {
+      upsertAttemptStmt.run({ ...a, approved: Number(a.approved), refunded: Number(a.refunded) });
+    },
+
+    // Причина отказа из отдельного источника (заказы Solidgate) и рефанды (Stripe refunds) — по id попытки
+    setAttemptReason(provider: Provider, attemptId: string, reason: string): void {
+      db.prepare('UPDATE attempts SET reason = COALESCE(reason, ?) WHERE provider = ? AND attempt_id = ?').run(reason, provider, attemptId);
+    },
+
+    markRefunded(provider: Provider, attemptId: string): void {
+      db.prepare('UPDATE attempts SET refunded = 1 WHERE provider = ? AND attempt_id = ?').run(provider, attemptId);
+    },
+
+    subscriptionByFirstInvoice(provider: Provider, invoiceId: string): string | null {
+      const r = selectByInvoice.get(provider, invoiceId) as { subscription_id: string } | undefined;
+      return r?.subscription_id ?? null;
+    },
+
+    getAttempts(provider: Provider, subscriptionId: string): AttemptRow[] {
+      const rows = db
+        .prepare('SELECT * FROM attempts WHERE provider = ? AND subscription_id = ? ORDER BY attempted_at')
+        .all(provider, subscriptionId) as unknown as (Omit<AttemptRow, 'approved' | 'refunded'> & { approved: number; refunded: number })[];
+      return rows.map((r) => ({ ...r, approved: r.approved === 1, refunded: r.refunded === 1 }));
     },
 
     getTrial(provider: Provider, subscriptionId: string): TrialRow | null {
@@ -139,6 +221,9 @@ export function openStore(file: string) {
         first_attempt_succeeded: r.first_attempt_succeeded === null ? null : r.first_attempt_succeeded === 1,
         paid_at: r.paid_at,
         country: r.country,
+        payment_method: r.payment_method,
+        card_brand: r.card_brand,
+        bank: r.bank,
       };
     },
 

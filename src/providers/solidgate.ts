@@ -1,6 +1,6 @@
 import type { SolidgateAccount } from '../config.js';
 import { toAlpha2 } from '../countries.js';
-import type { Store, TrialRow } from '../db.js';
+import type { AttemptRow, CardDetails, Store, TrialRow } from '../db.js';
 import { DAY, dayKey } from '../metrics.js';
 import {
   listCardOrders,
@@ -16,9 +16,13 @@ const FIRST_INVOICE_TOLERANCE = 3_600;
 // Заказ оформления создаётся на секунды раньше подписки — окно заказов начинаем на час раньше
 const ORDERS_LOOKBACK = 3_600;
 // Неудачная попытка — order recurring/auth_failed; успешная — order settle/settle_ok.
-// refunded — значит, списание было; рефанды в v1 не вычитаем.
+// refunded — значит, списание было (и потом вернули деньги).
 const SUCCESS = new Set(['approved', 'settle_ok', 'auth_ok', 'refunded']);
 const PENDING = new Set(['created', 'processing', '3ds_verify']);
+// Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк, попытки, причины отказа, рефанды
+const DETAILS_VERSION = 2;
+// Способ оплаты Solidgate → как в Stripe; token — повторное списание по сохранённой карте, способа не говорит
+const PAYMENT_METHODS: Record<string, string> = { 'apple-pay': 'apple_pay', 'google-pay': 'google_pay', card: 'card', 'paypal-vault': 'paypal' };
 
 export function parseSgDate(value: string): number {
   const iso = value.includes('T') ? value : value.replace(' ', 'T');
@@ -39,22 +43,17 @@ export function trialFromSolidgate(sub: SgSubscription, account: string): TrialR
     first_invoice_id: null,
     first_attempt_succeeded: null,
     paid_at: null,
-    country: null, // в отчёте подписок страны нет — берётся из заказов (orderCardCountry)
+    // в отчёте подписок данных карты нет — они берутся из заказов (orderCardDetails)
+    country: null,
+    payment_method: null,
+    card_brand: null,
+    bank: null,
   };
 
-  // У неоплаченных инвойсов нет billing_period_started_at — датируем по created_at.
-  // Номер периода 0 — триал, 1 — первый платный; если номера нет, отбираем по времени.
-  const invoiceTime = (i: SgInvoice) => parseSgDate(i.created_at ?? i.billing_period_started_at);
-  const isAfterTrial = (i: SgInvoice) =>
-    i.subscription_term_number !== undefined
-      ? i.subscription_term_number >= 1
-      : invoiceTime(i) >= period.end - FIRST_INVOICE_TOLERANCE;
-  const firstPaid = Object.values(sub.invoices ?? {})
-    .filter((i) => i.amount > 0 && isAfterTrial(i))
-    .sort((a, b) => invoiceTime(a) - invoiceTime(b))[0];
+  const firstPaid = firstPaidInvoice(sub, period.end);
   if (!firstPaid) return row;
 
-  const orders = Object.values(firstPaid.orders ?? {}).sort((a, b) => parseSgDate(a.created_at) - parseSgDate(b.created_at));
+  const orders = sortedOrders(firstPaid);
   const firstSuccess = orders.find((o) => SUCCESS.has(o.status));
   return {
     ...row,
@@ -63,6 +62,40 @@ export function trialFromSolidgate(sub: SgSubscription, account: string): TrialR
     paid_at: firstSuccess ? parseSgDate(firstSuccess.processed_at ?? firstSuccess.created_at) : null,
   };
 }
+
+// Попытки списания первого платного периода; попытки «в процессе» ещё не считаем
+export function attemptsFromSolidgate(sub: SgSubscription): AttemptRow[] {
+  const period = trialPeriod(sub);
+  const firstPaid = period ? firstPaidInvoice(sub, period.end) : null;
+  if (!firstPaid) return [];
+  return sortedOrders(firstPaid)
+    .filter((o) => !PENDING.has(o.status))
+    .map((o) => ({
+      provider: 'solidgate' as const,
+      attempt_id: o.id,
+      subscription_id: sub.id,
+      attempted_at: parseSgDate(o.created_at),
+      approved: SUCCESS.has(o.status),
+      reason: null, // код отказа есть только в отчёте заказов — проставляется оттуда
+      refunded: o.status === 'refunded',
+    }));
+}
+
+// У неоплаченных инвойсов нет billing_period_started_at — датируем по created_at.
+// Номер периода 0 — триал, 1 — первый платный; если номера нет, отбираем по времени.
+function firstPaidInvoice(sub: SgSubscription, trialEnd: number): SgInvoice | null {
+  const invoiceTime = (i: SgInvoice) => parseSgDate(i.created_at ?? i.billing_period_started_at);
+  const isAfterTrial = (i: SgInvoice) =>
+    i.subscription_term_number !== undefined ? i.subscription_term_number >= 1 : invoiceTime(i) >= trialEnd - FIRST_INVOICE_TOLERANCE;
+  return (
+    Object.values(sub.invoices ?? {})
+      .filter((i) => i.amount > 0 && isAfterTrial(i))
+      .sort((a, b) => invoiceTime(a) - invoiceTime(b))[0] ?? null
+  );
+}
+
+const sortedOrders = (invoice: SgInvoice) =>
+  Object.values(invoice.orders ?? {}).sort((a, b) => parseSgDate(a.created_at) - parseSgDate(b.created_at));
 
 // Триал = продукт с триалом и подписка, которая реально стартовала. Без started_at — не прошла
 // авторизация на $0 при оформлении, триала не было. Флаг sub.trial значит «сейчас в триале» — не подходит.
@@ -74,10 +107,15 @@ function trialPeriod(sub: SgSubscription): { start: number; end: number } | null
   return { start, end: start + minutes * 60 };
 }
 
-// Страна карты из заказа; трёхбуквенный код приводим к двухбуквенному, как в Stripe
-export function orderCardCountry(order: SgCardOrder): string | null {
-  const transaction = Object.values(order.transactions ?? {}).find((t) => t.card?.country);
-  return toAlpha2(transaction?.card?.country ?? order.card?.country);
+// Данные карты из заказа: страна (трёхбуквенный код → двухбуквенный, как в Stripe), способ оплаты, система, банк
+export function orderCardDetails(order: SgCardOrder): CardDetails {
+  const card = Object.values(order.transactions ?? {}).find((t) => t.card)?.card ?? order.card;
+  return {
+    country: toAlpha2(card?.country),
+    payment_method: PAYMENT_METHODS[order.payment_method ?? ''] ?? null,
+    card_brand: card?.brand ? card.brand.toLowerCase() : null,
+    bank: card?.bank?.trim() || null,
+  };
 }
 
 function firstAttempt(order: SgOrder | undefined): boolean | null {
@@ -90,7 +128,7 @@ interface SolidgateSyncConfig {
 }
 
 // Отчёт подписок отдаёт подписку целиком (с инвойсами и попытками) — строка триала каждый раз собирается заново.
-// Страну карты берём из отчёта заказов: у каждого заказа есть subscription_id.
+// Отчёт заказов дополняет: данные карты (у каждого заказа есть subscription_id), код отказа и рефанд (по id попытки).
 // Без курсора — бэкфилл подписок, созданных с HISTORY_FROM; затем изменения с (курсор − 1 день).
 export async function syncSolidgateAccount(
   store: Store,
@@ -108,14 +146,20 @@ export async function syncSolidgateAccount(
       const row = trialFromSolidgate(sub, acc.account);
       if (!row) continue;
       store.upsertTrial(row);
+      for (const attempt of attemptsFromSolidgate(sub)) store.upsertAttempt(attempt);
       items++;
     }
   };
-  const saveCountries = async (from: number, to: number) => {
+  const saveOrders = async (from: number, to: number) => {
     for await (const order of listOrders(acc, from - ORDERS_LOOKBACK, to, 'created_at')) {
-      const country = orderCardCountry(order);
-      if (order.subscription_id && country) store.setCountry('solidgate', order.subscription_id, country);
+      if (order.subscription_id) store.setCardDetails('solidgate', order.subscription_id, orderCardDetails(order));
+      if (order.error_code) store.setAttemptReason('solidgate', order.order_id, order.error_code);
+      if ((order.refunded_amount ?? 0) > 0) store.markRefunded('solidgate', order.order_id);
     }
+  };
+  const subscriptionsAndOrders = (filter: ReportFilter) => async (from: number, to: number) => {
+    await saveSubscriptions(from, to, filter);
+    await saveOrders(from, to);
   };
   // Окна по суткам до now; после каждого — onWindow(начало следующего окна)
   const inWindows = async (from: number, work: (from: number, to: number) => Promise<void>, onWindow?: (next: number) => void) => {
@@ -130,26 +174,17 @@ export async function syncSolidgateAccount(
   };
 
   if (cursor === null) {
-    const backfillFrom = store.getState('solidgate', acc.account, 'backfill_day') ?? cfg.historyFrom;
-    await inWindows(
-      backfillFrom,
-      async (from, to) => {
-        await saveSubscriptions(from, to, 'created_at');
-        await saveCountries(from, to);
-      },
-      progress('backfill_day'),
-    );
-    store.setState('solidgate', acc.account, 'country_done', 1);
-  } else if (store.getState('solidgate', acc.account, 'country_done') === null) {
-    // База выгружена до появления стран — один раз проходим заказы с HISTORY_FROM
-    await inWindows(store.getState('solidgate', acc.account, 'country_day') ?? cfg.historyFrom, saveCountries, progress('country_day'));
-    store.setState('solidgate', acc.account, 'country_done', 1);
+    const from = store.getState('solidgate', acc.account, 'backfill_day') ?? cfg.historyFrom;
+    await inWindows(from, subscriptionsAndOrders('created_at'), progress('backfill_day'));
+    store.setState('solidgate', acc.account, 'details_version', DETAILS_VERSION);
+  } else if ((store.getState('solidgate', acc.account, 'details_version') ?? 0) < DETAILS_VERSION) {
+    // База выгружена раньше — один раз проходим подписки и заказы с HISTORY_FROM заново (это быстро)
+    const from = store.getState('solidgate', acc.account, 'details_day') ?? cfg.historyFrom;
+    await inWindows(from, subscriptionsAndOrders('created_at'), progress('details_day'));
+    store.setState('solidgate', acc.account, 'details_version', DETAILS_VERSION);
   }
 
-  await inWindows((cursor ?? now) - DAY, async (from, to) => {
-    await saveSubscriptions(from, to, 'updated_at');
-    await saveCountries(from, to);
-  });
+  await inWindows((cursor ?? now) - DAY, subscriptionsAndOrders('updated_at'));
 
   store.setState('solidgate', acc.account, 'cursor', now);
   return items;

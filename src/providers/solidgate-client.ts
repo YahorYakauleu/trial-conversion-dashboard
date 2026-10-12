@@ -38,12 +38,21 @@ export interface SgSubscription {
 }
 
 // Заказ из отчёта card-orders: нужен ради страны карты и связи с подпиской
+export interface SgCard {
+  country?: string | null; // alpha-3
+  brand?: string | null;
+  bank?: string | null;
+}
+
 export interface SgCardOrder {
   order_id: string;
   subscription_id?: string | null;
   geo_country?: string | null; // страна по IP, которую передаёт workflow-service (alpha-3)
-  card?: { country?: string | null };
-  transactions?: Record<string, { card?: { country?: string | null } }> | { card?: { country?: string | null } }[];
+  payment_method?: string | null; // google-pay, apple-pay, card, token…
+  error_code?: string | null; // код отказа, например 3.02
+  refunded_amount?: number | null;
+  card?: SgCard;
+  transactions?: Record<string, { card?: SgCard }> | { card?: SgCard }[];
 }
 
 export type ReportFilter = 'created_at' | 'updated_at';

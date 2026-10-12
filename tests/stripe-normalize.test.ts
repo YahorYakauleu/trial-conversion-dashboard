@@ -1,7 +1,7 @@
 import type Stripe from 'stripe';
 import { describe, expect, it } from 'vitest';
 import type { TrialRow } from '../src/db.js';
-import { applyInvoice, invoiceSubscriptionId, trialFromSubscription } from '../src/providers/stripe.js';
+import { applyInvoice, attemptFromCharge, chargeInvoiceId, invoiceSubscriptionId, trialFromSubscription } from '../src/providers/stripe.js';
 
 const sub = (p: Partial<Stripe.Subscription>) =>
   ({ id: 'sub_1', trial_start: null, trial_end: null, ...p }) as Stripe.Subscription;
@@ -30,6 +30,9 @@ const trial: TrialRow = {
   first_attempt_succeeded: null,
   paid_at: null,
   country: null,
+  payment_method: null,
+  card_brand: null,
+  bank: null,
 };
 
 describe('trialFromSubscription', () => {
@@ -42,10 +45,22 @@ describe('trialFromSubscription', () => {
     expect(trialFromSubscription(sub({ trial_start: 1_000, trial_end: 10_000 }), 'org')).toEqual(trial);
   });
 
-  it('страна карты — из карты клиента по умолчанию (развёрнутой в списке) или карты подписки', () => {
+  it('данные карты — из карты клиента по умолчанию (развёрнутой в списке) или карты подписки', () => {
     const withTrial = { trial_start: 1_000, trial_end: 10_000 };
-    const customer = { id: 'cus', invoice_settings: { default_payment_method: { card: { country: 'sa' } } } };
-    expect(trialFromSubscription(sub({ ...withTrial, customer } as never), 'corp')?.country).toBe('SA');
+    const card = { country: 'sa', brand: 'visa', wallet: { type: 'apple_pay' }, issuer: null };
+    const customer = { id: 'cus', invoice_settings: { default_payment_method: { type: 'card', card } } };
+    expect(trialFromSubscription(sub({ ...withTrial, customer } as never), 'corp')).toMatchObject({
+      country: 'SA',
+      payment_method: 'apple_pay',
+      card_brand: 'visa',
+      bank: null,
+    });
+    const plainCard = { type: 'card', card: { country: 'GB', brand: 'mastercard', wallet: null, issuer: 'Monzo' } };
+    expect(trialFromSubscription(sub({ ...withTrial, customer, default_payment_method: plainCard } as never), 'corp')).toMatchObject({
+      country: 'GB',
+      payment_method: 'card',
+      bank: 'Monzo',
+    });
     expect(
       trialFromSubscription(sub({ ...withTrial, customer, default_payment_method: { card: { country: 'GB' } } } as never), 'corp')?.country,
     ).toBe('GB');
@@ -100,5 +115,35 @@ describe('applyInvoice', () => {
     expect(applyInvoice(trial, inv({ created: 10_000 - 3_601 }))).toBe(trial);
     expect(applyInvoice(trial, inv({ created: 10_000 + 86_401 }))).toBe(trial); // инвойс второго месяца
     expect(applyInvoice({ ...trial, first_invoice_id: 'in_0' }, inv({}))).toEqual({ ...trial, first_invoice_id: 'in_0' });
+  });
+});
+
+describe('attemptFromCharge', () => {
+  const charge = (p: Record<string, unknown>) =>
+    ({ id: 'ch_1', created: 10_100, status: 'failed', amount_refunded: 0, outcome: { type: 'issuer_declined', reason: 'insufficient_funds' }, failure_code: 'card_declined', invoice: 'in_1', ...p }) as unknown as Stripe.Charge;
+
+  it('отказ — с кодом причины; успех — без; рефанд по amount_refunded; pending не считается', () => {
+    expect(attemptFromCharge(charge({}), 'sub_1')).toEqual({
+      provider: 'stripe',
+      attempt_id: 'ch_1',
+      subscription_id: 'sub_1',
+      attempted_at: 10_100,
+      approved: false,
+      reason: 'insufficient_funds',
+      refunded: false,
+    });
+    expect(attemptFromCharge(charge({ status: 'succeeded', outcome: { type: 'authorized' }, amount_refunded: 999 }), 'sub_1')).toMatchObject({
+      approved: true,
+      reason: null,
+      refunded: true,
+    });
+    expect(attemptFromCharge(charge({ outcome: { type: 'blocked', reason: 'highest_risk_level' } }), 'sub_1')?.reason).toBe('highest_risk_level');
+    expect(attemptFromCharge(charge({ status: 'pending' }), 'sub_1')).toBeNull();
+  });
+
+  it('ссылка на инвойс — строкой или развёрнутым объектом', () => {
+    expect(chargeInvoiceId(charge({}))).toBe('in_1');
+    expect(chargeInvoiceId(charge({ invoice: { id: 'in_2' } }))).toBe('in_2');
+    expect(chargeInvoiceId(charge({ invoice: null }))).toBeNull();
   });
 });

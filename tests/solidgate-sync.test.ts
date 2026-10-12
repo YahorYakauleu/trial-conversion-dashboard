@@ -46,14 +46,14 @@ describe('syncSolidgateAccount', () => {
     expect(items).toBe(1);
     expect(store.getTrial('solidgate', 'sg_1')?.country).toBe('ZA');
     expect(orderCalls[0]).toEqual({ from: HISTORY_FROM - 3600, to: HISTORY_FROM + DAY }); // заказы — с запасом в час
-    expect(store.getState('solidgate', 'sgH2H', 'country_done')).toBe(1);
+    expect(store.getState('solidgate', 'sgH2H', 'details_version')).toBe(2);
     expect(store.getState('solidgate', 'sgH2H', 'cursor')).toBe(NOW);
   });
 
   it('ежедневно — только изменения с cursor − 1 день', async () => {
     const store = openStore(':memory:');
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - DAY);
-    store.setState('solidgate', 'sgH2H', 'country_done', 1);
+    store.setState('solidgate', 'sgH2H', 'details_version', 2);
     const { list, listOrders, calls } = fakeList([]);
     await syncSolidgateAccount(store, acc, { historyFrom: HISTORY_FROM }, NOW, list, listOrders);
     expect(calls).toEqual([
@@ -62,22 +62,53 @@ describe('syncSolidgateAccount', () => {
     ]);
   });
 
-  it('база без стран: один раз проходит заказы с HISTORY_FROM и проставляет страны', async () => {
+  it('попытки из отчёта подписок, причины отказа и рефанды — из отчёта заказов', async () => {
     const store = openStore(':memory:');
-    store.upsertTrial({
-      provider: 'solidgate', account: 'sgH2H', subscription_id: 'sg_1', trial_started_at: HISTORY_FROM, trial_ended_at: HISTORY_FROM + 7 * DAY,
-      first_invoice_id: null, first_attempt_succeeded: null, paid_at: null, country: null,
-    });
-    store.setState('solidgate', 'sgH2H', 'cursor', NOW - 3600);
-    const { list, listOrders, orderCalls } = fakeList([], [{ order_id: 'o1', subscription_id: 'sg_1', transactions: [{ card: { country: 'USA' } }] }]);
+    const withAttempts: SgSubscription = {
+      ...trialSub,
+      invoices: {
+        t1: {
+          id: 't1', status: 'success', amount: 999, created_at: '2026-10-04 10:00:00', subscription_term_number: 1,
+          orders: {
+            o1: { id: 'o1', status: 'auth_failed', created_at: '2026-10-04 10:00:00' },
+            o2: { id: 'o2', status: 'settle_ok', created_at: '2026-10-05 10:00:00' },
+          },
+        },
+      },
+    };
+    const { list, listOrders } = fakeList(
+      [withAttempts],
+      [
+        { order_id: 'o1', subscription_id: 'sg_1', error_code: '3.02', payment_method: 'recurring' },
+        { order_id: 'o2', subscription_id: 'sg_1', refunded_amount: 999, payment_method: 'apple-pay' },
+      ],
+    );
     await syncSolidgateAccount(store, acc, { historyFrom: HISTORY_FROM }, NOW, list, listOrders);
 
-    expect(store.getTrial('solidgate', 'sg_1')?.country).toBe('US');
-    expect(orderCalls[0].from).toBe(HISTORY_FROM - 3600);
-    expect(store.getState('solidgate', 'sgH2H', 'country_done')).toBe(1);
+    expect(store.getAttempts('solidgate', 'sg_1').map((a) => [a.attempt_id, a.approved, a.reason, a.refunded])).toEqual([
+      ['o1', false, '3.02', false],
+      ['o2', true, null, true],
+    ]);
+    expect(store.getTrial('solidgate', 'sg_1')?.payment_method).toBe('apple_pay');
+  });
 
-    orderCalls.length = 0;
+  it('база до версии 2: один раз проходит подписки и заказы с HISTORY_FROM заново', async () => {
+    const store = openStore(':memory:');
+    store.setState('solidgate', 'sgH2H', 'cursor', NOW - 3600);
+    store.setState('solidgate', 'sgH2H', 'country_done', 1); // старый флаг ничего не значит
+    const { list, listOrders, calls, orderCalls } = fakeList(
+      [trialSub],
+      [{ order_id: 'o1', subscription_id: 'sg_1', payment_method: 'google-pay', transactions: [{ card: { country: 'USA', bank: 'SUTTON BANK' } }] }],
+    );
+    await syncSolidgateAccount(store, acc, { historyFrom: HISTORY_FROM }, NOW, list, listOrders);
+
+    expect(calls[0]).toEqual({ from: HISTORY_FROM, to: HISTORY_FROM + DAY, filter: 'created_at' });
+    expect(orderCalls[0].from).toBe(HISTORY_FROM - 3600);
+    expect(store.getTrial('solidgate', 'sg_1')).toMatchObject({ country: 'US', payment_method: 'google_pay', bank: 'SUTTON BANK' });
+    expect(store.getState('solidgate', 'sgH2H', 'details_version')).toBe(2);
+
+    calls.length = 0;
     await syncSolidgateAccount(store, acc, { historyFrom: HISTORY_FROM }, NOW + 60, list, listOrders);
-    expect(orderCalls.every((c) => c.from >= NOW - 3600 - DAY - 3600)).toBe(true); // второй раз — только свежие окна
+    expect(calls.every((c) => c.filter === 'updated_at')).toBe(true); // второй раз — только свежие изменения
   });
 });

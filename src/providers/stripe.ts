@@ -1,17 +1,22 @@
 import Stripe from 'stripe';
 import { toAlpha2 } from '../countries.js';
-import type { Store, TrialRow } from '../db.js';
+import type { AttemptRow, CardDetails, Store, TrialRow } from '../db.js';
 import { forEachDay } from '../days.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 
-export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events'>;
+export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds'>;
 
 interface StripeSyncConfig {
   historyFrom: number;
 }
 
 // Сколько дней выгружать одновременно: каждый день — отдельная цепочка запросов
-const PARALLEL_DAYS = 4;
+const PARALLEL_DAYS = 8;
+// Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк и попытки списания.
+// База, выгруженная раньше, один раз догружает недостающее (подписки и списания, без инвойсов).
+const DETAILS_VERSION = 2;
+// В basil у charge нет ссылки на инвойс — список списаний запрашиваем в версии API, где она есть
+const CHARGES_API_VERSION = '2024-06-20';
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
 // Всё, что создано позже суток после конца триала, — уже не первый платный инвойс.
 const FIRST_INVOICE_TOLERANCE = 3_600;
@@ -33,17 +38,45 @@ export function trialFromSubscription(sub: Stripe.Subscription, account: string)
     first_invoice_id: null,
     first_attempt_succeeded: null,
     paid_at: null,
-    country: cardCountry(sub),
+    ...cardDetails(sub),
   };
 }
 
-// Страна карты: карта подписки, иначе карта клиента по умолчанию (если развёрнуты в ответе)
-function cardCountry(sub: Stripe.Subscription): string | null {
+// Карта подписки, иначе карта клиента по умолчанию (если развёрнуты в ответе).
+// Банк Stripe для аккаунтов Toggle не отдаёт (issuer пустой) — останется null.
+function cardDetails(sub: Stripe.Subscription): CardDetails {
   const own = typeof sub.default_payment_method === 'object' ? sub.default_payment_method : null;
   const customer = typeof sub.customer === 'object' && !sub.customer.deleted ? sub.customer : null;
   const customerDefault = customer?.invoice_settings?.default_payment_method;
-  const fromCustomer = typeof customerDefault === 'object' ? customerDefault : null;
-  return toAlpha2((own ?? fromCustomer)?.card?.country);
+  const pm = own ?? (typeof customerDefault === 'object' ? customerDefault : null);
+  return {
+    country: toAlpha2(pm?.card?.country),
+    payment_method: pm?.card?.wallet?.type ?? pm?.type ?? null,
+    card_brand: pm?.card?.brand ?? null,
+    bank: pm?.card?.issuer ?? null,
+  };
+}
+
+type LegacyCharge = Stripe.Charge & { invoice?: string | { id: string } | null };
+
+export function chargeInvoiceId(charge: LegacyCharge): string | null {
+  if (!charge.invoice) return null;
+  return typeof charge.invoice === 'string' ? charge.invoice : charge.invoice.id;
+}
+
+// Списание = попытка оплаты; pending ещё не попытка. Причина: код отказа банка или правило антифрода
+export function attemptFromCharge(charge: Stripe.Charge, subscriptionId: string): AttemptRow | null {
+  if (charge.status === 'pending') return null;
+  const approved = charge.status === 'succeeded';
+  return {
+    provider: 'stripe',
+    attempt_id: charge.id,
+    subscription_id: subscriptionId,
+    attempted_at: charge.created,
+    approved,
+    reason: approved ? null : (charge.outcome?.reason ?? charge.failure_code ?? charge.outcome?.type ?? null),
+    refunded: charge.amount_refunded > 0,
+  };
 }
 
 export function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
@@ -82,7 +115,7 @@ export function createStripeClient(key: string): StripeLike {
 }
 
 // Без курсора — бэкфилл с HISTORY_FROM по дням (несколько дней параллельно, прогресс сохраняется);
-// затем всегда инкремент: новые подписки и события об оплате/отказе с (курсор − 1 день).
+// затем всегда инкремент с (курсор − 1 день): новые подписки, события по инвойсам, списания и рефанды.
 export async function syncStripeAccount(
   store: Store,
   stripe: StripeLike,
@@ -124,29 +157,50 @@ export async function syncStripeAccount(
       (next) => store.setState('stripe', account, progressKey, next),
     );
 
-  if (cursor === null) {
-    // Сначала все подписки (триалы), потом инвойсы — инвойс применяется только к уже известному триалу
-    await subscriptionsPass('subs_day');
-    store.setState('stripe', account, 'country_done', 1);
+  // Списания первых платных инвойсов: инвойс уже должен быть известен (проход инвойсов — раньше)
+  const saveCharge = (charge: LegacyCharge) => {
+    const invoiceId = chargeInvoiceId(charge);
+    const subscriptionId = invoiceId ? store.subscriptionByFirstInvoice('stripe', invoiceId) : null;
+    const attempt = subscriptionId ? attemptFromCharge(charge, subscriptionId) : null;
+    if (attempt) store.upsertAttempt(attempt);
+  };
+  const listCharges = (created: Stripe.RangeQueryParam) =>
+    stripe.charges.list({ created, limit: 100 }, { apiVersion: CHARGES_API_VERSION }) as AsyncIterable<LegacyCharge>;
 
-    await forEachDay(
-      store.getState('stripe', account, 'invoices_day') ?? cfg.historyFrom,
+  const invoicesPass = (progressKey: string) =>
+    forEachDay(
+      store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       today,
       PARALLEL_DAYS,
       async (day) => {
-        for await (const invoice of stripe.invoices.list({ created: { gte: day, lt: day + DAY }, limit: 100 })) {
-          saveInvoice(invoice);
-        }
+        for await (const invoice of stripe.invoices.list({ created: { gte: day, lt: day + DAY }, limit: 100 })) saveInvoice(invoice);
         console.log(`[stripe:${account}] инвойсы ${dayKey(day)} готово`);
       },
-      (next) => store.setState('stripe', account, 'invoices_day', next),
+      (next) => store.setState('stripe', account, progressKey, next),
     );
-  }
+  const chargesPass = (progressKey: string) =>
+    forEachDay(
+      store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
+      today,
+      PARALLEL_DAYS,
+      async (day) => {
+        for await (const charge of listCharges({ gte: day, lt: day + DAY })) saveCharge(charge);
+        console.log(`[stripe:${account}] списания ${dayKey(day)} готово`);
+      },
+      (next) => store.setState('stripe', account, progressKey, next),
+    );
 
-  // База выгружена до появления стран — один раз проходим подписки заново, без инвойсов
-  if (cursor !== null && store.getState('stripe', account, 'country_done') === null) {
-    await subscriptionsPass('country_day');
-    store.setState('stripe', account, 'country_done', 1);
+  if (cursor === null) {
+    // Подписки (триалы) → инвойсы (первый платный) → списания (попытки) — каждый шаг опирается на предыдущий
+    await subscriptionsPass('subs_day');
+    await invoicesPass('invoices_day');
+    await chargesPass('charges_day');
+    store.setState('stripe', account, 'details_version', DETAILS_VERSION);
+  } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
+    // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
+    await subscriptionsPass('details_subs_day');
+    await chargesPass('details_charges_day');
+    store.setState('stripe', account, 'details_version', DETAILS_VERSION);
   }
 
   const since = (cursor ?? today) - DAY;
@@ -159,6 +213,11 @@ export async function syncStripeAccount(
     limit: 100,
   })) {
     saveInvoice(event.data.object as Stripe.Invoice);
+  }
+  for await (const charge of listCharges({ gte: since })) saveCharge(charge);
+  for await (const refund of stripe.refunds.list({ created: { gte: since }, limit: 100 })) {
+    const chargeId = typeof refund.charge === 'string' ? refund.charge : refund.charge?.id;
+    if (chargeId && refund.status !== 'failed' && refund.status !== 'canceled') store.markRefunded('stripe', chargeId);
   }
 
   store.setState('stripe', account, 'cursor', now);

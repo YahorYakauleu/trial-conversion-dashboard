@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { openStore, type TrialRow } from '../src/db.js';
-import { DAY, getCountries, getMetrics, resolveRange } from '../src/metrics.js';
+import { openStore, type AttemptRow, type TrialRow } from '../src/db.js';
+import { DAY, getBreakdown, getDeclineReasons, getMetrics, resolveRange } from '../src/metrics.js';
 
 // «Сегодня» = понедельник 2026-10-12, история с 1 сентября, триалы по 7 дней, окно ретраев 30 дней
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -14,7 +14,7 @@ const opts = {
   from: '2026-09-01',
   to: '2026-10-11',
   timeZone: 'UTC',
-  country: 'all',
+  filters: {},
   retryWindowDays: 30,
 };
 
@@ -31,6 +31,9 @@ function trial(startedIso: string, patch: Partial<TrialRow> = {}): TrialRow {
     first_attempt_succeeded: null,
     paid_at: null,
     country: 'US',
+    payment_method: 'apple_pay',
+    card_brand: 'visa',
+    bank: null,
     ...patch,
   };
 }
@@ -141,7 +144,7 @@ describe('getMetrics — недели, месяцы, итоги', () => {
       trial('2026-09-03T12:00:00Z'),
     ]);
     const early = getMetrics(store.db, { ...opts, from: '2026-09-01', to: '2026-09-04' }).totals;
-    expect(early).toEqual({
+    expect(early).toMatchObject({
       started: 4,
       paid_first: 1,
       paid_retry: 2,
@@ -154,35 +157,105 @@ describe('getMetrics — недели, месяцы, итоги', () => {
   });
 });
 
-describe('страны', () => {
+describe('измерения: фильтры и разбивки', () => {
   const s = '2026-10-01T12:00:00Z';
   const paid = { first_invoice_id: 'in', first_attempt_succeeded: true, paid_at: ts(s) + 7 * DAY + 60 };
   const rows = () => [
     trial(s, { country: 'US', ...paid }),
-    trial(s, { country: 'US' }),
-    trial(s, { country: 'SA', ...paid }),
-    trial(s, { country: null }),
+    trial(s, { country: 'US', payment_method: 'google_pay' }),
+    trial(s, { country: 'SA', bank: 'AL RAJHI', ...paid }),
+    trial(s, { country: null, payment_method: null }),
     trial(s, { country: 'GB', provider: 'solidgate', account: 'sgH2H' }),
   ];
 
-  it('фильтр страны применяется к ряду и итогам; none — страна не определена', () => {
+  it('фильтры применяются к ряду и итогам; none — значение не определено; фильтры складываются', () => {
     const store = storeWith(rows());
-    expect(getMetrics(store.db, { ...opts, country: 'US' }).totals).toMatchObject({ started: 2, paid_first: 1, rate_first: 0.5 });
-    expect(getMetrics(store.db, { ...opts, country: 'none' }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { country: 'US' } }).totals).toMatchObject({ started: 2, paid_first: 1, rate_first: 0.5 });
+    expect(getMetrics(store.db, { ...opts, filters: { country: 'none' } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { country: 'US', payment_method: 'google_pay' } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { bank: 'AL RAJHI' } }).totals.started).toBe(1);
     expect(getMetrics(store.db, opts).totals.started).toBe(5);
   });
 
-  it('разбивка по странам: по убыванию числа триалов, с учётом провайдера и периода', () => {
+  it('разбивка: по убыванию числа триалов, «не определено» в конце, с учётом провайдера и периода', () => {
     const store = storeWith([...rows(), trial('2026-09-15T12:00:00Z', { country: 'FR' })]);
     const range = { ...opts, from: '2026-10-01', to: '2026-10-11' };
-    expect(getCountries(store.db, range).map((c) => [c.country, c.started, c.paid_retry])).toEqual([
+    expect(getBreakdown(store.db, range, 'country').map((c) => [c.value, c.started, c.paid_retry])).toEqual([
       ['US', 2, 1],
       ['GB', 1, 0],
       ['SA', 1, 1],
       [null, 1, 0],
     ]);
-    expect(getCountries(store.db, { ...range, provider: 'solidgate' }).map((c) => c.country)).toEqual(['GB']);
-    expect(getCountries(store.db, range)[0]).toMatchObject({ rate_retry: 0.5, final_first: false, final_retry: false });
+    expect(getBreakdown(store.db, { ...range, provider: 'solidgate' }, 'country').map((c) => c.value)).toEqual(['GB']);
+    expect(getBreakdown(store.db, range, 'payment_method').map((c) => [c.value, c.started])).toEqual([
+      ['apple_pay', 3],
+      ['google_pay', 1],
+      [null, 1],
+    ]);
+    expect(getBreakdown(store.db, range, 'country')[0]).toMatchObject({ rate_retry: 0.5, final_first: false, final_retry: false });
+  });
+});
+
+describe('платёжные метрики: проходимость, decline, рефанды, причины отказа', () => {
+  const s = '2026-10-01T12:00:00Z';
+  const end = ts(s) + 7 * DAY;
+  const attempt = (sub: string, n: number, approved: boolean, patch: Partial<AttemptRow> = {}): AttemptRow => ({
+    provider: 'stripe',
+    attempt_id: `${sub}_${n}`,
+    subscription_id: sub,
+    attempted_at: end + n * DAY,
+    approved,
+    reason: approved ? null : 'insufficient_funds',
+    refunded: false,
+    ...patch,
+  });
+
+  function paymentsStore() {
+    const store = storeWith([
+      trial(s, { subscription_id: 'a', first_invoice_id: 'in_a', first_attempt_succeeded: true, paid_at: end + 60 }),
+      trial(s, { subscription_id: 'b', first_invoice_id: 'in_b', first_attempt_succeeded: false, paid_at: end + 2 * DAY }),
+      trial(s, { subscription_id: 'c', first_invoice_id: 'in_c', first_attempt_succeeded: false, provider: 'solidgate', account: 'sgH2H' }),
+      trial(s, { subscription_id: 'd' }), // отменил во время триала — попыток нет
+    ]);
+    store.upsertAttempt(attempt('a', 0, true, { refunded: true }));
+    store.upsertAttempt(attempt('b', 0, false));
+    store.upsertAttempt(attempt('b', 1, false, { reason: 'do_not_honor' }));
+    store.upsertAttempt(attempt('b', 2, true));
+    store.upsertAttempt(attempt('c', 0, false, { provider: 'solidgate', reason: '3.02' }));
+    store.upsertAttempt(attempt('c', 1, false, { provider: 'solidgate', reason: '3.10' }));
+    return store;
+  }
+
+  it('проходимость и decline — по попыткам; рефанды — от сконвертившихся', () => {
+    const { totals } = getMetrics(paymentsStore().db, opts);
+    expect(totals).toMatchObject({ started: 4, paid_retry: 2, attempts: 6, approved: 2, refunded: 1 });
+    expect(totals.approval_rate).toBeCloseTo(2 / 6);
+    expect(totals.decline_rate).toBeCloseTo(4 / 6);
+    expect(totals.refund_rate).toBe(0.5);
+  });
+
+  it('без попыток — проходимость и decline пустые, а не ноль', () => {
+    const { totals } = getMetrics(storeWith([trial(s)]).db, opts);
+    expect(totals).toMatchObject({ attempts: 0, approval_rate: null, decline_rate: null, refund_rate: null });
+  });
+
+  it('метрики попыток учитывают фильтры и разбивки', () => {
+    const store = paymentsStore();
+    expect(getMetrics(store.db, { ...opts, provider: 'solidgate' }).totals).toMatchObject({ attempts: 2, approved: 0, decline_rate: 1 });
+    const byProviderMethod = getBreakdown(store.db, opts, 'payment_method');
+    expect(byProviderMethod[0]).toMatchObject({ value: 'apple_pay', attempts: 6, approved: 2 });
+  });
+
+  it('причины отказа: коды Stripe и Solidgate сведены к общим названиям, доля от всех отказов', () => {
+    expect(getDeclineReasons(paymentsStore().db, opts)).toEqual([
+      { reason: 'Недостаточно средств', count: 2, share: 0.5 },
+      { reason: 'Отказ банка без причины', count: 1, share: 0.25 },
+      { reason: 'Подозрение на фрод (банк)', count: 1, share: 0.25 },
+    ]);
+    expect(getDeclineReasons(paymentsStore().db, { ...opts, provider: 'solidgate' }).map((r) => r.reason)).toEqual([
+      'Недостаточно средств',
+      'Подозрение на фрод (банк)',
+    ]);
   });
 });
 

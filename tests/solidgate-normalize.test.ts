@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SgSubscription } from '../src/providers/solidgate-client.js';
-import { orderCardCountry, parseSgDate, trialFromSolidgate } from '../src/providers/solidgate.js';
+import { attemptsFromSolidgate, orderCardDetails, parseSgDate, trialFromSolidgate } from '../src/providers/solidgate.js';
 
 const T0 = '2026-10-01 10:00:00';
 const T_END = '2026-10-04 10:00:00'; // 3 дня = 4320 минут
@@ -43,11 +43,53 @@ describe('parseSgDate', () => {
   });
 });
 
-describe('orderCardCountry', () => {
-  it('страна карты из транзакции, трёхбуквенный код → двухбуквенный', () => {
-    expect(orderCardCountry({ order_id: 'o', transactions: [{ card: { country: 'ZAF' } }] })).toBe('ZA');
-    expect(orderCardCountry({ order_id: 'o', transactions: { t1: {}, t2: { card: { country: 'USA' } } } })).toBe('US');
-    expect(orderCardCountry({ order_id: 'o', geo_country: 'USA' })).toBeNull(); // гео — не страна карты
+describe('orderCardDetails', () => {
+  it('страна (трёхбуквенный код → двухбуквенный), способ оплаты, система и банк из карты заказа', () => {
+    expect(
+      orderCardDetails({
+        order_id: 'o',
+        payment_method: 'google-pay',
+        transactions: [{ card: { country: 'ZAF', brand: 'VISA', bank: ' CAPITEC BANK LTD ' } }],
+      }),
+    ).toEqual({ country: 'ZA', payment_method: 'google_pay', card_brand: 'visa', bank: 'CAPITEC BANK LTD' });
+    expect(orderCardDetails({ order_id: 'o', transactions: { t1: { card: { country: 'USA' } } } }).country).toBe('US');
+  });
+
+  it('повторное списание по токену не говорит о способе оплаты; гео — не страна карты', () => {
+    expect(orderCardDetails({ order_id: 'o', payment_method: 'token', geo_country: 'USA' })).toEqual({
+      country: null,
+      payment_method: null,
+      card_brand: null,
+      bank: null,
+    });
+  });
+});
+
+describe('attemptsFromSolidgate', () => {
+  it('попытки первого платного периода: успех, отказ, рефанд; «в процессе» не считается; триал-инвойс не считается', () => {
+    const attempts = attemptsFromSolidgate(
+      sub({
+        t0: { ...invoice('t0', T0, 0, [order('o0', 'auth_ok', T0)]), subscription_term_number: 0 },
+        t1: {
+          ...invoice('t1', T_END, 999, [
+            order('o1', 'auth_failed', T_END),
+            order('o2', 'refunded', '2026-10-05 10:00:00'),
+            order('o3', 'processing', '2026-10-06 10:00:00'),
+          ]),
+          subscription_term_number: 1,
+        },
+      }),
+    );
+    expect(attempts.map((a) => [a.attempt_id, a.approved, a.refunded])).toEqual([
+      ['o1', false, false],
+      ['o2', true, true],
+    ]);
+    expect(attempts[0]).toMatchObject({ provider: 'solidgate', subscription_id: 'sg_sub_1', attempted_at: ts(T_END), reason: null });
+  });
+
+  it('без триала или без платного инвойса — попыток нет', () => {
+    expect(attemptsFromSolidgate(sub({}, { trial: false }))).toEqual([]);
+    expect(attemptsFromSolidgate(sub())).toEqual([]);
   });
 });
 
@@ -68,6 +110,9 @@ describe('trialFromSolidgate', () => {
       first_attempt_succeeded: null,
       paid_at: null,
       country: null,
+      payment_method: null,
+      card_brand: null,
+      bank: null,
     });
   });
 

@@ -47,18 +47,25 @@ describe('server', () => {
     });
     expect(body.series).toHaveLength(1);
     expect(body.series[0]).toMatchObject({ period: '2026-09-10', period_end: '2026-09-20' });
-    expect(body).toMatchObject({ country: 'all', countries: [] });
+    expect(body).toMatchObject({ view: 'time', filters: {}, breakdown: [], reasons: [] });
+    expect(body.totals).toMatchObject({ attempts: 0, approval_rate: null, decline_rate: null, refund_rate: null });
   });
 
-  it('/api/metrics: фильтр страны и разбивка по странам', async () => {
+  it('/api/metrics: фильтры, разбивки по измерению и причины отказа', async () => {
     const store = openStore(':memory:');
     const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
-    for (const [id, country] of [['a', 'US'], ['b', 'US'], ['c', null]] as const) {
+    const rows = [
+      ['a', 'US', 'apple_pay', 'SUTTON BANK'],
+      ['b', 'US', 'google_pay', null],
+      ['c', null, 'apple_pay', null],
+    ] as const;
+    for (const [id, country, method, bank] of rows) {
       store.upsertTrial({
         provider: 'stripe', account: 'corp', subscription_id: id, trial_started_at: started, trial_ended_at: started + 7 * 86_400,
-        first_invoice_id: null, first_attempt_succeeded: null, paid_at: null, country,
+        first_invoice_id: `in_${id}`, first_attempt_succeeded: false, paid_at: null, country, payment_method: method, card_brand: 'visa', bank,
       });
     }
+    store.upsertAttempt({ provider: 'stripe', attempt_id: 'ch_a', subscription_id: 'a', attempted_at: started + 7 * 86_400, approved: false, reason: 'do_not_honor', refunded: false });
     const server = createApp({ store, config, sources: [] }).listen(0);
     await new Promise((resolve) => server.once('listening', resolve));
     close = () => server.close();
@@ -67,11 +74,18 @@ describe('server', () => {
 
     expect((await get('country=us')).totals.started).toBe(2);
     expect((await get('country=none')).totals.started).toBe(1);
-    expect((await get('country=<script>')).country).toBe('all');
-    expect((await get('')).countries.map((c: { country: string | null; started: number }) => [c.country, c.started])).toEqual([
-      ['US', 2],
-      [null, 1],
+    expect((await get('country=US&payment_method=google_pay')).totals.started).toBe(1);
+    expect((await get(`bank=${encodeURIComponent('SUTTON BANK')}`)).totals.started).toBe(1);
+    expect((await get('country=<script>')).filters).toEqual({});
+
+    const byMethod = await get('view=payment_method');
+    expect(byMethod.breakdown.map((r: { value: string | null; started: number }) => [r.value, r.started])).toEqual([
+      ['apple_pay', 2],
+      ['google_pay', 1],
     ]);
+    expect(byMethod.series).toEqual([]);
+    expect((await get('view=decline_reason')).reasons).toEqual([{ reason: 'Отказ банка без причины', count: 1, share: 1 }]);
+    expect((await get('view=bank')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['SUTTON BANK', null]);
   });
 
   it('/api/sync: 202, а во время синка — 409', async () => {

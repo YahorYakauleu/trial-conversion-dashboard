@@ -9,14 +9,15 @@ const HISTORY_FROM = Date.parse('2026-09-01T00:00:00Z') / 1000;
 const cfg = { historyFrom: HISTORY_FROM };
 
 type Range = { gte?: number; lt?: number };
-type Call = { method: string; params: { created: Range; [key: string]: unknown } };
+type Call = { method: string; params: { created: Range; [key: string]: unknown }; options?: { apiVersion?: string } };
+type Item = { created: number };
 
-function fakeStripe(data: { subs: { created: number }[]; invoices: { created: number }[]; events: { created: number }[] }) {
+function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; charges?: Item[]; refunds?: Item[] }) {
   const calls: Call[] = [];
   const inRange = (created: number, r: Range) =>
     (r.gte === undefined || created >= r.gte) && (r.lt === undefined || created < r.lt);
-  const list = (method: string, items: { created: number }[]) => (params: Call['params']) => {
-    calls.push({ method, params });
+  const list = (method: string, items: Item[]) => (params: Call['params'], options?: Call['options']) => {
+    calls.push({ method, params, options });
     return (async function* () {
       for (const item of items) if (inRange(item.created, params.created)) yield item;
     })();
@@ -25,6 +26,8 @@ function fakeStripe(data: { subs: { created: number }[]; invoices: { created: nu
     subscriptions: { list: list('subscriptions', data.subs) },
     invoices: { list: list('invoices', data.invoices) },
     events: { list: list('events', data.events) },
+    charges: { list: list('charges', data.charges ?? []) },
+    refunds: { list: list('refunds', data.refunds ?? []) },
   } as unknown as StripeLike;
   return { client, calls };
 }
@@ -133,12 +136,35 @@ describe('syncStripeAccount', () => {
     expect(calls.filter((c) => c.method === 'subscriptions')[0].params.created.gte).toBe(TODAY - 2 * DAY);
   });
 
-  it('база без стран: один раз проходит подписки с HISTORY_FROM (с картой клиента), инвойсы не трогает', async () => {
+  it('списания первого инвойса становятся попытками (старая версия API — ради ссылки на инвойс); рефанды помечаются', async () => {
+    const store = openStore(':memory:');
+    const charges = [
+      { id: 'ch_1', created: trialEnd + 3700, status: 'failed', amount_refunded: 0, outcome: { type: 'issuer_declined', reason: 'insufficient_funds' }, invoice: 'in_1' },
+      { id: 'ch_2', created: trialEnd + 2 * DAY, status: 'succeeded', amount_refunded: 0, outcome: { type: 'authorized' }, invoice: 'in_1' },
+      { id: 'ch_other', created: trialEnd + 3700, status: 'succeeded', amount_refunded: 0, outcome: { type: 'authorized' }, invoice: 'in_renewal' },
+    ];
+    const { client, calls } = fakeStripe({ subs: [subscription], invoices: [invoice({})], events: [], charges });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    expect(store.getAttempts('stripe', 'sub_1').map((a) => [a.attempt_id, a.approved, a.reason])).toEqual([
+      ['ch_1', false, 'insufficient_funds'],
+      ['ch_2', true, null],
+    ]);
+    expect(calls.find((c) => c.method === 'charges')!.options).toEqual({ apiVersion: '2024-06-20' });
+    expect(store.getState('stripe', 'corp', 'details_version')).toBe(2);
+
+    const later = NOW + DAY;
+    await syncStripeAccount(store, fakeStripe({ subs: [], invoices: [], events: [], refunds: [{ created: later - 60, charge: 'ch_2', status: 'succeeded' } as Item] }).client, 'corp', cfg, later);
+    expect(store.getAttempts('stripe', 'sub_1')[1].refunded).toBe(true);
+  });
+
+  it('база до версии 2: один раз проходит подписки (с картой клиента) и списания, инвойсы не трогает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 3600);
+    store.setState('stripe', 'corp', 'country_done', 1); // старый флаг ничего не значит
     const withCard = {
       ...subscription,
-      customer: { id: 'cus_1', invoice_settings: { default_payment_method: { card: { country: 'SA' } } } },
+      customer: { id: 'cus_1', invoice_settings: { default_payment_method: { type: 'card', card: { country: 'SA', brand: 'visa', wallet: { type: 'google_pay' } } } } },
     };
     const { client, calls } = fakeStripe({ subs: [withCard], invoices: [], events: [] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
@@ -148,9 +174,10 @@ describe('syncStripeAccount', () => {
       created: { gte: HISTORY_FROM, lt: HISTORY_FROM + DAY },
       expand: ['data.customer.invoice_settings.default_payment_method'],
     });
+    expect(calls.filter((c) => c.method === 'charges' && c.params.created.lt !== undefined)).toHaveLength((TODAY - HISTORY_FROM) / DAY);
     expect(calls.some((c) => c.method === 'invoices')).toBe(false);
-    expect(store.getTrial('stripe', 'sub_1')?.country).toBe('SA');
-    expect(store.getState('stripe', 'corp', 'country_done')).toBe(1);
+    expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ country: 'SA', payment_method: 'google_pay', card_brand: 'visa' });
+    expect(store.getState('stripe', 'corp', 'details_version')).toBe(2);
 
     calls.length = 0;
     await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);

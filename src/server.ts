@@ -4,7 +4,17 @@ import { fileURLToPath } from 'node:url';
 import express, { type RequestHandler } from 'express';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
-import { getCountries, getMetrics, resolveRange, type Granularity, type ProviderFilter } from './metrics.js';
+import {
+  DIMENSIONS,
+  getBreakdown,
+  getDeclineReasons,
+  getMetrics,
+  resolveRange,
+  type Dimension,
+  type Filters,
+  type Granularity,
+  type ProviderFilter,
+} from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
 import { localDay } from './time.js';
 
@@ -12,6 +22,25 @@ import { localDay } from './time.js';
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
 const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
+// Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
+const FILTER_FORMAT: Record<Dimension, RegExp> = {
+  country: /^[A-Z]{2}$/,
+  payment_method: /^[a-z_]{1,32}$/,
+  card_brand: /^[a-z_ ]{1,32}$/,
+  bank: /^.{1,120}$/,
+};
+
+function parseFilters(query: Record<string, unknown>): Filters {
+  const filters: Filters = {};
+  for (const dimension of DIMENSIONS) {
+    const raw = query[dimension];
+    if (typeof raw !== 'string' || raw === '') continue;
+    const value = dimension === 'country' ? raw.toUpperCase() : raw;
+    if (raw === 'none') filters[dimension] = 'none';
+    else if (FILTER_FORMAT[dimension].test(value)) filters[dimension] = value;
+  }
+  return filters;
+}
 
 export function createApp({ store, config, sources }: { store: Store; config: Config; sources: Source[] }) {
   const app = express();
@@ -23,21 +52,21 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(express.static(PUBLIC_DIR));
 
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
-  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&country=all|none|US… Дни — местные сутки в config.timeZone.
-  //  countries — разбивка за период по всем странам (без фильтра страны), чтобы было из чего выбирать.
+  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
+  //  &view=time|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки в config.timeZone.
   app.get('/api/metrics', (req, res) => {
     const now = nowSec();
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
     const granularity = GRANULARITIES.find((g) => g === req.query.granularity) ?? 'day';
-    const rawCountry = typeof req.query.country === 'string' ? req.query.country.toUpperCase() : '';
-    const country = /^[A-Z]{2}$/.test(rawCountry) ? rawCountry : rawCountry === 'NONE' ? 'none' : 'all';
+    const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
+    const filters = parseFilters(req.query);
     const range = resolveRange(config.historyFrom, now, config.timeZone, {
       period: req.query.period,
       from: req.query.from,
       to: req.query.to,
     });
-    const options = { provider, now, ...range, timeZone: config.timeZone, retryWindowDays: config.retryWindowDays };
-    const { totals, series } = getMetrics(store.db, { ...options, granularity, country });
+    const options = { provider, filters, now, ...range, timeZone: config.timeZone, retryWindowDays: config.retryWindowDays };
+    const { totals, series } = getMetrics(store.db, { ...options, granularity });
     res.json({
       generated_at: now,
       retry_window_days: config.retryWindowDays,
@@ -45,12 +74,14 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       history_from: localDay(config.historyFrom, config.timeZone),
       today: localDay(now, config.timeZone),
       range,
-      country,
-      countries: getCountries(store.db, options),
+      filters,
+      view,
       sync_running: isSyncRunning(),
       sync: store.latestRuns(),
       totals,
-      series,
+      series: view === 'time' ? series : [],
+      breakdown: (DIMENSIONS as readonly string[]).includes(view) ? getBreakdown(store.db, options, view as Dimension) : [],
+      reasons: view === 'decline_reason' ? getDeclineReasons(store.db, options) : [],
     });
   });
 
