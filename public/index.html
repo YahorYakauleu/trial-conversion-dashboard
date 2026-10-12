@@ -222,9 +222,32 @@
     .bar span { display: block; height: 100%; border-radius: 999px; background: var(--s-converted); }
     .more { display: flex; justify-content: center; padding: 12px 0 0; }
     [hidden] { display: none !important; }
+
+    /* панель «Как считается» */
+    .overlay { position: fixed; inset: 0; z-index: 20; background: rgba(5, 6, 10, 0.45); backdrop-filter: blur(2px); }
+    .drawer {
+      position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); overflow-y: auto;
+      background: var(--bg); border-left: 1px solid var(--border); box-shadow: -20px 0 60px rgba(0, 0, 0, 0.25);
+      padding: 20px 24px 48px;
+    }
+    .drawer-head { display: flex; justify-content: flex-end; position: sticky; top: -20px; padding-top: 4px; }
+    .doc { line-height: 1.6; color: var(--text-2); }
+    .doc h1 { font-size: 20px; color: var(--text); margin: 0 0 12px; letter-spacing: -0.01em; }
+    .doc h2 { font-size: 15px; color: var(--text); margin: 24px 0 8px; }
+    .doc strong { color: var(--text); font-weight: 600; }
+    .doc ul { padding-left: 20px; margin: 8px 0; }
+    .doc li { margin: 4px 0; }
+    .doc code { font-size: 12px; padding: 1px 5px; border-radius: 6px; background: var(--surface-sunken); border: 1px solid var(--border); }
+    .doc table { margin: 8px 0; font-variant-numeric: normal; }
+    .doc th, .doc td { white-space: normal; text-align: left; padding: 8px 10px; vertical-align: top; }
+    .doc td:first-child { font-weight: 400; max-width: none; }
+    .doc tbody tr:hover td { background: transparent; }
     #content { transition: opacity 0.2s; }
     #content.loading { opacity: 0.55; pointer-events: none; }
     @media (max-width: 640px) {
+      .actions .btn span { display: none; }
+      .actions .btn { padding: 0 10px; }
+      .drawer { padding: 16px; }
       .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
       .kpi { padding: 12px; border-radius: 14px; }
       .kpi .value { font-size: 21px; }
@@ -243,6 +266,10 @@
       </div>
     </div>
     <div class="actions">
+      <button class="btn" id="help-open" title="Как считаются метрики">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>
+        <span>Как считается</span>
+      </button>
       <button class="btn" id="refresh" title="Запустить синк">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
         <span>Обновить</span>
@@ -325,7 +352,14 @@
   </div>
 </main>
 
+<div class="overlay" id="help-overlay" hidden></div>
+<aside class="drawer" id="help" role="dialog" aria-modal="true" aria-label="Как считаются метрики" hidden>
+  <div class="drawer-head"><button class="btn" id="help-close" aria-label="Закрыть">✕</button></div>
+  <article class="doc" id="help-body">Загрузка…</article>
+</aside>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script>
   const DAY_MS = 86_400_000;
   const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
@@ -628,6 +662,34 @@
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     if (currentTheme() === 'auto' && lastData && state.view === 'time') renderCharts(lastData.series);
+  });
+
+  // «Как считается»: текст — public/metrics.md, один источник для дашборда и репозитория
+  let helpLoaded = false;
+  async function openHelp() {
+    document.getElementById('help').hidden = false;
+    document.getElementById('help-overlay').hidden = false;
+    document.getElementById('help-close').focus();
+    if (helpLoaded) return;
+    try {
+      const res = await api('/metrics.md');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      document.getElementById('help-body').innerHTML = marked.parse(await res.text());
+      helpLoaded = true;
+    } catch (error) {
+      document.getElementById('help-body').textContent = `Не удалось загрузить описание: ${error.message}`;
+    }
+  }
+  function closeHelp() {
+    document.getElementById('help').hidden = true;
+    document.getElementById('help-overlay').hidden = true;
+    document.getElementById('help-open').focus();
+  }
+  document.getElementById('help-open').addEventListener('click', openHelp);
+  document.getElementById('help-close').addEventListener('click', closeHelp);
+  document.getElementById('help-overlay').addEventListener('click', closeHelp);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !document.getElementById('help').hidden) closeHelp();
   });
 
   markTheme();
