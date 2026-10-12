@@ -25,7 +25,6 @@
     button { cursor: pointer; }
     button:hover { background: var(--card); }
     .muted { color: var(--muted); font-size: 13px; }
-    .ok { color: var(--ok); }
     .err { color: var(--err); }
     .controls { display: flex; gap: 12px 20px; margin: 20px 0 16px; flex-wrap: wrap; align-items: center; }
     .seg { display: flex; gap: 4px; }
@@ -51,7 +50,7 @@
   <header>
     <div>
       <h1>Trial → Paid</h1>
-      <div class="muted" id="status">Загрузка…</div>
+      <div class="muted" id="status"></div>
     </div>
     <button id="refresh">Обновить</button>
   </header>
@@ -191,16 +190,15 @@
       { day: 'Дата оформления', week: 'Неделя оформления', month: 'Месяц оформления' }[state.granularity];
   }
 
+  // Под заголовком — только ошибки синка; когда всё в порядке, строка пустая
   function renderStatus(data) {
-    const parts = data.sync.map((s) => {
-      const label = `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}`;
-      if (s.last_status === 'running') return `${label}: идёт синк`;
-      if (s.last_status === 'error') {
-        return `<span class="err" title="${esc(s.last_error ?? '')}">${label}: ошибка — ${esc(s.last_error ?? '')}</span> (успешно: ${when(s.last_success_at)})`;
-      }
-      return `<span class="ok">${label}</span> ${when(s.last_success_at)}`;
-    });
-    document.getElementById('status').innerHTML = parts.join(' · ') || 'Синков ещё не было';
+    const errors = data.sync
+      .filter((s) => s.last_status === 'error')
+      .map((s) => {
+        const label = `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}`;
+        return `<span class="err">${label}: синк упал — ${esc(s.last_error ?? '')} (последний успешный: ${when(s.last_success_at)})</span>`;
+      });
+    document.getElementById('status').innerHTML = errors.join(' · ');
     document.getElementById('refresh').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
   }
 
