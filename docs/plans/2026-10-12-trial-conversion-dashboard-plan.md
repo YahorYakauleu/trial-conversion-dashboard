@@ -8,7 +8,16 @@
 
 **Архитектура:** один Node-процесс. Провайдеры выгружают данные из API и приводят их к `TrialRow` → SQLite → `metrics.ts` считает точки по дням и неделям → Express отдаёт JSON и статическую страницу с Chart.js. Синк запускается cron'ом раз в сутки и по кнопке.
 
-**Стек:** Node ≥ 22 (в Docker — 24), TypeScript (ESM, NodeNext), Express 5, better-sqlite3 12, node-cron 4, stripe 18 (API `2025-08-27.basil`, как в workflow-service), vitest 4, tsx.
+**Стек:** Node ≥ 22.13 (в Docker — 24), TypeScript (ESM, NodeNext), Express 5, встроенный `node:sqlite`, node-cron 4, stripe 18 (API `2025-08-27.basil`, как в workflow-service), vitest 4, tsx.
+
+## Отклонения при выполнении (задачи 1–6, 2026-10-12)
+
+Код в репозитории — источник правды; блоки кода в задачах 1–6 ниже оставлены как были в плане.
+
+1. **`node:sqlite` вместо `better-sqlite3`.** У `better-sqlite3@12` нет готовой сборки под локальный Node 23.11, а сборка из исходников падает. Встроенный модуль работает и на 23, и на 24, и в проекте нет нативных зависимостей. Особенности: лишний именованный параметр — ошибка, boolean не биндится, поэтому `upsertTrial` передаёт колонки явно. При запуске печатается `ExperimentalWarning`.
+2. **«С первой попытки» в Stripe** = `paid && attempt_count == 1 && paid_at − finalized_at ≤ 1 ч`. По документации Stripe ручная оплата после отказа не увеличивает `attempt_count`. Проверено на живых данных Toggle Org: 61 из 61 оплаты с первой попытки укладывается в час.
+3. **`first_attempt_succeeded = false` необратимо** при upsert (`CASE WHEN trials.first_attempt_succeeded = 0 THEN 0 …`). Порядок событий не влияет на результат.
+4. **Живые данные Toggle Org (12.10.2026):** все триалы по 7 дней; новых подписок ~23 в день; инвойсов ~2 750 в день. Бэкфилл Org — порядка 2 500 запросов, 10–15 минут. Основной поток новых подписок, видимо, идёт через другие аккаунты (Toggle Corp / Solidgate) — их ключи тоже нужны.
 
 ## Уточнения к спеке (внесены в спеку этим же коммитом)
 
@@ -1996,7 +2005,7 @@ EXPOSE 3000
 CMD ["node", "dist/main.js"]
 ```
 
-Если на целевой платформе `better-sqlite3` не найдёт prebuild и начнёт собираться из исходников, добавить в build-стейдж `RUN apt-get update && apt-get install -y python3 make g++` перед `npm ci`.
+Нативных зависимостей нет (`node:sqlite` встроен в Node), поэтому build-инструменты в образе не нужны. Чтобы не печатать `ExperimentalWarning`, в `CMD` можно добавить `--disable-warning=ExperimentalWarning`.
 
 - [ ] **Шаг 2. .dockerignore:** `node_modules`, `dist`, `data`, `.env`, `.git`, `docs`, `tests`.
 - [ ] **Шаг 3. README.md** — коротко:

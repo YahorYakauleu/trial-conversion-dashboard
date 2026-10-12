@@ -46,7 +46,7 @@ Node 24 + TypeScript, один процесс, фронт без сборки.
 | Компонент | Выбор |
 |---|---|
 | HTTP | Express |
-| Хранилище | SQLite (`better-sqlite3`), один файл в `DATA_DIR` |
+| Хранилище | SQLite через встроенный `node:sqlite` (Node ≥ 22.13), один файл в `DATA_DIR`; нативных зависимостей нет |
 | Расписание | `node-cron`, внутри процесса |
 | Stripe | официальный SDK `stripe`, `maxNetworkRetries: 3` |
 | Solidgate | `fetch` + подпись запросов так же, как в `workflow-service/src/common/providers/payment/solidgate/solidgate.service.ts` |
@@ -90,7 +90,7 @@ trial-conversion-dashboard/
 
 ### Схема SQLite
 
-- `trials` — колонки TrialRow + `synced_at`; первичный ключ `(provider, subscription_id)`; индекс по `trial_ended_at`. При upsert поля оплаты сливаются через `COALESCE`: повторная выгрузка без данных об оплате не стирает уже известные.
+- `trials` — колонки TrialRow + `synced_at`; первичный ключ `(provider, subscription_id)`; индекс по `trial_ended_at`. При upsert поля оплаты сливаются через `COALESCE`: повторная выгрузка без данных об оплате не стирает уже известные. `first_attempt_succeeded = false` необратимо: события приходят в любом порядке.
 - `sync_runs` — `id, provider, account, kind ('backfill'|'daily'), started_at, finished_at, status ('running'|'ok'|'error'), error, items`.
 - `sync_state` — `(provider, account, key) → value`: курсор ежедневного синка и прогресс бэкфилла (последний обработанный день).
 
@@ -108,7 +108,7 @@ Email, имена и данные карт не хранятся.
 1. `GET /v1/subscriptions?status=all&created[gte]&created[lt]` по дням за `HISTORY_DAYS + TRIAL_LOOKBACK_DAYS` (по умолчанию 90 + 31). Берём только подписки с непустыми `trial_start` и `trial_end`. Строки с `trial_end` в будущем тоже сохраняем: это триалы, которые ещё идут.
 2. `GET /v1/invoices?created[gte]&created[lt]` по дням за `HISTORY_DAYS + 1`. Оставляем `billing_reason = subscription_cycle` и `amount_due > 0`, подписка должна быть в `trials`. Для каждой подписки берём самый ранний такой инвойс с `created ≥ trial_end − 1 час`. Фильтровать по `period_start` нельзя: у инвойса `subscription_cycle` поля `period_start`/`period_end` относятся к предыдущему периоду, то есть к триалу.
 3. Из инвойса:
-   - `first_attempt_succeeded` = `status == 'paid' && attempt_count == 1`. Если `attempt_count == 0` — `null`, иначе `false`.
+   - `first_attempt_succeeded` = `status == 'paid' && attempt_count == 1 && paid_at − finalized_at ≤ 1 час`. Если `attempt_count == 0` — `null`, иначе `false`. Проверка времени нужна, потому что ручная оплата после отказа не увеличивает `attempt_count`. На живых данных Toggle Org (99 инвойсов продления) все оплаты с первой попытки укладываются в час после финализации.
    - `paid_at` = `status_transitions.paid_at`.
 
 **Ежедневно**
