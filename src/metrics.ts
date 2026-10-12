@@ -1,11 +1,16 @@
 import type { Db, Provider } from './db.js';
+import { addDays, localDay, localMidnight } from './time.js';
 
 export const DAY = 86_400;
 // Первая автоматическая попытка проходит в течение суток после конца триала
 const FIRST_ATTEMPT_SETTLE = DAY;
+// Корзины по 15 минут: смещения всех часовых поясов кратны 15 минутам, поэтому корзина целиком
+// лежит в одних местных сутках. Так SQLite отдаёт сотни строк вместо сотен тысяч триалов.
+const BUCKET = 900;
 
 export type ProviderFilter = Provider | 'all';
 export type Granularity = 'day' | 'week' | 'month';
+export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'custom';
 
 export interface Totals {
   started: number;
@@ -26,25 +31,49 @@ export interface MetricsOptions {
   provider: ProviderFilter;
   granularity: Granularity;
   now: number;
-  from: number; // первый день периода, полночь UTC
-  to: number; // последний день периода включительно
+  from: string; // первый день периода (YYYY-MM-DD, местные сутки)
+  to: string; // последний день периода включительно
+  timeZone: string;
   retryWindowDays: number;
 }
 
 export const startOfUtcDay = (ts: number) => Math.floor(ts / DAY) * DAY;
 export const dayKey = (ts: number) => new Date(ts * 1000).toISOString().slice(0, 10);
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
+const isDay = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
 
-// Период из адреса страницы: YYYY-MM-DD, обрезается по началу истории и сегодняшнему дню.
+// Период из адреса страницы: пресет или свои даты, в местных сутках; обрезается по началу истории и сегодняшнему дню.
 // Сегодня — неполный день, но показывается как обычный (его цифры неокончательные, «≈»).
-export function resolveRange(historyFrom: number, now: number, from?: unknown, to?: unknown): { from: number; to: number } {
-  const lastDay = Math.max(historyFrom, startOfUtcDay(now));
-  const parse = (value: unknown) =>
-    typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? Date.parse(`${value}T00:00:00Z`) / 1000 : NaN;
-  const clamp = (value: number, fallback: number) =>
-    Number.isNaN(value) ? fallback : Math.min(Math.max(value, historyFrom), lastDay);
-  const end = clamp(parse(to), lastDay);
-  return { from: Math.min(clamp(parse(from), historyFrom), end), to: end };
+export function resolveRange(
+  historyFrom: number,
+  now: number,
+  timeZone: string,
+  query: { period?: unknown; from?: unknown; to?: unknown } = {},
+): { from: string; to: string } {
+  const first = localDay(historyFrom, timeZone);
+  const today = localDay(now, timeZone);
+  const monthStart = (day: string) => `${day.slice(0, 8)}01`;
+  const period = typeof query.period === 'string' ? query.period : isDay(query.from) || isDay(query.to) ? 'custom' : 'all';
+
+  let from = first;
+  let to = today;
+  if (period === 'last7') from = addDays(today, -6);
+  if (period === 'last30') from = addDays(today, -29);
+  if (period === 'thisMonth') from = monthStart(today);
+  if (period === 'prevMonth') {
+    to = addDays(monthStart(today), -1);
+    from = monthStart(to);
+  }
+  if (period === 'custom') {
+    if (isDay(query.from)) from = query.from;
+    if (isDay(query.to)) to = query.to;
+  }
+
+  const clamp = (day: string) => (day < first ? first : day > today ? today : day);
+  to = clamp(to);
+  from = clamp(from);
+  return { from: from > to ? to : from, to };
 }
 
 export function getMetrics(db: Db, o: MetricsOptions): { totals: Totals; series: Point[] } {
@@ -53,25 +82,37 @@ export function getMetrics(db: Db, o: MetricsOptions): { totals: Totals; series:
 }
 
 function dailyPoints(db: Db, o: MetricsOptions): Point[] {
-  const params = { from: o.from, until: o.to + DAY, provider: o.provider };
+  const params = {
+    from: localMidnight(o.from, o.timeZone),
+    until: localMidnight(addDays(o.to, 1), o.timeZone),
+    provider: o.provider,
+  };
   const filter = `trial_started_at >= @from AND trial_started_at < @until AND (@provider = 'all' OR provider = @provider)`;
 
-  const rows = db
+  const buckets = db
     .prepare(
-      `SELECT date(trial_started_at, 'unixepoch') AS day,
+      `SELECT (trial_started_at / ${BUCKET}) * ${BUCKET} AS bucket,
               COUNT(*) AS started,
               SUM(CASE WHEN first_attempt_succeeded = 1 THEN 1 ELSE 0 END) AS paid_first,
               SUM(CASE WHEN paid_at IS NOT NULL AND paid_at <= trial_ended_at + @window THEN 1 ELSE 0 END) AS paid_retry
        FROM trials WHERE ${filter}
-       GROUP BY day`,
+       GROUP BY bucket`,
     )
     .all({ ...params, window: o.retryWindowDays * DAY }) as unknown as {
-    day: string;
+    bucket: number;
     started: number;
     paid_first: number;
     paid_retry: number;
   }[];
-  const byDay = new Map(rows.map((r) => [r.day, r]));
+  const byDay = new Map<string, { started: number; paid_first: number; paid_retry: number }>();
+  for (const b of buckets) {
+    const day = localDay(b.bucket, o.timeZone);
+    const acc = byDay.get(day) ?? { started: 0, paid_first: 0, paid_retry: 0 };
+    acc.started += b.started;
+    acc.paid_first += b.paid_first;
+    acc.paid_retry += b.paid_retry;
+    byDay.set(day, acc);
+  }
 
   // День окончателен, когда даже самый длинный его триал закончился и прошло окно ожидания оплаты
   const { max_len: maxTrialLength } = db
@@ -79,13 +120,13 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
     .get(params) as { max_len: number };
 
   const points: Point[] = [];
-  for (let day = o.from; day <= o.to; day += DAY) {
-    const r = byDay.get(dayKey(day)) ?? { started: 0, paid_first: 0, paid_retry: 0 };
-    const lastTrialEnd = day + DAY + maxTrialLength;
+  for (let day = o.from; day <= o.to; day = addDays(day, 1)) {
+    const r = byDay.get(day) ?? { started: 0, paid_first: 0, paid_retry: 0 };
+    const lastTrialEnd = localMidnight(addDays(day, 1), o.timeZone) + maxTrialLength;
     points.push(
       withRates({
-        period: dayKey(day),
-        period_end: dayKey(day),
+        period: day,
+        period_end: day,
         started: r.started,
         paid_first: r.paid_first,
         paid_retry: r.paid_retry,

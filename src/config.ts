@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { assertTimeZone, localMidnight } from './time.js';
 
 export interface StripeAccount {
   account: string;
@@ -15,7 +16,8 @@ export interface Config {
   stripeAccounts: StripeAccount[];
   solidgateAccounts: SolidgateAccount[];
   retryWindowDays: number;
-  historyFrom: number; // unix-секунды, полночь UTC
+  timeZone: string; // по какому времени резать сутки (как в Stripe-аккаунте)
+  historyFrom: number; // unix-секунды, полночь HISTORY_FROM в timeZone
   syncCron: string;
   basicAuth: { user: string; password: string };
   dataDir: string;
@@ -42,11 +44,19 @@ export function loadConfig(env: Env = process.env): Config {
     throw new Error('Нужен хотя бы один ключ в STRIPE_KEYS или SOLIDGATE_KEYS');
   }
 
+  const timeZone = env.TIMEZONE?.trim() || 'America/New_York';
+  try {
+    assertTimeZone(timeZone);
+  } catch {
+    throw new Error(`TIMEZONE: неизвестный часовой пояс "${timeZone}", пример — America/New_York`);
+  }
+
   return {
     stripeAccounts,
     solidgateAccounts,
     retryWindowDays: positiveInt(env, 'RETRY_WINDOW_DAYS', 30),
-    historyFrom: utcDate(env, 'HISTORY_FROM'),
+    timeZone,
+    historyFrom: localMidnight(date(env, 'HISTORY_FROM'), timeZone),
     syncCron: env.SYNC_CRON?.trim() || '0 5 * * *',
     basicAuth: { user: required(env, 'BASIC_AUTH_USER'), password: required(env, 'BASIC_AUTH_PASSWORD') },
     dataDir: env.DATA_DIR?.trim() || './data',
@@ -69,11 +79,11 @@ function required(env: Env, name: string): string {
   return value;
 }
 
-function utcDate(env: Env, name: string): number {
+function date(env: Env, name: string): string {
   const raw = required(env, name);
-  const ms = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? Date.parse(`${raw}T00:00:00Z`) : NaN;
-  if (Number.isNaN(ms)) throw new Error(`${name} должна быть датой в формате YYYY-MM-DD`);
-  return ms / 1000;
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(raw) && !Number.isNaN(Date.parse(`${raw}T00:00:00Z`));
+  if (!valid) throw new Error(`${name} должна быть датой в формате YYYY-MM-DD`);
+  return raw;
 }
 
 function positiveInt(env: Env, name: string, fallback: number): number {

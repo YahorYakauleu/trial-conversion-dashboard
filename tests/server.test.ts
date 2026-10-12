@@ -35,7 +35,7 @@ describe('server', () => {
 
   it('/api/metrics отдаёт итоги за период, ряд и статус синка', async () => {
     const url = await start();
-    const query = 'provider=stripe&granularity=month&from=2026-09-10&to=2026-09-20';
+    const query = 'provider=stripe&granularity=month&period=custom&from=2026-09-10&to=2026-09-20';
     const body = await (await fetch(`${url}/api/metrics?${query}`, { headers: auth })).json();
     expect(body).toMatchObject({
       retry_window_days: 30,

@@ -19,7 +19,8 @@ describe('loadConfig', () => {
     expect(c.solidgateAccounts).toEqual([{ account: 'sg', publicKey: 'api_pk_1', secretKey: 'api_sk_1' }]);
     expect(c).toMatchObject({
       retryWindowDays: 30,
-      historyFrom: Date.parse('2026-09-01T00:00:00Z') / 1000,
+      timeZone: 'America/New_York',
+      historyFrom: Date.parse('2026-09-01T04:00:00Z') / 1000, // полночь по Нью-Йорку
       syncCron: '0 5 * * *',
       dataDir: './data',
       port: 3000,
@@ -42,5 +43,10 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, RETRY_WINDOW_DAYS: '0' })).toThrow(/RETRY_WINDOW_DAYS/);
     expect(() => loadConfig({ ...base, HISTORY_FROM: '01.09.2026' })).toThrow(/YYYY-MM-DD/);
     expect(() => loadConfig({ ...base, HISTORY_FROM: '2026-13-01' })).toThrow(/YYYY-MM-DD/);
+    expect(() => loadConfig({ ...base, TIMEZONE: 'Mars/Olympus' })).toThrow(/TIMEZONE/);
+  });
+
+  it('HISTORY_FROM — полночь в заданном часовом поясе', () => {
+    expect(loadConfig({ ...base, TIMEZONE: 'UTC' }).historyFrom).toBe(Date.parse('2026-09-01T00:00:00Z') / 1000);
   });
 });

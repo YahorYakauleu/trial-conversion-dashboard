@@ -11,8 +11,9 @@ const opts = {
   provider: 'all' as const,
   granularity: 'day' as const,
   now: NOW,
-  from: HISTORY_FROM,
-  to: d('2026-10-11'),
+  from: '2026-09-01',
+  to: '2026-10-11',
+  timeZone: 'UTC',
   retryWindowDays: 30,
 };
 
@@ -62,7 +63,7 @@ describe('getMetrics — по дню оформления триала', () => {
 
   it('сегодняшний день считается как обычный и помечен неокончательным', () => {
     const store = storeWith([trial('2026-10-12T01:00:00Z'), trial('2026-10-12T09:00:00Z')]);
-    const { series } = getMetrics(store.db, { ...opts, to: d('2026-10-12') });
+    const { series } = getMetrics(store.db, { ...opts, to: '2026-10-12' });
     expect(series.at(-1)).toMatchObject({ period: '2026-10-12', started: 2, final_first: false, final_retry: false });
   });
 
@@ -73,7 +74,7 @@ describe('getMetrics — по дню оформления триала', () => {
       trial('2026-10-03T23:59:59Z'),
       trial('2026-10-04T00:00:00Z'), // после периода
     ]);
-    const { series, totals } = getMetrics(store.db, { ...opts, from: d('2026-10-01'), to: d('2026-10-03') });
+    const { series, totals } = getMetrics(store.db, { ...opts, from: '2026-10-01', to: '2026-10-03' });
     expect(series.map((p) => p.period)).toEqual(['2026-10-01', '2026-10-02', '2026-10-03']);
     expect(totals.started).toBe(2);
   });
@@ -137,7 +138,7 @@ describe('getMetrics — недели, месяцы, итоги', () => {
       trial('2026-09-03T12:00:00Z'),
       trial('2026-09-03T12:00:00Z'),
     ]);
-    const early = getMetrics(store.db, { ...opts, from: d('2026-09-01'), to: d('2026-09-04') }).totals;
+    const early = getMetrics(store.db, { ...opts, from: '2026-09-01', to: '2026-09-04' }).totals;
     expect(early).toEqual({
       started: 4,
       paid_first: 1,
@@ -151,20 +152,66 @@ describe('getMetrics — недели, месяцы, итоги', () => {
   });
 });
 
-describe('resolveRange', () => {
-  const lastDay = d('2026-10-12'); // сегодня, неполный день — показывается как обычный
+describe('getMetrics — сутки по Нью-Йорку', () => {
+  const ny = { ...opts, timeZone: 'America/New_York', from: '2026-10-10', to: '2026-10-11' };
 
-  it('по умолчанию — вся история по сегодня', () => {
-    expect(resolveRange(HISTORY_FROM, NOW)).toEqual({ from: HISTORY_FROM, to: lastDay });
+  it('день оформления считается по местному времени', () => {
+    const store = storeWith([
+      trial('2026-10-11T03:59:59Z'), // 10.10 23:59 по Нью-Йорку
+      trial('2026-10-11T04:00:00Z'), // 11.10 00:00 по Нью-Йорку
+      trial('2026-10-11T23:00:00Z'),
+    ]);
+    const { series } = getMetrics(store.db, ny);
+    expect(series.map((p) => [p.period, p.started])).toEqual([
+      ['2026-10-10', 1],
+      ['2026-10-11', 2],
+    ]);
   });
 
-  it('принимает YYYY-MM-DD и обрезает по истории и сегодняшнему дню', () => {
-    expect(resolveRange(HISTORY_FROM, NOW, '2026-10-01', '2026-10-05')).toEqual({ from: d('2026-10-01'), to: d('2026-10-05') });
-    expect(resolveRange(HISTORY_FROM, NOW, '2026-08-01', '2026-12-31')).toEqual({ from: HISTORY_FROM, to: lastDay });
+  it('период обрезается по местным суткам', () => {
+    const store = storeWith([trial('2026-10-10T03:00:00Z'), trial('2026-10-12T03:59:00Z'), trial('2026-10-12T04:00:00Z')]);
+    expect(getMetrics(store.db, ny).totals.started).toBe(1); // 09.10 и 12.10 по Нью-Йорку — вне периода
+  });
+});
+
+describe('resolveRange', () => {
+  const UTC = 'UTC';
+
+  it('по умолчанию — вся история по сегодня', () => {
+    expect(resolveRange(HISTORY_FROM, NOW, UTC)).toEqual({ from: '2026-09-01', to: '2026-10-12' });
+  });
+
+  it('пресеты считаются от сегодняшнего дня в часовом поясе дашборда', () => {
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'last7' })).toEqual({ from: '2026-10-06', to: '2026-10-12' });
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'last30' })).toEqual({ from: '2026-09-13', to: '2026-10-12' });
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'thisMonth' })).toEqual({ from: '2026-10-01', to: '2026-10-12' });
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'prevMonth' })).toEqual({ from: '2026-09-01', to: '2026-09-30' });
+    // 12.10 01:00 UTC — в Нью-Йорке ещё 11.10
+    expect(resolveRange(HISTORY_FROM, ts('2026-10-12T01:00:00Z'), 'America/New_York', { period: 'last7' })).toEqual({
+      from: '2026-10-05',
+      to: '2026-10-11',
+    });
+  });
+
+  it('свой период: YYYY-MM-DD, обрезается по истории и сегодняшнему дню', () => {
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'custom', from: '2026-10-01', to: '2026-10-05' })).toEqual({
+      from: '2026-10-01',
+      to: '2026-10-05',
+    });
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { from: '2026-08-01', to: '2026-12-31' })).toEqual({
+      from: '2026-09-01',
+      to: '2026-10-12',
+    });
   });
 
   it('кривые значения → по умолчанию; from позже to → один день to', () => {
-    expect(resolveRange(HISTORY_FROM, NOW, 'вчера', 42)).toEqual({ from: HISTORY_FROM, to: lastDay });
-    expect(resolveRange(HISTORY_FROM, NOW, '2026-10-09', '2026-10-02')).toEqual({ from: d('2026-10-02'), to: d('2026-10-02') });
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'custom', from: 'вчера', to: 42 })).toEqual({
+      from: '2026-09-01',
+      to: '2026-10-12',
+    });
+    expect(resolveRange(HISTORY_FROM, NOW, UTC, { from: '2026-10-09', to: '2026-10-02' })).toEqual({
+      from: '2026-10-02',
+      to: '2026-10-02',
+    });
   });
 });

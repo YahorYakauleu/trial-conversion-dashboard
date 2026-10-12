@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import express, { type RequestHandler } from 'express';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
-import { dayKey, getMetrics, resolveRange, type Granularity, type ProviderFilter } from './metrics.js';
+import { getMetrics, resolveRange, type Granularity, type ProviderFilter } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
+import { localDay } from './time.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -21,24 +22,32 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(basicAuth(config.basicAuth.user, config.basicAuth.password));
   app.use(express.static(PUBLIC_DIR));
 
-  // ?provider=all|stripe|solidgate&granularity=day|week|month&from=YYYY-MM-DD&to=YYYY-MM-DD
+  // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
+  //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom). Дни — местные сутки в config.timeZone.
   app.get('/api/metrics', (req, res) => {
     const now = nowSec();
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
     const granularity = GRANULARITIES.find((g) => g === req.query.granularity) ?? 'day';
-    const range = resolveRange(config.historyFrom, now, req.query.from, req.query.to);
+    const range = resolveRange(config.historyFrom, now, config.timeZone, {
+      period: req.query.period,
+      from: req.query.from,
+      to: req.query.to,
+    });
     const { totals, series } = getMetrics(store.db, {
       provider,
       granularity,
       now,
       ...range,
+      timeZone: config.timeZone,
       retryWindowDays: config.retryWindowDays,
     });
     res.json({
       generated_at: now,
       retry_window_days: config.retryWindowDays,
-      history_from: dayKey(config.historyFrom),
-      range: { from: dayKey(range.from), to: dayKey(range.to) },
+      time_zone: config.timeZone,
+      history_from: localDay(config.historyFrom, config.timeZone),
+      today: localDay(now, config.timeZone),
+      range,
       sync_running: isSyncRunning(),
       sync: store.latestRuns(),
       totals,

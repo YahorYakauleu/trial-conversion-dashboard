@@ -80,7 +80,8 @@
   <div class="cards" id="cards"></div>
 
   <p class="muted note">
-    Триалы сгруппированы по дню оформления (UTC). «Сконвертилось» — оплатили первый платный период
+    Триалы сгруппированы по дню оформления по времени <span id="tz">America/New_York</span> (как в Stripe).
+    «Сконвертилось» — оплатили первый платный период
     в течение <span id="window">30</span> дней после конца триала, с любой попытки.
     «≈» и пунктир — по этим дням ещё идут триалы или ретраи, цифра будет расти.
   </p>
@@ -127,28 +128,16 @@
 
   const pct = (r) => (r === null ? '—' : `${(r * 100).toFixed(1)}%`);
   const num = (n) => n.toLocaleString('ru-RU');
-  const utc = (ts) => (ts ? `${new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC` : 'ещё не было');
+  let timeZone = 'America/New_York';
+  const when = (ts) =>
+    ts
+      ? new Date(ts * 1000).toLocaleString('ru-RU', { timeZone, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+      : 'ещё не было';
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-  const iso = (date) => date.toISOString().slice(0, 10);
   const ddmm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
   const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
   const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
   const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
-
-  // Пресеты считаются по сегодня включительно (UTC); сервер обрежет по началу истории
-  function presetRange(preset) {
-    const now = new Date(Date.now());
-    const y = now.getUTCFullYear();
-    const m = now.getUTCMonth();
-    const today = new Date(Date.UTC(y, m, now.getUTCDate()));
-    switch (preset) {
-      case 'last7': return { from: iso(new Date(today - 6 * DAY_MS)), to: iso(today) };
-      case 'last30': return { from: iso(new Date(today - 29 * DAY_MS)), to: iso(today) };
-      case 'thisMonth': return { from: iso(new Date(Date.UTC(y, m, 1))), to: iso(today) };
-      case 'prevMonth': return { from: iso(new Date(Date.UTC(y, m - 1, 1))), to: iso(new Date(Date.UTC(y, m, 0))) };
-      default: return { from: '', to: '' }; // «всё время» — сервер возьмёт всю историю
-    }
-  }
 
   function syncUrl() {
     const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, period: state.preset });
@@ -161,10 +150,14 @@
 
   async function load() {
     clearTimeout(pollTimer);
-    if (state.preset !== 'custom') Object.assign(state, presetRange(state.preset));
     syncUrl();
     try {
-      const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, from: state.from, to: state.to });
+      // Пресет («последние 7 дней» и т.п.) разбирает сервер — по «сегодня» в часовом поясе дашборда
+      const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, period: state.preset });
+      if (state.preset === 'custom') {
+        q.set('from', state.from);
+        q.set('to', state.to);
+      }
       const res = await api(`/api/metrics?${q}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -180,6 +173,8 @@
   }
 
   function renderControls(data) {
+    timeZone = data.time_zone;
+    document.getElementById('tz').textContent = data.time_zone;
     document.getElementById('window').textContent = data.retry_window_days;
     for (const id of ['provider', 'granularity']) {
       document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
@@ -189,7 +184,7 @@
     for (const id of ['from', 'to']) {
       const input = document.getElementById(id);
       input.min = data.history_from;
-      input.max = presetRange('last7').to;
+      input.max = data.today;
       input.value = data.range[id];
     }
     document.getElementById('period-head').textContent =
@@ -201,9 +196,9 @@
       const label = `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}`;
       if (s.last_status === 'running') return `${label}: идёт синк`;
       if (s.last_status === 'error') {
-        return `<span class="err" title="${esc(s.last_error ?? '')}">${label}: ошибка — ${esc(s.last_error ?? '')}</span> (успешно: ${utc(s.last_success_at)})`;
+        return `<span class="err" title="${esc(s.last_error ?? '')}">${label}: ошибка — ${esc(s.last_error ?? '')}</span> (успешно: ${when(s.last_success_at)})`;
       }
-      return `<span class="ok">${label}</span> ${utc(s.last_success_at)}`;
+      return `<span class="ok">${label}</span> ${when(s.last_success_at)}`;
     });
     document.getElementById('status').innerHTML = parts.join(' · ') || 'Синков ещё не было';
     document.getElementById('refresh').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
