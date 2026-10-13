@@ -17,23 +17,25 @@ import {
 } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
 import { localDay } from './time.js';
+import { getTurnover, getTurnoverBreakdown, TURNOVER_DIMENSIONS, type TurnoverDimension } from './turnover.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
 const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
-const FILTER_FORMAT: Record<Dimension, RegExp> = {
+const FILTER_FORMAT: Record<Dimension | TurnoverDimension, RegExp> = {
   account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
+  mid: /^(stripe|solidgate):[A-Za-z0-9_-]{1,64}$/, // у Solidgate MID — UUID
   country: /^[A-Z]{2}$/,
   payment_method: /^[a-z_]{1,32}$/,
   card_brand: /^[a-z_ ]{1,32}$/,
   bank: /^.{1,120}$/,
 };
 
-function parseFilters(query: Record<string, unknown>): Filters {
-  const filters: Filters = {};
-  for (const dimension of DIMENSIONS) {
+function parseFilters<D extends Dimension | TurnoverDimension>(query: Record<string, unknown>, dimensions: readonly D[]) {
+  const filters: Partial<Record<D, string>> = {};
+  for (const dimension of dimensions) {
     const raw = query[dimension];
     if (typeof raw !== 'string' || raw === '') continue;
     const value = dimension === 'country' ? raw.toUpperCase() : raw;
@@ -55,34 +57,59 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
   //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&account=stripe:corp&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
   //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки в config.timeZone.
-  app.get('/api/metrics', (req, res) => {
+  // Общее для обоих экранов: провайдер, шаг, период (в местных сутках) и статус синка
+  const common = (query: Record<string, unknown>) => {
     const now = nowSec();
-    const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
-    const granularity = GRANULARITIES.find((g) => g === req.query.granularity) ?? 'day';
+    return {
+      now,
+      provider: PROVIDERS.find((p) => p === query.provider) ?? 'all',
+      granularity: GRANULARITIES.find((g) => g === query.granularity) ?? 'day',
+      range: resolveRange(config.historyFrom, now, config.timeZone, { period: query.period, from: query.from, to: query.to }),
+      meta: {
+        generated_at: now,
+        time_zone: config.timeZone,
+        history_from: localDay(config.historyFrom, config.timeZone),
+        today: localDay(now, config.timeZone),
+        sync_running: isSyncRunning(),
+        sync: store.latestRuns(),
+      },
+    };
+  };
+
+  app.get('/api/metrics', (req, res) => {
+    const { now, provider, granularity, range, meta } = common(req.query);
     const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
-    const filters = parseFilters(req.query);
-    const range = resolveRange(config.historyFrom, now, config.timeZone, {
-      period: req.query.period,
-      from: req.query.from,
-      to: req.query.to,
-    });
+    const filters: Filters = parseFilters(req.query, DIMENSIONS);
     const options = { provider, filters, now, ...range, timeZone: config.timeZone, retryWindowDays: config.retryWindowDays };
     const { totals, series } = getMetrics(store.db, { ...options, granularity });
     res.json({
-      generated_at: now,
+      ...meta,
       retry_window_days: config.retryWindowDays,
-      time_zone: config.timeZone,
-      history_from: localDay(config.historyFrom, config.timeZone),
-      today: localDay(now, config.timeZone),
       range,
       filters,
       view,
-      sync_running: isSyncRunning(),
-      sync: store.latestRuns(),
       totals,
       series: view === 'time' ? series : [],
       breakdown: (DIMENSIONS as readonly string[]).includes(view) ? getBreakdown(store.db, options, view as Dimension) : [],
       reasons: view === 'decline_reason' ? getDeclineReasons(store.db, options) : [],
+    });
+  });
+
+  // Оборот: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
+  app.get('/api/turnover', (req, res) => {
+    const { provider, granularity, range, meta } = common(req.query);
+    const view = TURNOVER_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
+    const filters = parseFilters(req.query, TURNOVER_DIMENSIONS);
+    const options = { provider, filters, ...range, timeZone: config.timeZone };
+    const { totals, series } = getTurnover(store.db, { ...options, granularity });
+    res.json({
+      ...meta,
+      range,
+      filters,
+      view,
+      totals,
+      series: view === 'time' ? series : [],
+      breakdown: view === 'time' ? [] : getTurnoverBreakdown(store.db, options, view),
     });
   });
 

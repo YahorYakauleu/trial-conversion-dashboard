@@ -37,6 +37,17 @@ export interface CardDetails {
   bank: string | null;
 }
 
+// Успешный платёж для оборота: любое списание (первые платежи, продления, разовые), суммы — в центах USD
+export interface PaymentRow extends CardDetails {
+  provider: Provider;
+  payment_id: string; // Stripe charge / Solidgate order
+  account: string;
+  mid: string | null; // Stripe — аккаунт; Solidgate — MID из заказа
+  paid_at: number;
+  amount_usd_cents: number;
+  refunded_usd_cents: number;
+}
+
 export interface LatestRun {
   provider: Provider;
   account: string;
@@ -55,6 +66,7 @@ const READABLE_DATES: [table: string, column: string, expression: string][] = [
   ['trials', 'paid_utc', "datetime(paid_at, 'unixepoch')"],
   ['trials', 'synced_utc', "datetime(synced_at, 'unixepoch')"],
   ['attempts', 'attempted_utc', "datetime(attempted_at, 'unixepoch')"],
+  ['payments', 'paid_utc', "datetime(paid_at, 'unixepoch')"],
   ['sync_runs', 'started_utc', "datetime(started_at, 'unixepoch')"],
   ['sync_runs', 'finished_utc', "datetime(finished_at, 'unixepoch')"],
   // в sync_state лежат и моменты времени (курсоры), и просто числа (версия данных) — дату показываем только для первых
@@ -120,6 +132,26 @@ export function openStore(file: string) {
       PRIMARY KEY (provider, attempt_id)
     );
     CREATE INDEX IF NOT EXISTS attempts_subscription_idx ON attempts (provider, subscription_id);
+    CREATE TABLE IF NOT EXISTS payments (
+      provider TEXT NOT NULL,
+      payment_id TEXT NOT NULL,
+      account TEXT NOT NULL,
+      mid TEXT,
+      paid_at INTEGER NOT NULL,
+      amount_usd_cents INTEGER NOT NULL,
+      refunded_usd_cents INTEGER NOT NULL DEFAULT 0,
+      country TEXT,
+      payment_method TEXT,
+      card_brand TEXT,
+      bank TEXT,
+      PRIMARY KEY (provider, payment_id)
+    );
+    CREATE INDEX IF NOT EXISTS payments_paid_idx ON payments (paid_at);
+    -- курсы валют к доллару за день (JSON {валюта: сколько её за 1 USD}), чтобы не запрашивать повторно
+    CREATE TABLE IF NOT EXISTS fx_rates (
+      day TEXT PRIMARY KEY,
+      rates TEXT NOT NULL
+    );
   `);
   for (const [table, column, expression] of READABLE_DATES) {
     // table_xinfo, а не table_info: вычисляемые колонки table_info не показывает
@@ -166,6 +198,23 @@ export function openStore(file: string) {
       reason = COALESCE(excluded.reason, attempts.reason),
       refunded = MAX(excluded.refunded, attempts.refunded)
   `);
+  // Платёж: перевыгрузка обновляет всё, кроме рефанда — он только растёт
+  const upsertPaymentStmt = db.prepare(`
+    INSERT INTO payments (provider, payment_id, account, mid, paid_at, amount_usd_cents, refunded_usd_cents,
+                          country, payment_method, card_brand, bank)
+    VALUES (@provider, @payment_id, @account, @mid, @paid_at, @amount_usd_cents, @refunded_usd_cents,
+            @country, @payment_method, @card_brand, @bank)
+    ON CONFLICT (provider, payment_id) DO UPDATE SET
+      account = excluded.account,
+      mid = excluded.mid,
+      paid_at = excluded.paid_at,
+      amount_usd_cents = excluded.amount_usd_cents,
+      refunded_usd_cents = MAX(excluded.refunded_usd_cents, payments.refunded_usd_cents),
+      country = excluded.country,
+      payment_method = excluded.payment_method,
+      card_brand = excluded.card_brand,
+      bank = excluded.bank
+  `);
   const selectByInvoice = db.prepare('SELECT subscription_id FROM trials WHERE provider = ? AND first_invoice_id = ?');
   const selectTrial = db.prepare('SELECT * FROM trials WHERE provider = ? AND subscription_id = ?');
   const selectState = db.prepare('SELECT value FROM sync_state WHERE provider = ? AND account = ? AND key = ?');
@@ -211,6 +260,27 @@ export function openStore(file: string) {
 
     markRefunded(provider: Provider, attemptId: string): void {
       db.prepare('UPDATE attempts SET refunded = 1 WHERE provider = ? AND attempt_id = ?').run(provider, attemptId);
+    },
+
+    upsertPayment(p: PaymentRow): void {
+      upsertPaymentStmt.run({ ...p });
+    },
+
+    // Рефанд, пришедший позже платежа: доля возвращённой суммы (Stripe refunds)
+    setPaymentRefundShare(provider: Provider, paymentId: string, share: number): void {
+      db.prepare(
+        `UPDATE payments SET refunded_usd_cents = MAX(refunded_usd_cents, CAST(ROUND(amount_usd_cents * ?) AS INTEGER))
+         WHERE provider = ? AND payment_id = ?`,
+      ).run(share, provider, paymentId);
+    },
+
+    getFxRates(day: string): Record<string, number> | null {
+      const r = db.prepare('SELECT rates FROM fx_rates WHERE day = ?').get(day) as { rates: string } | undefined;
+      return r ? (JSON.parse(r.rates) as Record<string, number>) : null;
+    },
+
+    saveFxRates(day: string, rates: Record<string, number>): void {
+      db.prepare('INSERT OR REPLACE INTO fx_rates (day, rates) VALUES (?, ?)').run(day, JSON.stringify(rates));
     },
 
     subscriptionByFirstInvoice(provider: Provider, invoiceId: string): string | null {

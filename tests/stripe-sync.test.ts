@@ -6,7 +6,8 @@ import { syncStripeAccount, type StripeLike } from '../src/providers/stripe.js';
 const NOW = Date.parse('2026-10-12T10:00:00Z') / 1000;
 const TODAY = NOW - (NOW % DAY);
 const HISTORY_FROM = Date.parse('2026-09-01T00:00:00Z') / 1000;
-const cfg = { historyFrom: HISTORY_FROM };
+// валюта зачисления в тестах — всегда USD
+const cfg = { historyFrom: HISTORY_FROM, toUsd: async (amount: number) => amount };
 const HOUR = 3600;
 // Окна бэкфилла — сутки, окна ежедневного синка — час
 const isWindow = (c: { params: { created: Range } }, size: number) => c.params.created.lt! - c.params.created.gte! === size;
@@ -193,6 +194,7 @@ describe('syncStripeAccount', () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
     store.setState('stripe', 'corp', 'details_version', 2);
+    store.setState('stripe', 'corp', 'payments_version', 1);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
 
@@ -202,4 +204,44 @@ describe('syncStripeAccount', () => {
     }
     expect(calls.find((c) => c.method === 'refunds')!.params.created).toEqual({ gte: NOW - 60 - HOUR });
   });
+
+  const paidCharge = (p: Record<string, unknown>) => ({
+    id: 'ch_9', created: TODAY - 5 * DAY, status: 'succeeded', captured: true, amount: 1199, amount_refunded: 0,
+    balance_transaction: { amount: 1199, currency: 'usd' }, payment_method_details: { type: 'card', card: { country: 'US', brand: 'visa' } },
+    invoice: 'in_renewal', ...p,
+  });
+  const payments = (store: ReturnType<typeof openStore>) =>
+    store.db.prepare('SELECT payment_id, mid, amount_usd_cents, refunded_usd_cents FROM payments').all();
+
+  it('оборот: бэкфилл сохраняет успешные списания (любые, не только первых инвойсов) и отдельной догрузки не делает', async () => {
+    const store = openStore(':memory:');
+    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], charges: [paidCharge({}), paidCharge({ id: 'ch_failed', status: 'failed' })] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    expect(payments(store)).toEqual([{ payment_id: 'ch_9', mid: 'corp', amount_usd_cents: 1199, refunded_usd_cents: 0 }]);
+    expect(calls.find((c) => c.method === 'charges')!.params.expand).toEqual(['data.balance_transaction']);
+    expect(calls.filter((c) => c.method === 'charges' && isWindow(c, DAY))).toHaveLength((TODAY - HISTORY_FROM) / DAY);
+    expect(store.getState('stripe', 'corp', 'payments_version')).toBe(1);
+  });
+
+  it('оборот: база без платежей один раз проходит списания с HISTORY_FROM; рефанд позже обновляет возвращённую сумму', async () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'details_version', 2);
+    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], charges: [paidCharge({})] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    expect(calls.filter((c) => c.method === 'charges' && isWindow(c, DAY))).toHaveLength((TODAY - HISTORY_FROM) / DAY);
+    expect(calls.some((c) => c.method === 'subscriptions' && isWindow(c, DAY))).toBe(false);
+    expect(store.getState('stripe', 'corp', 'payments_version')).toBe(1);
+
+    const later = NOW + DAY;
+    const refund = { created: later - 60, status: 'succeeded', charge: { id: 'ch_9', amount: 1199, amount_refunded: 600 } };
+    const next = fakeStripe({ subs: [], invoices: [], events: [], refunds: [refund as unknown as Item] });
+    await syncStripeAccount(store, next.client, 'corp', cfg, later);
+    expect(payments(store)).toEqual([{ payment_id: 'ch_9', mid: 'corp', amount_usd_cents: 1199, refunded_usd_cents: 600 }]);
+    expect(next.calls.find((c) => c.method === 'refunds')!.params.expand).toEqual(['data.charge']);
+    expect(next.calls.some((c) => c.method === 'charges' && isWindow(c, DAY))).toBe(false); // догрузка — один раз
+  });
 });
+

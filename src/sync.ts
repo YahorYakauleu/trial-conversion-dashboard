@@ -1,5 +1,6 @@
 import type { Config } from './config.js';
 import { nowSec, type Provider, type Store } from './db.js';
+import { createToUsd } from './fx.js';
 import { DAY } from './metrics.js';
 import { syncSolidgateAccount } from './providers/solidgate.js';
 import { createStripeClient, syncStripeAccount } from './providers/stripe.js';
@@ -48,15 +49,16 @@ export async function runSync(store: Store, sources: Source[]): Promise<boolean>
 }
 
 export function buildSources(config: Config): Source[] {
+  const syncConfig = (store: Store) => ({ historyFrom: config.historyFrom, toUsd: createToUsd(store) });
   const stripe = config.stripeAccounts.map(({ account, key }): Source => {
     const client = createStripeClient(key);
-    return { provider: 'stripe', account, run: (store, now) => syncStripeAccount(store, client, account, config, now) };
+    return { provider: 'stripe', account, run: (store, now) => syncStripeAccount(store, client, account, syncConfig(store), now) };
   });
   const solidgate = config.solidgateAccounts.map(
     (acc): Source => ({
       provider: 'solidgate',
       account: acc.account,
-      run: (store, now) => syncSolidgateAccount(store, acc, config, now),
+      run: (store, now) => syncSolidgateAccount(store, acc, syncConfig(store), now),
     }),
   );
   return [...stripe, ...solidgate];

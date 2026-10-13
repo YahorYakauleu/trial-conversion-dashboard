@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { SgSubscription } from '../src/providers/solidgate-client.js';
-import { attemptsFromSolidgate, orderCardDetails, parseSgDate, trialFromSolidgate } from '../src/providers/solidgate.js';
+import type { SgCardOrder, SgSubscription } from '../src/providers/solidgate-client.js';
+import { attemptsFromSolidgate, orderCardDetails, parseSgDate, paymentFromOrder, trialFromSolidgate } from '../src/providers/solidgate.js';
 
 const T0 = '2026-10-01 10:00:00';
 const T_END = '2026-10-04 10:00:00'; // 3 дня = 4320 минут
@@ -55,7 +55,8 @@ describe('orderCardDetails', () => {
     expect(orderCardDetails({ order_id: 'o', transactions: { t1: { card: { country: 'USA' } } } }).country).toBe('US');
   });
 
-  it('повторное списание по токену не говорит о способе оплаты; гео — не страна карты', () => {
+  it('списание по токену: способ — каким карту сохранили; без этого — не определён; гео — не страна карты', () => {
+    expect(orderCardDetails({ order_id: 'o', payment_method: 'token', transactions: [{ original_payment_method: 'apple-pay' }] }).payment_method).toBe('apple_pay');
     expect(orderCardDetails({ order_id: 'o', payment_method: 'token', geo_country: 'USA' })).toEqual({
       country: null,
       payment_method: null,
@@ -205,5 +206,50 @@ describe('trialFromSolidgate', () => {
       'sgH2H',
     );
     expect(row?.first_invoice_id).toBe('first');
+  });
+});
+
+describe('paymentFromOrder', () => {
+  const paid = (p: Partial<SgCardOrder>): SgCardOrder => ({
+    order_id: 'o1',
+    status: 'settle_ok',
+    created_at: T_END,
+    amount: 5_999,
+    currency: 'SAR',
+    processing_amount: 1_601,
+    processing_currency: 'USD',
+    mid: 'mid-uuid',
+    payment_method: 'google-pay',
+    transactions: [{ card: { country: 'SAU', brand: 'VISA', bank: 'AL RAJHI BANK' } }],
+    ...p,
+  });
+  // курс для теста: 1 USD = 3.75 SAR
+  const toUsd = async (amount: number, currency: string) => (currency === 'USD' ? amount : currency === 'SAR' ? Math.round(amount / 3.75) : null);
+
+  it('списанный заказ → платёж: сумма в валюте процессинга (уже USD), MID и карта из заказа', async () => {
+    expect(await paymentFromOrder(paid({}), 'sgH2H', toUsd)).toEqual({
+      provider: 'solidgate',
+      payment_id: 'o1',
+      account: 'sgH2H',
+      mid: 'mid-uuid',
+      paid_at: ts(T_END),
+      amount_usd_cents: 1_601,
+      refunded_usd_cents: 0,
+      country: 'SA',
+      payment_method: 'google_pay',
+      card_brand: 'visa',
+      bank: 'AL RAJHI BANK',
+    });
+  });
+
+  it('процессинг в местной валюте — по курсу; возврат — той же долей', async () => {
+    const refunded = paid({ status: 'refunded', processing_amount: 5_999, processing_currency: 'SAR', refunded_amount: 5_999 });
+    expect(await paymentFromOrder(refunded, 'sgH2H', toUsd)).toMatchObject({ amount_usd_cents: 1_600, refunded_usd_cents: 1_600 });
+  });
+
+  it('проверка карты на $0, отказ и неизвестная валюта — не оборот', async () => {
+    expect(await paymentFromOrder(paid({ amount: 0, processing_amount: 0 }), 'sgH2H', toUsd)).toBeNull();
+    expect(await paymentFromOrder(paid({ status: 'auth_failed' }), 'sgH2H', toUsd)).toBeNull();
+    expect(await paymentFromOrder(paid({ processing_currency: 'XYZ' }), 'sgH2H', toUsd)).toBeNull();
   });
 });

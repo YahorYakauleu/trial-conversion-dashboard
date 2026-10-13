@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { openStore, type AttemptRow, type TrialRow } from '../src/db.js';
+import { openStore, type AttemptRow, type PaymentRow, type TrialRow } from '../src/db.js';
 import { DAY, getBreakdown, getDeclineReasons, getMetrics, resolveRange } from '../src/metrics.js';
+import { getTurnover, getTurnoverBreakdown } from '../src/turnover.js';
 
 // «Сегодня» = понедельник 2026-10-12, история с 1 сентября, триалы по 7 дней, окно ретраев 30 дней
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -337,5 +338,48 @@ describe('resolveRange', () => {
       from: '2026-10-02',
       to: '2026-10-02',
     });
+  });
+});
+
+describe('оборот', () => {
+  const payment = (id: string, paidIso: string, patch: Partial<PaymentRow> = {}): PaymentRow => ({
+    provider: 'stripe', payment_id: id, account: 'corp', mid: 'corp', paid_at: ts(paidIso), amount_usd_cents: 1_000, refunded_usd_cents: 0,
+    country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, ...patch,
+  });
+  const range = { provider: 'all' as const, filters: {}, from: '2026-10-05', to: '2026-10-11', timeZone: 'UTC' };
+  function seeded() {
+    const store = openStore(':memory:');
+    store.upsertPayment(payment('a', '2026-10-05T10:00:00Z', { amount_usd_cents: 3_000, refunded_usd_cents: 1_000 }));
+    store.upsertPayment(payment('b', '2026-10-05T23:30:00Z', { country: 'GB', payment_method: 'google_pay' }));
+    store.upsertPayment(payment('c', '2026-10-07T12:00:00Z', { provider: 'solidgate', account: 'sgH2H', mid: 'mid-1', country: null }));
+    store.upsertPayment(payment('old', '2026-10-01T12:00:00Z')); // вне периода
+    return store;
+  }
+
+  it('итоги и ряд по дням: оборот, рефанды, нетто, средний чек; пустые дни — нули', () => {
+    const { totals, series } = getTurnover(seeded().db, { ...range, granularity: 'day' });
+    expect(totals).toEqual({ payments: 3, gross: 5_000, refunded: 1_000, net: 4_000, average: 1_667 });
+    expect(series).toHaveLength(7);
+    expect(series[0]).toMatchObject({ period: '2026-10-05', payments: 2, gross: 4_000, net: 3_000 });
+    expect(series[1]).toMatchObject({ period: '2026-10-06', payments: 0, gross: 0, average: null });
+  });
+
+  it('сутки по часовому поясу дашборда и группировка по неделям', () => {
+    const ny = getTurnover(seeded().db, { ...range, timeZone: 'America/New_York', granularity: 'day' });
+    expect(ny.series[0]).toMatchObject({ period: '2026-10-05', payments: 2 }); // 23:30 UTC — ещё 5-е по Нью-Йорку
+    const weeks = getTurnover(seeded().db, { ...range, granularity: 'week' }).series;
+    expect(weeks.map((w) => [w.period, w.period_end, w.payments])).toEqual([['2026-10-05', '2026-10-11', 3]]);
+  });
+
+  it('разбивка: по убыванию оборота, доля от оборота периода, «не определено» в конце; фильтры', () => {
+    const db = seeded().db;
+    expect(getTurnoverBreakdown(db, range, 'mid').map((r) => [r.value, r.gross, r.share])).toEqual([
+      ['stripe:corp', 4_000, 0.8],
+      ['solidgate:mid-1', 1_000, 0.2],
+    ]);
+    expect(getTurnoverBreakdown(db, range, 'country').map((r) => r.value)).toEqual(['US', 'GB', null]);
+    expect(getTurnover(db, { ...range, granularity: 'day', filters: { country: 'none' } }).totals.payments).toBe(1);
+    expect(getTurnover(db, { ...range, granularity: 'day', provider: 'solidgate' }).totals.gross).toBe(1_000);
+    expect(getTurnover(db, { ...range, granularity: 'day', filters: { mid: 'stripe:corp', payment_method: 'google_pay' } }).totals.payments).toBe(1);
   });
 });

@@ -1,7 +1,7 @@
 import type Stripe from 'stripe';
 import { describe, expect, it } from 'vitest';
 import type { TrialRow } from '../src/db.js';
-import { applyInvoice, attemptFromCharge, chargeInvoiceId, invoiceSubscriptionId, trialFromSubscription } from '../src/providers/stripe.js';
+import { applyInvoice, attemptFromCharge, chargeInvoiceId, invoiceSubscriptionId, paymentFromCharge, trialFromSubscription } from '../src/providers/stripe.js';
 
 const sub = (p: Partial<Stripe.Subscription>) =>
   ({ id: 'sub_1', trial_start: null, trial_end: null, ...p }) as Stripe.Subscription;
@@ -145,5 +145,46 @@ describe('attemptFromCharge', () => {
     expect(chargeInvoiceId(charge({}))).toBe('in_1');
     expect(chargeInvoiceId(charge({ invoice: { id: 'in_2' } }))).toBe('in_2');
     expect(chargeInvoiceId(charge({ invoice: null }))).toBeNull();
+  });
+});
+
+describe('paymentFromCharge', () => {
+  // Списание в HUF; Stripe зачислил $7.66 — эту сумму и берём
+  const charge = (p: Record<string, unknown>) =>
+    ({
+      id: 'ch_1',
+      created: 10_100,
+      status: 'succeeded',
+      captured: true,
+      amount: 250_000,
+      amount_refunded: 0,
+      currency: 'huf',
+      balance_transaction: { amount: 766, currency: 'usd' },
+      payment_method_details: { type: 'card', card: { country: 'HU', brand: 'visa', wallet: { type: 'google_pay' }, issuer: null } },
+      ...p,
+    }) as unknown as Stripe.Charge;
+  const toUsd = async (amount: number, currency: string) => (currency === 'usd' ? amount : null);
+
+  it('успешное списание → платёж в долларах с данными карты; MID — аккаунт', async () => {
+    expect(await paymentFromCharge(charge({}), 'corp', toUsd)).toEqual({
+      provider: 'stripe',
+      payment_id: 'ch_1',
+      account: 'corp',
+      mid: 'corp',
+      paid_at: 10_100,
+      amount_usd_cents: 766,
+      refunded_usd_cents: 0,
+      country: 'HU',
+      payment_method: 'google_pay',
+      card_brand: 'visa',
+      bank: null,
+    });
+  });
+
+  it('частичный рефанд — той же долей; не прошло, холд без захвата или без balance transaction — не оборот', async () => {
+    expect((await paymentFromCharge(charge({ amount_refunded: 125_000 }), 'corp', toUsd))?.refunded_usd_cents).toBe(383);
+    expect(await paymentFromCharge(charge({ status: 'failed', balance_transaction: null }), 'corp', toUsd)).toBeNull();
+    expect(await paymentFromCharge(charge({ captured: false }), 'corp', toUsd)).toBeNull();
+    expect(await paymentFromCharge(charge({ balance_transaction: 'txn_1' }), 'corp', toUsd)).toBeNull();
   });
 });
