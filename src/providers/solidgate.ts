@@ -199,10 +199,15 @@ export async function syncSolidgateAccount(
     await saveSubscriptions(from, to, filter);
     await saveOrders(filter)(from, to);
   };
-  // Окна по суткам до now; после каждого — onWindow(начало следующего окна)
-  const inWindows = async (from: number, work: (from: number, to: number) => Promise<void>, onWindow?: (next: number) => void) => {
-    for (let day = from; day < now; day += DAY) {
-      await work(day, Math.min(day + DAY, now));
+  // Окна по суткам до until; после каждого — onWindow(начало следующего окна)
+  const inWindows = async (
+    from: number,
+    work: (from: number, to: number) => Promise<void>,
+    onWindow?: (next: number) => void,
+    until = now,
+  ) => {
+    for (let day = from; day < until; day += DAY) {
+      await work(day, Math.min(day + DAY, until));
       onWindow?.(day + DAY);
     }
   };
@@ -215,6 +220,7 @@ export async function syncSolidgateAccount(
     const from = store.getState('solidgate', acc.account, 'backfill_day') ?? cfg.historyFrom;
     await inWindows(from, subscriptionsAndOrders('created_at'), progress('backfill_day'));
     store.setState('solidgate', acc.account, 'details_version', DETAILS_VERSION);
+    store.setState('solidgate', acc.account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('solidgate', acc.account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше — один раз проходим подписки и заказы с HISTORY_FROM заново (это быстро)
     const from = store.getState('solidgate', acc.account, 'details_day') ?? cfg.historyFrom;
@@ -227,6 +233,16 @@ export async function syncSolidgateAccount(
     await inWindows(from, saveOrders('created_at'), progress(progressKey));
     store.setState('solidgate', acc.account, 'orders_version', ORDERS_VERSION);
   }
+
+  // HISTORY_FROM сдвинули раньше начала загруженного — догружаем недостающее начало: отчёт подписок отдаёт
+  // подписку целиком (с инвойсами и попытками), заказы этих дней дают карту, MID и оборот
+  const loadedFrom = store.getState('solidgate', acc.account, 'loaded_from') ?? store.firstTrialStart('solidgate', acc.account) ?? cfg.historyFrom;
+  if (loadedFrom - cfg.historyFrom > DAY) {
+    const progressKey = `history_${dayKey(cfg.historyFrom)}_day`;
+    const from = store.getState('solidgate', acc.account, progressKey) ?? cfg.historyFrom;
+    await inWindows(from, subscriptionsAndOrders('created_at'), progress(progressKey), Math.min(now, loadedFrom + DAY));
+  }
+  store.setState('solidgate', acc.account, 'loaded_from', Math.min(loadedFrom, cfg.historyFrom));
 
   await inWindows((cursor ?? now) - DAY, subscriptionsAndOrders('updated_at'));
 

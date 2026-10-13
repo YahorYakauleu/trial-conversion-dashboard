@@ -9,6 +9,7 @@ export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 
 
 interface StripeSyncConfig {
   historyFrom: number;
+  retryWindowDays: number;
   toUsd: ToUsd;
 }
 
@@ -175,11 +176,11 @@ export async function syncStripeAccount(
     items++;
   };
 
-  // Все подписки (триалы) с HISTORY_FROM; прогресс по дням хранится под progressKey
-  const subscriptionsPass = (progressKey: string) =>
+  // Все подписки (триалы) с HISTORY_FROM до until; прогресс по дням хранится под progressKey
+  const subscriptionsPass = (progressKey: string, until = today) =>
     forEachWindow(
       store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
-      today,
+      until,
       DAY,
       PARALLEL,
       async (day) => {
@@ -206,10 +207,10 @@ export async function syncStripeAccount(
       { apiVersion: CHARGES_API_VERSION },
     ) as AsyncIterable<LegacyCharge>;
 
-  const invoicesPass = (progressKey: string) =>
+  const invoicesPass = (progressKey: string, until = today) =>
     forEachWindow(
       store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
-      today,
+      until,
       DAY,
       PARALLEL,
       async (day) => {
@@ -218,10 +219,10 @@ export async function syncStripeAccount(
       },
       (next) => store.setState('stripe', account, progressKey, next),
     );
-  const chargesPass = (progressKey: string) =>
+  const chargesPass = (progressKey: string, until = today) =>
     forEachWindow(
       store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
-      today,
+      until,
       DAY,
       PARALLEL,
       async (day) => {
@@ -244,6 +245,7 @@ export async function syncStripeAccount(
     await invoicesPass('invoices_day');
     await chargesPassWithPayments('charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
+    store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
     await subscriptionsPass('details_subs_day');
@@ -254,6 +256,20 @@ export async function syncStripeAccount(
     await chargesPass('payments_charges_day');
     store.setState('stripe', account, 'payments_version', PAYMENTS_VERSION);
   }
+
+  // HISTORY_FROM сдвинули раньше начала загруженного — догружаем только недостающее начало истории.
+  // Первые платежи триалов из него приходят и позже: инвойсы и списания проходим до конца последнего
+  // такого триала плюс окно ретраев (проход списаний заодно сохраняет оборот этих дней).
+  const loadedFrom = store.getState('stripe', account, 'loaded_from') ?? store.firstTrialStart('stripe', account) ?? cfg.historyFrom;
+  if (loadedFrom - cfg.historyFrom > DAY) {
+    const key = (pass: string) => `history_${dayKey(cfg.historyFrom)}_${pass}_day`;
+    const gapEnd = Math.min(today, loadedFrom + DAY);
+    await subscriptionsPass(key('subs'), gapEnd);
+    const lastTrialEnd = store.lastTrialEnd('stripe', account, gapEnd) ?? gapEnd;
+    await invoicesPass(key('invoices'), Math.min(today, lastTrialEnd + DAY));
+    await chargesPass(key('charges'), Math.min(today, lastTrialEnd + cfg.retryWindowDays * DAY + DAY));
+  }
+  store.setState('stripe', account, 'loaded_from', Math.min(loadedFrom, cfg.historyFrom));
 
   // Инкремент: часовыми окнами параллельно; шаги по порядку — подписки → инвойсы (события) → списания,
   // потому что каждый опирается на предыдущий (инвойс — на триал, списание — на первый инвойс)

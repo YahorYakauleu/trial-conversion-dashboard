@@ -352,6 +352,20 @@ export function openStore(file: string) {
       };
     },
 
+    // Начало загруженной истории аккаунта (для старой базы, где оно не записано)
+    firstTrialStart(provider: Provider, account: string): number | null {
+      const r = db.prepare('SELECT MIN(trial_started_at) AS v FROM trials WHERE provider = ? AND account = ?').get(provider, account) as { v: number | null };
+      return r.v;
+    },
+
+    // Конец самого позднего триала, оформленного до startedBefore, — до него приходят первые платежи
+    lastTrialEnd(provider: Provider, account: string, startedBefore: number): number | null {
+      const r = db
+        .prepare('SELECT MAX(trial_ended_at) AS v FROM trials WHERE provider = ? AND account = ? AND trial_started_at < ?')
+        .get(provider, account, startedBefore) as { v: number | null };
+      return r.v;
+    },
+
     countTrials(): number {
       return (db.prepare('SELECT COUNT(*) AS n FROM trials').get() as { n: number }).n;
     },

@@ -49,7 +49,7 @@ export async function runSync(store: Store, sources: Source[]): Promise<boolean>
 }
 
 export function buildSources(config: Config): Source[] {
-  const syncConfig = (store: Store) => ({ historyFrom: config.historyFrom, toUsd: createToUsd(store) });
+  const syncConfig = (store: Store) => ({ historyFrom: config.historyFrom, retryWindowDays: config.retryWindowDays, toUsd: createToUsd(store) });
   const stripe = config.stripeAccounts.map(({ account, key }): Source => {
     const client = createStripeClient(key);
     return { provider: 'stripe', account, run: (store, now) => syncStripeAccount(store, client, account, syncConfig(store), now) };
