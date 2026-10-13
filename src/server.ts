@@ -107,6 +107,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         today,
         sync_running: isSyncRunning(),
         sync: store.latestRuns(),
+        data_version: store.dataVersion(), // меняется после каждого синка — по ней браузер обновляет значения фильтров
       },
     };
   };

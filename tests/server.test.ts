@@ -210,9 +210,12 @@ describe('server', () => {
       (await (await fetch(`${url}/api/metrics?period=custom&from=2026-09-10&to=2026-09-10&view=country`, { headers: auth })).json()).totals.started;
 
     expect(await started_()).toBe(1);
+    const version = async () => (await (await fetch(`${url}/api/metrics`, { headers: auth })).json()).data_version;
+    const before = await version();
     trial('b'); // синк пишет в базу…
     expect(await started_()).toBe(1); // …а до его конца отдаётся посчитанное
     store.finishRun(store.startRun('stripe', 'corp', 'daily'), 'ok', 1, null);
     expect(await started_()).toBe(2);
+    expect(await version()).not.toBe(before); // браузер по ней перезапрашивает значения фильтров
   });
 });

@@ -167,6 +167,8 @@ button, select, input { font: inherit; color: var(--text); }
 .option:hover, .option.focus { background: var(--surface-sunken); }
 .option.on { color: var(--accent); font-weight: 600; }
 .option .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* вторая строка подписи: полный UUID MID Solidgate — в таблице и в списке фильтра */
+.value-id { display: block; margin-top: 1px; font: 400 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
 .option .count { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; }
 .options .empty { padding: 10px; color: var(--muted); }
 
@@ -192,7 +194,8 @@ button, select, input { font: inherit; color: var(--text); }
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 5px 0 10px; border-radius: 999px;
   background: var(--accent-soft); color: var(--text); border: 1px solid var(--border); font-size: 13px;
 }
-.chip b { font-weight: 600; }
+.chip { max-width: 100%; }
+.chip b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip button {
   display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0;
   border: 0; border-radius: 50%; background: transparent; cursor: pointer; color: var(--text-2);
