@@ -13,6 +13,14 @@ export interface SolidgateAccount {
   secretKey: string;
 }
 
+// Админ видит всё и запускает синк; гость только смотрит
+export type Role = 'admin' | 'guest';
+
+export interface Credentials {
+  user: string;
+  password: string;
+}
+
 export interface Config {
   stripeAccounts: StripeAccount[];
   solidgateAccounts: SolidgateAccount[];
@@ -22,7 +30,7 @@ export interface Config {
   historyFromDay: string; // HISTORY_FROM, YYYY-MM-DD
   historyFrom: number; // начало выгрузки, unix-секунды: самая ранняя из полуночей HISTORY_FROM по часовым поясам провайдеров
   syncCron: string;
-  basicAuth: { user: string; password: string };
+  users: { admin: Credentials; guest: Credentials | null };
   dataDir: string;
   port: number;
 }
@@ -60,8 +68,15 @@ export function loadConfig(env: Env = process.env): Config {
     timeZones,
     historyFromDay,
     historyFrom: Math.min(...Object.values(timeZones).map((tz) => localMidnight(historyFromDay, tz))),
-    syncCron: env.SYNC_CRON?.trim() || '0 5 * * *',
-    basicAuth: { user: required(env, 'BASIC_AUTH_USER'), password: required(env, 'BASIC_AUTH_PASSWORD') },
+    syncCron: env.SYNC_CRON?.trim() || '0 */4 * * *',
+    users: {
+      // BASIC_AUTH_* — прежние имена переменных, работают как вход админа
+      admin: {
+        user: required(env, 'ADMIN_USER', 'BASIC_AUTH_USER'),
+        password: required(env, 'ADMIN_PASSWORD', 'BASIC_AUTH_PASSWORD'),
+      },
+      guest: guest(env),
+    },
     dataDir: env.DATA_DIR?.trim() || './data',
     port: positiveInt(env, 'PORT', 3000),
   };
@@ -76,10 +91,19 @@ function pairs(raw: string | undefined): [string, string][] {
   });
 }
 
-function required(env: Env, name: string): string {
-  const value = env[name]?.trim();
+function required(env: Env, name: string, legacyName?: string): string {
+  const value = env[name]?.trim() || (legacyName && env[legacyName]?.trim());
   if (!value) throw new Error(`Не задана переменная ${name}`);
   return value;
+}
+
+// Гостевой вход необязателен, но логин и пароль задаются вместе
+function guest(env: Env): Credentials | null {
+  const user = env.GUEST_USER?.trim();
+  const password = env.GUEST_PASSWORD?.trim();
+  if (!user && !password) return null;
+  if (!user || !password) throw new Error('GUEST_USER и GUEST_PASSWORD задаются вместе');
+  return { user, password };
 }
 
 function timeZone(env: Env, name: string, fallback: string): string {

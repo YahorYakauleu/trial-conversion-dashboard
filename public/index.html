@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Trial → Paid</title>
+  <title>Billing Dashboard</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/app.css" />
   <script>
     // Тема до отрисовки, чтобы не мигало: light | dark. Выбор хранится в браузере, без выбора — как в системе
     let theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -16,336 +18,127 @@
     } catch {}
     document.documentElement.dataset.theme = theme;
   </script>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f5f6f8;
-      --glow-1: transparent;
-      --glow-2: transparent;
-      --surface: #ffffff;
-      --surface-hover: #f7f8fa;
-      --surface-sunken: #eef0f3;
-      --border: rgba(15, 23, 42, 0.08);
-      --border-strong: rgba(15, 23, 42, 0.16);
-      --text: #0b1220;
-      --text-2: #4a5263;
-      --muted: #8a93a3;
-      --grid: #eceef2;
-      --accent: #4f46e5;
-      --accent-soft: rgba(79, 70, 229, 0.1);
-      --danger: #c2353a;
-      --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 16px rgba(15, 23, 42, 0.04);
-      --blur: none;
-      --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234a5263' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-      /* серии графиков — проверены валидатором палитры на этой поверхности */
-      --s-converted: #2a78d6;
-      --s-first: #eb6834;
-      --s-started: #1baf7a;
-    }
-    :root[data-theme="dark"] {
-      color-scheme: dark;
-      --bg: #07080c;
-      --glow-1: rgba(99, 91, 255, 0.16);
-      --glow-2: rgba(25, 158, 112, 0.1);
-      --surface: rgba(22, 24, 33, 0.72);
-      --surface-hover: rgba(34, 37, 50, 0.8);
-      --surface-sunken: rgba(255, 255, 255, 0.04);
-      --border: rgba(255, 255, 255, 0.07);
-      --border-strong: rgba(255, 255, 255, 0.16);
-      --text: #eef0f6;
-      --text-2: #a7adbd;
-      --muted: #6b7286;
-      --grid: rgba(255, 255, 255, 0.06);
-      --accent: #8b7cff;
-      --accent-soft: rgba(139, 124, 255, 0.16);
-      --danger: #ff7b81;
-      --shadow: 0 0 0 1px rgba(255, 255, 255, 0.02), 0 12px 40px rgba(0, 0, 0, 0.45);
-      --blur: blur(14px);
-      --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a7adbd' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-      --s-converted: #3987e5;
-      --s-first: #d95926;
-      --s-started: #199e70;
-    }
-
-    * { box-sizing: border-box; }
-    html { background: var(--bg); }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(900px 500px at 8% -10%, var(--glow-1), transparent 60%),
-        radial-gradient(800px 480px at 100% 0%, var(--glow-2), transparent 55%),
-        var(--bg);
-      -webkit-font-smoothing: antialiased;
-    }
-    main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 64px; }
-    button, select, input { font: inherit; color: var(--text); }
-    .muted { color: var(--muted); }
-
-    /* шапка */
-    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-    .brand { display: flex; align-items: center; gap: 10px; }
-    .brand-mark {
-      width: 30px; height: 30px; border-radius: 9px;
-      background: linear-gradient(135deg, var(--s-converted), var(--s-started));
-      box-shadow: 0 6px 20px var(--accent-soft);
-    }
-    .brand h1 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
-    .brand .muted { font-size: 12px; }
-    .actions { display: flex; align-items: center; gap: 8px; }
-
-    /* кнопки и сегменты */
-    .btn {
-      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
-      background: var(--surface); border: 1px solid var(--border); border-radius: 10px; cursor: pointer;
-      backdrop-filter: var(--blur); transition: background 0.15s, border-color 0.15s;
-    }
-    .btn:hover { background: var(--surface-hover); border-color: var(--border-strong); }
-    .btn svg { width: 16px; height: 16px; }
-    .btn.spinning svg { animation: spin 1s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .seg {
-      display: inline-flex; padding: 3px; gap: 2px; border-radius: 11px;
-      background: var(--surface-sunken); border: 1px solid var(--border);
-    }
-    /* высота сегмента = 26 + 2×3 + 2×1 = 34px, как у кнопок и полей */
-    .seg button {
-      height: 26px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent;
-      color: var(--text-2); cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;
-    }
-    .seg button:hover { color: var(--text); }
-    .seg button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
-    .seg.icons button { width: 30px; padding: 0; justify-content: center; }
-    .seg svg { display: block; width: 15px; height: 15px; }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-    /* панель фильтров */
-    .toolbar {
-      position: sticky; top: 0; z-index: 5; margin: 0 -16px 16px; padding: 10px 16px;
-      display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-      background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--border);
-    }
-    .field {
-      height: 34px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border);
-      background: var(--surface); backdrop-filter: var(--blur);
-    }
-    select.field {
-      appearance: none; padding-right: 32px; cursor: pointer;
-      background: var(--surface) var(--chevron) no-repeat right 10px center / 14px;
-    }
-    .dates { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip {
-      display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 5px 0 10px; border-radius: 999px;
-      background: var(--accent-soft); color: var(--text); border: 1px solid var(--border); font-size: 13px;
-    }
-    .chip b { font-weight: 600; }
-    .chip button {
-      display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0;
-      border: 0; border-radius: 50%; background: transparent; cursor: pointer; color: var(--text-2);
-    }
-    .chip button:hover { color: var(--text); background: var(--border-strong); }
-    .chip svg { display: block; width: 12px; height: 12px; }
-    .status { color: var(--danger); font-size: 13px; margin-bottom: 8px; }
-    .status:empty { display: none; }
-
-    /* карточки */
-    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
-    .kpi {
-      position: relative; padding: 14px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border);
-      box-shadow: var(--shadow); backdrop-filter: var(--blur); overflow: hidden;
-    }
-    .kpi::before {
-      content: ""; position: absolute; inset: 0 0 auto 0; height: 1px;
-      background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
-    }
-    .kpi .label { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .kpi .value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 4px; }
-    .kpi .sub { font-size: 12px; color: var(--muted); }
-
-    /* вкладки */
-    .tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 2px; scrollbar-width: none; }
-    .tabs::-webkit-scrollbar { display: none; }
-    .tabs button {
-      height: 34px; padding: 0 14px; border-radius: 10px; border: 1px solid transparent; background: transparent;
-      color: var(--text-2); cursor: pointer; white-space: nowrap;
-    }
-    .tabs button:hover { color: var(--text); background: var(--surface-sunken); }
-    .tabs button.on { color: var(--text); background: var(--surface); border-color: var(--border); box-shadow: var(--shadow); font-weight: 600; }
-    .view-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; min-height: 36px; }
-    .hint { font-size: 12px; color: var(--muted); }
-
-    /* панели, графики, таблица */
-    .panel {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
-      backdrop-filter: var(--blur); padding: 16px; margin-bottom: 16px;
-    }
-    .panel h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--text); }
-    .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
-    .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); }
-    .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
-    .legend i.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 7px); }
-    .chart { position: relative; height: 260px; }
-    .chart.small { height: 170px; }
-    .table-wrap { overflow-x: auto; margin: -4px -16px -16px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-    th, td { padding: 10px 16px; text-align: right; white-space: nowrap; border-top: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
-    th:first-child, td:first-child { text-align: left; }
-    td:first-child { font-weight: 500; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
-    td .n { color: var(--muted); margin-left: 6px; }
-    tr.link { cursor: pointer; }
-    tbody tr:hover td { background: var(--surface-sunken); }
-    .pending { color: var(--muted); }
-    .bar-cell { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
-    .bar { width: 120px; height: 6px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
-    .bar span { display: block; height: 100%; border-radius: 999px; background: var(--s-converted); }
-    .more { display: flex; justify-content: center; padding: 12px 0 0; }
-    [hidden] { display: none !important; }
-
-    /* панель «Как считается» */
-    .overlay { position: fixed; inset: 0; z-index: 20; background: rgba(5, 6, 10, 0.45); backdrop-filter: blur(2px); }
-    .drawer {
-      position: fixed; z-index: 21; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); overflow-y: auto;
-      background: var(--bg); border-left: 1px solid var(--border); box-shadow: -20px 0 60px rgba(0, 0, 0, 0.25);
-      padding: 20px 24px 48px;
-    }
-    .drawer-head {
-      display: flex; justify-content: space-between; align-items: center; gap: 12px; position: sticky; top: -20px;
-      margin: -20px -24px 16px; padding: 16px 24px 12px; background: var(--bg); border-bottom: 1px solid var(--border); z-index: 1;
-    }
-    .doc { line-height: 1.6; color: var(--text-2); }
-    .doc h1 { font-size: 20px; color: var(--text); margin: 0 0 12px; letter-spacing: -0.01em; }
-    .doc h2 { font-size: 15px; color: var(--text); margin: 24px 0 8px; }
-    .doc strong { color: var(--text); font-weight: 600; }
-    .doc ul { padding-left: 20px; margin: 8px 0; }
-    .doc li { margin: 4px 0; }
-    .doc code { font-size: 12px; padding: 1px 5px; border-radius: 6px; background: var(--surface-sunken); border: 1px solid var(--border); }
-    .doc pre {
-      margin: 12px 0; padding: 12px 14px; overflow-x: auto; border-radius: 12px;
-      background: var(--surface-sunken); border: 1px solid var(--border); font-size: 12px; line-height: 1.5; color: var(--text);
-    }
-    .doc pre code { padding: 0; border: 0; background: transparent; font-size: inherit; }
-    .doc table { margin: 8px 0; font-variant-numeric: normal; }
-    .doc th, .doc td { white-space: normal; text-align: left; padding: 8px 10px; vertical-align: top; overflow-wrap: anywhere; }
-    .doc td:first-child { font-weight: 400; max-width: none; }
-    .doc tbody tr:hover td { background: transparent; }
-    #content { transition: opacity 0.2s; }
-    #content.loading { opacity: 0.55; pointer-events: none; }
-    @media (max-width: 640px) {
-      .actions .btn span { display: none; }
-      .actions .btn { padding: 0 10px; }
-      .drawer { padding: 16px; }
-      .drawer-head { margin: -16px -16px 12px; padding: 12px 16px; top: -16px; }
-      .doc th, .doc td { padding: 6px; }
-      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-      .kpi { padding: 12px; border-radius: 14px; }
-      .kpi .value { font-size: 21px; }
-      .bar { width: 64px; }
-    }
-  </style>
 </head>
 <body>
-<main>
-  <header class="topbar">
+<div class="layout">
+  <!-- Панель выборки: экран, провайдер, период и фильтры по измерениям -->
+  <aside class="sidebar" id="sidebar" aria-label="Выборка">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true"></div>
-      <div>
-        <h1>Trial → Paid</h1>
-        <div class="muted" id="subtitle">Stripe · Solidgate</div>
-      </div>
+      <img class="brand-mark" src="/assets/favicon.svg" alt="" />
+      <div class="brand-name">Billing Dashboard</div>
     </div>
-    <div class="actions">
-      <button class="btn" id="help-open" title="Как считаются метрики">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>
-        <span>Как считается</span>
-      </button>
-      <button class="btn" id="refresh" title="Запустить синк">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
-        <span>Обновить</span>
-      </button>
+
+    <section class="side-group">
+      <div class="side-label">Экран</div>
+      <div class="seg" id="mode" role="group" aria-label="Экран">
+        <button data-v="conversion">Конверсия</button><button data-v="turnover">Оборот</button>
+      </div>
+    </section>
+
+    <section class="side-group">
+      <div class="side-label">Провайдер</div>
+      <div class="seg" id="provider" role="group" aria-label="Провайдер">
+        <button data-v="all">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
+      </div>
+    </section>
+
+    <section class="side-group">
+      <div class="side-label">Период</div>
+      <button class="picker" id="period" aria-haspopup="dialog"></button>
+    </section>
+
+    <section class="side-group">
+      <div class="side-label">Фильтры <button class="link-btn" id="reset-filters" hidden>Сбросить</button></div>
+      <div class="filters" id="filters"></div>
+    </section>
+
+    <div class="side-foot">
+      <div class="who"><b id="role"></b>
+        <form method="post" action="/logout"><button class="link-btn" type="submit">Выйти</button></form>
+      </div>
       <div class="seg icons" id="theme" role="group" aria-label="Тема">
         <button data-v="light" title="Светлая"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
         <button data-v="dark" title="Тёмная"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
       </div>
     </div>
-  </header>
+  </aside>
+  <div class="overlay" id="sidebar-overlay" hidden></div>
 
-  <div class="status" id="status"></div>
+  <main class="content">
+    <header class="topbar">
+      <button class="btn menu-btn" id="menu-open" aria-controls="sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+        <span>Выборка</span>
+      </button>
+      <div class="page-title">
+        <h1 id="title">Конверсия триалов</h1>
+        <div class="muted" id="subtitle"></div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="help-open" title="Как считаются метрики">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>
+          <span>Как считается</span>
+        </button>
+        <button class="btn" id="refresh" title="Запустить синк" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+          <span>Обновить</span>
+        </button>
+      </div>
+    </header>
 
-  <div class="toolbar">
-    <div class="seg" id="mode" role="group" aria-label="Экран">
-      <button data-v="conversion">Конверсия</button><button data-v="turnover">Оборот</button>
-    </div>
-    <div class="seg" id="provider" role="group" aria-label="Провайдер">
-      <button data-v="all">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
-    </div>
-    <select class="field" id="preset" aria-label="Период">
-      <option value="last7">Последние 7 дней</option>
-      <option value="last30">Последние 30 дней</option>
-      <option value="thisMonth">Этот месяц</option>
-      <option value="prevMonth">Прошлый месяц</option>
-      <option value="all">Всё время</option>
-      <option value="custom">Свой период</option>
-    </select>
-    <span class="dates">
-      <input class="field" type="date" id="from" aria-label="С даты" /> —
-      <input class="field" type="date" id="to" aria-label="По дату" />
-    </span>
+    <div class="status" id="status"></div>
     <div class="chips" id="chips"></div>
-  </div>
 
-  <div id="content">
-    <section class="kpis" id="kpis"></section>
+    <div id="content">
+      <section class="kpis" id="kpis"></section>
 
-    <nav class="tabs" id="view" aria-label="Разрез"></nav>
+      <nav class="tabs" id="view" aria-label="Разрез"></nav>
 
-    <div class="view-head">
-      <div class="seg" id="granularity" role="group" aria-label="Шаг">
-        <button data-v="day">День</button><button data-v="week">Неделя</button><button data-v="month">Месяц</button>
-      </div>
-      <span class="hint" id="hint"></span>
-    </div>
-
-    <section id="charts">
-      <div class="panel">
-        <div class="chart-head">
-          <h2>Конверсия по дню оформления, %</h2>
-          <div class="legend">
-            <span><i style="background: var(--s-converted)"></i>Сконвертилось</span>
-            <span><i style="background: var(--s-first)"></i>С первой попытки</span>
-            <span><i class="dashed"></i>≈ неокончательно</span>
-          </div>
+      <div class="view-head">
+        <div class="seg" id="granularity" role="group" aria-label="Шаг">
+          <button data-v="day">День</button><button data-v="week">Неделя</button><button data-v="month">Месяц</button>
         </div>
-        <div class="chart"><canvas id="rate-chart" aria-label="Конверсия триалов в платные, проценты"></canvas></div>
+        <span class="hint" id="hint"></span>
       </div>
-      <div class="panel">
-        <div class="chart-head"><h2>Оформлено триалов</h2></div>
-        <div class="chart small"><canvas id="count-chart" aria-label="Число оформленных триалов"></canvas></div>
-      </div>
-    </section>
 
-    <section id="turnover-charts" hidden>
-      <div class="panel">
-        <div class="chart-head"><h2>Оборот, $</h2></div>
-        <div class="chart"><canvas id="turnover-chart" aria-label="Оборот по дате платежа, доллары"></canvas></div>
-      </div>
-    </section>
+      <section class="panel">
+        <div class="table-wrap">
+          <table>
+            <thead id="thead"></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="more" id="more" hidden><button class="btn" id="show-all"></button></div>
+      </section>
 
-    <section class="panel">
-      <div class="table-wrap">
-        <table>
-          <thead id="thead"></thead>
-          <tbody id="rows"></tbody>
-        </table>
-      </div>
-      <div class="more" id="more" hidden><button class="btn" id="show-all"></button></div>
-    </section>
-  </div>
-</main>
+      <!-- Графики — под таблицей -->
+      <section id="charts">
+        <div class="panel">
+          <div class="chart-head">
+            <h2>Конверсия по дню оформления, %</h2>
+            <div class="legend">
+              <span><i style="background: var(--s-converted)"></i>Сконвертилось</span>
+              <span><i style="background: var(--s-first)"></i>С первой попытки</span>
+              <span><i class="dashed"></i>≈ неокончательно</span>
+            </div>
+          </div>
+          <div class="chart"><canvas id="rate-chart" aria-label="Конверсия триалов в платные, проценты"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="chart-head"><h2>Оформлено триалов</h2></div>
+          <div class="chart small"><canvas id="count-chart" aria-label="Число оформленных триалов"></canvas></div>
+        </div>
+      </section>
+
+      <section id="turnover-charts" hidden>
+        <div class="panel">
+          <div class="chart-head"><h2>Оборот, $</h2></div>
+          <div class="chart"><canvas id="turnover-chart" aria-label="Оборот по дате платежа, доллары"></canvas></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
 
 <div class="overlay" id="help-overlay" hidden></div>
 <aside class="drawer" id="help" role="dialog" aria-modal="true" aria-label="Как считаются метрики" hidden>
@@ -360,499 +153,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
-<script>
-  const DAY_MS = 86_400_000;
-  const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
-  const PRESETS = ['last7', 'last30', 'thisMonth', 'prevMonth', 'all', 'custom'];
-  // Два экрана: конверсия триалов (когорты по дню оформления) и оборот (все успешные платежи по дню платежа)
-  const MODES = {
-    conversion: {
-      api: '/api/metrics',
-      dimensions: ['account', 'country', 'payment_method', 'bank', 'card_brand'],
-      tabs: [['time', 'Динамика'], ['account', 'Аккаунты'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы'], ['decline_reason', 'Причины отказа']],
-    },
-    turnover: {
-      api: '/api/turnover',
-      dimensions: ['mid', 'country', 'payment_method', 'bank', 'card_brand'],
-      tabs: [['time', 'Динамика'], ['mid', 'MID'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы']],
-    },
-  };
-  const DIMENSION_TITLES = { account: 'Аккаунт', mid: 'MID', country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
-  const ACCOUNT_NAMES = {
-    'stripe:corp': 'Stripe · Toggle Corp',
-    'stripe:org': 'Stripe · Toggle Org',
-    'stripe:inc': 'Stripe · Toggle Inc',
-    'stripe:incorp': 'Stripe · Toggle Incorp',
-    'stripe:eu': 'Stripe · Toggle EU',
-    'solidgate:sg': 'Solidgate · платёжная форма',
-    'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
-  };
-  // MID Solidgate: по API известны только UUID и дескриптор; у Stripe MID = аккаунт (названия — из ACCOUNT_NAMES)
-  const MID_NAMES = {
-    'solidgate:237b93d9-0bac-43c4-8844-938d6f354c66': 'Solidgate · VPN TOGGLE.ORG · 237b93d9',
-    'solidgate:fb1f49fb-1fb7-4c21-b300-17334b737a47': 'Solidgate · VPN TOGGLE.ORG · fb1f49fb',
-    'solidgate:5e6da293-9dd7-4709-9502-97ac9f128471': 'Solidgate · ORG (через Stripe) · 5e6da293',
-  };
-  const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Карта', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
-  const BRAND_NAMES = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', discover: 'Discover', jcb: 'JCB', unionpay: 'UnionPay', diners: 'Diners Club', maestro: 'Maestro' };
-  const ROW_LIMIT = 50;
-  const CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>';
-
-  // Выбор хранится в адресе страницы — ссылкой можно поделиться
-  const params = new URLSearchParams(location.search);
-  const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
-  const mode = pick(params.get('mode'), Object.keys(MODES), 'conversion');
-  const state = {
-    mode,
-    provider: pick(params.get('provider'), ['all', 'stripe', 'solidgate'], 'all'),
-    granularity: pick(params.get('granularity'), ['day', 'week', 'month'], 'day'),
-    view: pick(params.get('view'), MODES[mode].tabs.map(([v]) => v), 'time'),
-    preset: pick(params.get('period'), PRESETS, params.get('from') ? 'custom' : 'all'),
-    from: params.get('from') ?? '',
-    to: params.get('to') ?? '',
-    filters: Object.fromEntries(MODES[mode].dimensions.filter((d) => params.get(d)).map((d) => [d, params.get(d)])),
-    showAll: false,
-  };
-  const isTurnover = () => state.mode === 'turnover';
-  const dimensions = () => MODES[state.mode].dimensions;
-
-  let lastData = null;
-  let charts = {};
-  let pollTimer;
-
-  // От origin, а не от адреса страницы: если дашборд открыт как user:pass@host, fetch отвергает относительный URL
-  const api = (path, init) => fetch(new URL(path, location.origin), init);
-  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-  const num = (n) => n.toLocaleString('ru-RU');
-  const pct = (r) => (r === null || r === undefined ? '—' : `${(r * 100).toFixed(1)}%`);
-  // суммы оборота приходят в центах USD
-  const usdWhole = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
-  const usdExact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
-  const usdCompact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 });
-  const usd = (cents) => usdWhole.format(cents / 100);
-  const usdAverage = (cents) => (cents === null ? '—' : usdExact.format(cents / 100));
-  const ddmm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
-  const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
-  const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
-  const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
-  const regionNames = new Intl.DisplayNames(['ru'], { type: 'region' });
-
-  function valueLabel(dimension, value) {
-    if (value === null || value === 'none') return dimension === 'country' || dimension === 'card_brand' ? 'Не определена' : 'Не определён';
-    if (dimension === 'country') {
-      try { return `${regionNames.of(value)} (${value})`; } catch { return value; }
-    }
-    if (dimension === 'account') {
-      const [provider, account] = value.split(':');
-      return ACCOUNT_NAMES[value] ?? `${provider === 'stripe' ? 'Stripe' : 'Solidgate'} · ${account}`;
-    }
-    if (dimension === 'mid') {
-      const [provider, mid] = value.split(':');
-      if (provider === 'stripe') return ACCOUNT_NAMES[value] ?? `Stripe · ${mid}`;
-      return MID_NAMES[value] ?? `Solidgate · ${mid.slice(0, 8)}`;
-    }
-    if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
-    if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
-    return value;
-  }
-
-  function query() {
-    const q = new URLSearchParams({ mode: state.mode, provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
-    if (state.preset === 'custom') {
-      q.set('from', state.from);
-      q.set('to', state.to);
-    }
-    for (const [dimension, value] of Object.entries(state.filters)) q.set(dimension, value);
-    return q;
-  }
-
-  async function load() {
-    clearTimeout(pollTimer);
-    history.replaceState(null, '', `${location.pathname}?${query()}`);
-    document.getElementById('content').classList.add('loading'); // держим прошлую отрисовку, без мигания
-    try {
-      const res = await api(`${MODES[state.mode].api}?${query()}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      lastData = await res.json();
-      render(lastData);
-      if (lastData.sync_running) pollTimer = setTimeout(load, 10_000);
-    } catch (error) {
-      document.getElementById('status').textContent = `Не удалось загрузить данные: ${error.message}`;
-    } finally {
-      document.getElementById('content').classList.remove('loading');
-    }
-  }
-
-  function render(data) {
-    renderControls(data);
-    renderStatus(data);
-    const isTime = state.view === 'time';
-    document.getElementById('charts').hidden = !isTime || isTurnover();
-    document.getElementById('turnover-charts').hidden = !isTime || !isTurnover();
-    document.getElementById('granularity').hidden = !isTime;
-    if (isTurnover()) {
-      renderTurnoverKpis(data.totals, data.range);
-      if (isTime) {
-        renderTurnoverTimeTable(data.series);
-        renderTurnoverChart(data.series);
-      } else {
-        renderTurnoverBreakdown(data.breakdown);
-      }
-      return;
-    }
-    renderKpis(data.totals, data.range);
-    if (isTime) {
-      renderTimeTable(data.series);
-      renderCharts(data.series);
-    } else if (state.view === 'decline_reason') {
-      renderReasons(data.reasons);
-    } else {
-      renderBreakdown(data.breakdown);
-    }
-  }
-
-  function renderControls(data) {
-    document.getElementById('view').innerHTML = MODES[state.mode].tabs.map(([v, title]) => `<button data-v="${v}">${title}</button>`).join('');
-    for (const id of ['mode', 'provider', 'granularity', 'view']) {
-      document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
-    }
-    document.getElementById('preset').value = state.preset;
-    for (const id of ['from', 'to']) {
-      const input = document.getElementById(id);
-      input.min = data.history_from;
-      input.max = data.today;
-      input.value = data.range[id];
-    }
-    // сутки у провайдеров свои — как в их кабинетах
-    const zone = (tz) => tz.split('/').pop().replace('_', ' ');
-    document.getElementById('subtitle').textContent = `Сутки: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
-    document.getElementById('chips').innerHTML = Object.entries(state.filters)
-      .map(([d, v]) => `<span class="chip">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${CLOSE_ICON}</button></span>`)
-      .join('');
-    const hints = isTurnover()
-      ? { time: 'Оборот — все успешные списания по дню платежа, в долларах' }
-      : {
-          time: 'Сконвертилось — оплатили первый платный период в течение 30 дней после конца триала',
-          decline_reason: 'Отклонённые попытки списания первого платежа, по причинам',
-        };
-    document.getElementById('hint').textContent = hints[state.view] ?? 'Нажмите на строку, чтобы посмотреть её динамику';
-  }
-
-  function renderStatus(data) {
-    const errors = data.sync
-      .filter((s) => s.last_status === 'error')
-      .map((s) => `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}: синк упал — ${s.last_error ?? ''}`);
-    document.getElementById('status').textContent = errors.join(' · ');
-    const button = document.getElementById('refresh');
-    button.classList.toggle('spinning', data.sync_running);
-    button.querySelector('span').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
-  }
-
-  function renderKpis(t, range) {
-    const declined = t.attempts - t.approved;
-    const cards = [
-      ['Оформлено триалов', num(t.started), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
-      ['Сконвертилось', pct(t.rate_retry), `${num(t.paid_retry)} из ${num(t.started)}`],
-      ['С первой попытки', pct(t.rate_first), `${num(t.paid_first)} из ${num(t.started)}`],
-      ['Проходимость', pct(t.approval_rate), `${num(t.approved)} из ${num(t.attempts)} попыток`],
-      ['Decline rate', pct(t.decline_rate), `${num(declined)} отказов`],
-      ['Рефанды', pct(t.refund_rate), `${num(t.refunded)} из ${num(t.paid_retry)} оплат`],
-    ];
-    document.getElementById('kpis').innerHTML = cards
-      .map(([label, value, sub]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
-      .join('');
-  }
-
-  // Колонки метрик — одинаковые для динамики и разбивок
-  const METRIC_HEAD = '<th>Оформлено</th><th>Сконвертилось</th><th>С 1-й попытки</th><th>Проходимость</th><th>Decline</th><th>Рефанды</th>';
-  function metricCells(p) {
-    const cell = (text, final, title = '') => `<td class="${final ? '' : 'pending'}" title="${title}">${final ? '' : '≈ '}${text}</td>`;
-    return [
-      `<td>${num(p.started)}</td>`,
-      cell(`${pct(p.rate_retry)}<span class="n">${num(p.paid_retry)}</span>`, p.final_retry),
-      cell(`${pct(p.rate_first)}<span class="n">${num(p.paid_first)}</span>`, p.final_first),
-      cell(pct(p.approval_rate), p.final_retry, `${num(p.approved)} из ${num(p.attempts)} попыток`),
-      cell(pct(p.decline_rate), p.final_retry, `${num(p.attempts - p.approved)} отказов`),
-      cell(pct(p.refund_rate), p.final_retry, `${num(p.refunded)} из ${num(p.paid_retry)} оплат`),
-    ].join('');
-  }
-
-  function periodLabel(p) {
-    if (state.granularity === 'day') return ddmmyyyy(p.period);
-    if (state.granularity === 'week') return `${ddmm(p.period)} — ${ddmm(p.period_end)}`;
-    const name = monthName(p.period);
-    return p.period.endsWith('-01') && isMonthEnd(p.period_end) ? name : `${name} (${ddmm(p.period)} — ${ddmm(p.period_end)})`;
-  }
-
-  function renderTimeTable(series) {
-    const head = { day: 'Дата оформления', week: 'Неделя', month: 'Месяц' }[state.granularity];
-    document.getElementById('thead').innerHTML = `<tr><th>${head}</th>${METRIC_HEAD}</tr>`;
-    document.getElementById('rows').innerHTML = [...series].reverse().map((p) => `<tr><td>${periodLabel(p)}</td>${metricCells(p)}</tr>`).join('');
-    document.getElementById('more').hidden = true;
-  }
-
-  // Разбивка по измерению: клик по строке — фильтр по значению и переход в динамику
-  function renderBreakdown(rows) {
-    const shown = state.showAll ? rows : rows.slice(0, ROW_LIMIT);
-    document.getElementById('thead').innerHTML = `<tr><th>${DIMENSION_TITLES[state.view]}</th>${METRIC_HEAD}</tr>`;
-    document.getElementById('rows').innerHTML =
-      shown
-        .map((r) => `<tr class="link" data-value="${esc(r.value ?? 'none')}"><td title="${esc(valueLabel(state.view, r.value))}">${esc(valueLabel(state.view, r.value))}</td>${metricCells(r)}</tr>`)
-        .join('') || '<tr><td colspan="7" class="muted">Нет данных за этот период</td></tr>';
-    document.getElementById('more').hidden = rows.length <= ROW_LIMIT || state.showAll;
-    document.getElementById('show-all').textContent = `Показать все (${num(rows.length)})`;
-  }
-
-  const shareCell = (share) =>
-    `<td><span class="bar-cell"><span class="bar"><span style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span>${pct(share)}</span></td>`;
-
-  function renderReasons(rows) {
-    document.getElementById('thead').innerHTML = '<tr><th>Причина отказа</th><th>Отказов</th><th>Доля от всех отказов</th></tr>';
-    document.getElementById('rows').innerHTML =
-      rows.map((r) => `<tr><td>${esc(r.reason)}</td><td>${num(r.count)}</td>${shareCell(r.share)}</tr>`).join('') ||
-      '<tr><td colspan="3" class="muted">Отказов за этот период нет</td></tr>';
-    document.getElementById('more').hidden = true;
-  }
-
-  // --- оборот
-  function renderTurnoverKpis(t, range) {
-    const cards = [
-      ['Оборот', usd(t.gross), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
-      ['Оборот без рефандов', usd(t.net), 'оборот − рефанды'],
-      ['Рефанды', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} оборота` : '—'],
-      ['Платежей', num(t.payments), 'успешных списаний'],
-      ['Средний чек', usdAverage(t.average), 'оборот ÷ платежи'],
-    ];
-    document.getElementById('kpis').innerHTML = cards
-      .map(([label, value, sub]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
-      .join('');
-  }
-
-  const TURNOVER_HEAD = '<th>Оборот</th><th>Платежей</th><th>Средний чек</th><th>Рефанды</th><th>Без рефандов</th>';
-  const turnoverCells = (p) =>
-    `<td>${usd(p.gross)}</td><td>${num(p.payments)}</td><td>${usdAverage(p.average)}</td><td>${usd(p.refunded)}</td><td>${usd(p.net)}</td>`;
-
-  function renderTurnoverTimeTable(series) {
-    const head = { day: 'Дата платежа', week: 'Неделя', month: 'Месяц' }[state.granularity];
-    document.getElementById('thead').innerHTML = `<tr><th>${head}</th>${TURNOVER_HEAD}</tr>`;
-    document.getElementById('rows').innerHTML = [...series].reverse().map((p) => `<tr><td>${periodLabel(p)}</td>${turnoverCells(p)}</tr>`).join('');
-    document.getElementById('more').hidden = true;
-  }
-
-  // Разбивка оборота: доля — от оборота периода; клик по строке — фильтр и динамика
-  function renderTurnoverBreakdown(rows) {
-    const shown = state.showAll ? rows : rows.slice(0, ROW_LIMIT);
-    document.getElementById('thead').innerHTML = `<tr><th>${DIMENSION_TITLES[state.view]}</th><th>Доля в обороте</th>${TURNOVER_HEAD}</tr>`;
-    document.getElementById('rows').innerHTML =
-      shown
-        .map((r) => {
-          const label = esc(valueLabel(state.view, r.value));
-          return `<tr class="link" data-value="${esc(r.value ?? 'none')}"><td title="${label}">${label}</td>${shareCell(r.share)}${turnoverCells(r)}</tr>`;
-        })
-        .join('') || '<tr><td colspan="7" class="muted">Нет платежей за этот период</td></tr>';
-    document.getElementById('more').hidden = rows.length <= ROW_LIMIT || state.showAll;
-    document.getElementById('show-all').textContent = `Показать все (${num(rows.length)})`;
-  }
-
-  function renderTurnoverChart(series) {
-    const muted = css('--muted');
-    const grid = css('--grid');
-    const titles = series.map(periodLabel);
-    for (const chart of Object.values(charts)) chart.destroy();
-    charts = {
-      turnover: new Chart(document.getElementById('turnover-chart'), {
-        type: 'bar',
-        data: {
-          labels: series.map((p) => (state.granularity === 'month' ? monthName(p.period) : ddmm(p.period))),
-          datasets: [{ label: 'Оборот', data: series.map((p) => p.gross / 100), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
-        },
-        options: {
-          animation: false, responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              padding: 10, cornerRadius: 8,
-              callbacks: {
-                title: (items) => titles[items[0].dataIndex],
-                label: (c) => ` Оборот: ${usd(series[c.dataIndex].gross)} · платежей: ${num(series[c.dataIndex].payments)}`,
-              },
-            },
-          },
-          scales: {
-            x: { grid: { display: false }, border: { color: grid }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 16 } },
-            y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdCompact.format(v) } },
-          },
-        },
-      }),
-    };
-  }
-
-  function renderCharts(series) {
-    const muted = css('--muted');
-    const grid = css('--grid');
-    const labels = series.map((p) => (state.granularity === 'month' ? monthName(p.period) : ddmm(p.period)));
-    const titles = series.map(periodLabel);
-    const toPct = (r) => (r === null ? null : +(r * 100).toFixed(1));
-    const dashed = (key) => (ctx) => (series[ctx.p1DataIndex][key] ? undefined : [5, 4]);
-    const line = (label, key, finalKey, color) => ({
-      label, data: series.map((p) => toPct(p[key])), borderColor: color, backgroundColor: color,
-      borderWidth: 2, pointRadius: series.length > 31 ? 0 : 3, pointHoverRadius: 5, tension: 0.25, spanGaps: true,
-      segment: { borderDash: dashed(finalKey) },
-    });
-    const tooltip = (label) => ({ padding: 10, cornerRadius: 8, callbacks: { title: (items) => titles[items[0].dataIndex], label } });
-    const x = { grid: { display: false }, border: { color: grid }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 16 } };
-    const common = { animation: false, responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false } };
-
-    for (const chart of Object.values(charts)) chart.destroy();
-    charts = {};
-    charts.rate = new Chart(document.getElementById('rate-chart'), {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [line('Сконвертилось', 'rate_retry', 'final_retry', css('--s-converted')), line('С первой попытки', 'rate_first', 'final_first', css('--s-first'))],
-      },
-      options: {
-        ...common,
-        plugins: { legend: { display: false }, tooltip: tooltip((c) => ` ${c.dataset.label}: ${c.raw ?? '—'}%`) },
-        scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => `${v}%` } } },
-      },
-    });
-    charts.count = new Chart(document.getElementById('count-chart'), {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [{ label: 'Оформлено триалов', data: series.map((p) => p.started), backgroundColor: css('--s-started'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
-      },
-      options: {
-        ...common,
-        plugins: { legend: { display: false }, tooltip: tooltip((c) => ` Оформлено: ${num(c.raw)}`) },
-        scales: { x, y: { grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => num(v) } } },
-      },
-    });
-  }
-
-  // --- обработчики
-  // Смена экрана: фильтры, которых у него нет (аккаунт ↔ MID), снимаются; вкладка, которой нет, — на динамику
-  document.getElementById('mode').addEventListener('click', (event) => {
-    const value = event.target.closest('button')?.dataset.v;
-    if (!value || value === state.mode) return;
-    state.mode = value;
-    state.filters = Object.fromEntries(Object.entries(state.filters).filter(([d]) => dimensions().includes(d)));
-    if (!MODES[value].tabs.some(([v]) => v === state.view)) state.view = 'time';
-    state.showAll = false;
-    load();
-  });
-
-  for (const id of ['provider', 'granularity', 'view']) {
-    document.getElementById(id).addEventListener('click', (event) => {
-      const value = event.target.closest('button')?.dataset.v;
-      if (!value) return;
-      state[id] = value;
-      state.showAll = false;
-      load();
-    });
-  }
-
-  document.getElementById('preset').addEventListener('change', (event) => {
-    state.preset = event.target.value;
-    if (state.preset !== 'custom') load(); // для своего периода ждём выбора дат
-  });
-
-  for (const id of ['from', 'to']) {
-    document.getElementById(id).addEventListener('change', () => {
-      state.preset = 'custom';
-      state.from = document.getElementById('from').value;
-      state.to = document.getElementById('to').value;
-      if (state.from && state.to) load();
-    });
-  }
-
-  document.getElementById('chips').addEventListener('click', (event) => {
-    const dimension = event.target.closest('button')?.dataset.remove;
-    if (!dimension) return;
-    delete state.filters[dimension];
-    load();
-  });
-
-  document.getElementById('rows').addEventListener('click', (event) => {
-    const row = event.target.closest('tr.link');
-    if (!row || !dimensions().includes(state.view)) return;
-    state.filters[state.view] = row.dataset.value;
-    state.view = 'time';
-    load();
-  });
-
-  document.getElementById('show-all').addEventListener('click', () => {
-    state.showAll = true;
-    if (lastData) (isTurnover() ? renderTurnoverBreakdown : renderBreakdown)(lastData.breakdown);
-  });
-
-  document.getElementById('refresh').addEventListener('click', async () => {
-    await api('/api/sync', { method: 'POST' });
-    load();
-  });
-
-  // Тема: светлая или тёмная; выбор хранится в браузере
-  const markTheme = () => document.querySelectorAll('#theme button').forEach((b) => b.classList.toggle('on', b.dataset.v === document.documentElement.dataset.theme));
-  document.getElementById('theme').addEventListener('click', (event) => {
-    const value = event.target.closest('button')?.dataset.v;
-    if (!value) return;
-    document.documentElement.dataset.theme = value;
-    try {
-      localStorage.setItem('theme', value);
-    } catch {}
-    markTheme();
-    if (lastData && state.view === 'time') (isTurnover() ? renderTurnoverChart : renderCharts)(lastData.series); // цвета графиков берутся из темы
-  });
-
-  // «Как считается»: тексты — public/metrics.md и public/data-sources.md, один источник для дашборда и репозитория
-  const helpCache = {};
-  let helpTab = 'metrics';
-  async function showHelpTab(tab) {
-    helpTab = tab;
-    document.querySelectorAll('#help-tabs button').forEach((b) => {
-      b.classList.toggle('on', b.dataset.v === tab);
-      b.setAttribute('aria-selected', String(b.dataset.v === tab));
-    });
-    const body = document.getElementById('help-body');
-    try {
-      if (!helpCache[tab]) {
-        body.textContent = 'Загрузка…';
-        const res = await api(`/${tab}.md`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        helpCache[tab] = marked.parse(await res.text());
-      }
-      if (helpTab === tab) body.innerHTML = helpCache[tab];
-      document.getElementById('help').scrollTop = 0;
-    } catch (error) {
-      body.textContent = `Не удалось загрузить описание: ${error.message}`;
-    }
-  }
-  function openHelp() {
-    document.getElementById('help').hidden = false;
-    document.getElementById('help-overlay').hidden = false;
-    document.getElementById('help-close').focus();
-    showHelpTab(helpTab);
-  }
-  function closeHelp() {
-    document.getElementById('help').hidden = true;
-    document.getElementById('help-overlay').hidden = true;
-    document.getElementById('help-open').focus();
-  }
-  document.getElementById('help-open').addEventListener('click', openHelp);
-  document.getElementById('help-tabs').addEventListener('click', (event) => {
-    const tab = event.target.closest('button')?.dataset.v;
-    if (tab) showHelpTab(tab);
-  });
-  document.getElementById('help-close').addEventListener('click', closeHelp);
-  document.getElementById('help-overlay').addEventListener('click', closeHelp);
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !document.getElementById('help').hidden) closeHelp();
-  });
-
-  markTheme();
-  load();
-</script>
+<script src="/app.js"></script>
 </body>
 </html>

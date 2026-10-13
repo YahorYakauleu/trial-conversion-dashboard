@@ -1,13 +1,14 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import express, { type RequestHandler } from 'express';
+import express from 'express';
+import { createAuth } from './auth.js';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
 import {
   DIMENSIONS,
   getBreakdown,
   getDeclineReasons,
+  getDimensionValues,
   getMetrics,
   latestDay,
   resolveRange,
@@ -17,7 +18,7 @@ import {
   type ProviderFilter,
 } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
-import { getTurnover, getTurnoverBreakdown, TURNOVER_DIMENSIONS, type TurnoverDimension } from './turnover.js';
+import { getTurnover, getTurnoverBreakdown, getTurnoverDimensionValues, TURNOVER_DIMENSIONS, type TurnoverDimension } from './turnover.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -47,11 +48,20 @@ function parseFilters<D extends Dimension | TurnoverDimension>(query: Record<str
 
 export function createApp({ store, config, sources }: { store: Store; config: Config; sources: Source[] }) {
   const app = express();
+  const auth = createAuth(config.users);
+  app.set('trust proxy', 1); // Render: https заканчивается на прокси — нужно для Secure-cookie
 
+  // Без входа: проверка живости, форма входа, стили и иконка (public/assets)
   app.get('/health', (_req, res) => {
     res.send('ok');
   });
-  app.use(basicAuth(config.basicAuth.user, config.basicAuth.password));
+  app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets')));
+  app.get('/favicon.ico', (_req, res) => res.redirect(301, '/assets/favicon.svg'));
+  app.get('/login', auth.loginPage(path.join(PUBLIC_DIR, 'login.html')));
+  app.post('/login', express.urlencoded({ extended: false }), auth.login);
+  app.post('/logout', auth.logout);
+
+  app.use(auth.requireLogin);
   app.use(express.static(PUBLIC_DIR));
 
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
@@ -85,6 +95,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const { totals, series } = getMetrics(store.db, { ...options, granularity });
     res.json({
       ...meta,
+      role: res.locals.role,
       retry_window_days: config.retryWindowDays,
       range,
       filters,
@@ -105,6 +116,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const { totals, series } = getTurnover(store.db, { ...options, granularity });
     res.json({
       ...meta,
+      role: res.locals.role,
       range,
       filters,
       view,
@@ -114,7 +126,14 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     });
   });
 
-  app.post('/api/sync', (_req, res) => {
+  // Значения измерений для фильтров в боковой панели: ?mode=conversion|turnover&provider=…
+  app.get('/api/values', (req, res) => {
+    const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
+    const values = req.query.mode === 'turnover' ? getTurnoverDimensionValues(store.db, provider) : getDimensionValues(store.db, provider);
+    res.json({ values });
+  });
+
+  app.post('/api/sync', auth.requireAdmin, (_req, res) => {
     if (isSyncRunning()) {
       res.status(409).json({ status: 'running' });
       return;
@@ -125,15 +144,3 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
 
   return app;
 }
-
-function basicAuth(user: string, password: string): RequestHandler {
-  const expected = hash(`${user}:${password}`);
-  return (req, res, next) => {
-    const [scheme, encoded] = (req.headers.authorization ?? '').split(' ');
-    const given = scheme === 'Basic' && encoded ? Buffer.from(encoded, 'base64').toString() : '';
-    if (timingSafeEqual(hash(given), expected)) return next();
-    res.set('WWW-Authenticate', 'Basic realm="trial-dashboard", charset="UTF-8"').status(401).send('Нужна авторизация');
-  };
-}
-
-const hash = (value: string) => createHash('sha256').update(value).digest();
