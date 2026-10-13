@@ -28,8 +28,9 @@ const DIMENSION_SQL: Record<Dimension, string> = {
   bank: 't.bank',
   card_brand: 't.card_brand',
 };
-// Фильтр по измерению: значение или 'none' — «не определено»
-export type Filters = Partial<Record<Dimension, string>>;
+// Фильтр по измерению — список значений, 'none' — «не определено».
+// Значения одного фильтра складываются (ИЛИ), разные фильтры сужают выборку (И).
+export type Filters = Partial<Record<Dimension, string[]>>;
 
 export interface Counts {
   started: number; // оформлено триалов
@@ -140,22 +141,32 @@ export function resolveRange(
   return { from: from > to ? to : from, to };
 }
 
-// Фильтр по триалам (алиас t): период оформления в местных сутках, провайдер, измерения.
-// node:sqlite не принимает лишние именованные параметры — параметры фильтров добавляются только используемые.
+// Условия фильтров по измерениям (sqlBy — SQL-выражение каждого измерения): значения одного фильтра — через ИЛИ.
+// node:sqlite не принимает лишние именованные параметры — параметры добавляются только используемые.
+export function dimensionFilterSql(sqlBy: Record<string, string>, filters: Partial<Record<string, string[]>>) {
+  const clauses: string[] = [];
+  const params: Record<string, string> = {};
+  for (const [dimension, sql] of Object.entries(sqlBy)) {
+    const values = filters[dimension] ?? [];
+    if (values.length === 0) continue;
+    const named = values
+      .filter((v) => v !== 'none')
+      .map((v, i) => {
+        params[`f_${dimension}_${i}`] = v;
+        return `@f_${dimension}_${i}`;
+      });
+    const anyOf = [...(named.length ? [`${sql} IN (${named.join(', ')})`] : []), ...(values.includes('none') ? [`${sql} IS NULL`] : [])];
+    clauses.push(`(${anyOf.join(' OR ')})`);
+  }
+  return { clauses, params };
+}
+
+// Фильтр по триалам (алиас t): период оформления в местных сутках, провайдер, измерения
 function trialFilter(o: RangeOptions) {
   const period = periodSql('t', 't.trial_started_at', o);
-  const params: Record<string, string | number> = { ...period.params, provider: o.provider };
-  const clauses = [period.sql, "(@provider = 'all' OR t.provider = @provider)"];
-  for (const dimension of DIMENSIONS) {
-    const value = o.filters[dimension];
-    if (!value) continue;
-    if (value === 'none') {
-      clauses.push(`${DIMENSION_SQL[dimension]} IS NULL`);
-    } else {
-      clauses.push(`${DIMENSION_SQL[dimension]} = @f_${dimension}`);
-      params[`f_${dimension}`] = value;
-    }
-  }
+  const dimensions = dimensionFilterSql(DIMENSION_SQL, o.filters);
+  const params: Record<string, string | number> = { ...period.params, ...dimensions.params, provider: o.provider };
+  const clauses = [period.sql, "(@provider = 'all' OR t.provider = @provider)", ...dimensions.clauses];
   return { sql: clauses.join(' AND '), params };
 }
 

@@ -32,6 +32,7 @@ import {
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
 const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
+const MAX_FILTER_VALUES = 100;
 // «Сегодня» и окончательность цифр зависят от текущего времени — кэш живёт не дольше этого
 const CACHE_TTL_MS = 5 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
@@ -44,14 +45,18 @@ const FILTER_FORMAT: Record<Dimension | TurnoverDimension, RegExp> = {
   bank: /^.{1,120}$/,
 };
 
+// Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA
 function parseFilters<D extends Dimension | TurnoverDimension>(query: Record<string, unknown>, dimensions: readonly D[]) {
-  const filters: Partial<Record<D, string>> = {};
+  const filters: Partial<Record<D, string[]>> = {};
   for (const dimension of dimensions) {
     const raw = query[dimension];
-    if (typeof raw !== 'string' || raw === '') continue;
-    const value = dimension === 'country' ? raw.toUpperCase() : raw;
-    if (raw === 'none') filters[dimension] = 'none';
-    else if (FILTER_FORMAT[dimension].test(value)) filters[dimension] = value;
+    const values = (Array.isArray(raw) ? raw : [raw])
+      .filter((v): v is string => typeof v === 'string' && v !== '')
+      .map((v) => (dimension === 'country' && v !== 'none' ? v.toUpperCase() : v))
+      .filter((v) => v === 'none' || FILTER_FORMAT[dimension].test(v));
+    // без повторов и в одном порядке — одинаковые выборки попадают в кэш под одним ключом
+    const unique = [...new Set(values)].sort().slice(0, MAX_FILTER_VALUES);
+    if (unique.length) filters[dimension] = unique;
   }
   return filters;
 }

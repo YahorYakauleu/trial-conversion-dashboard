@@ -144,6 +144,7 @@ button, select, input { font: inherit; color: var(--text); }
 .picker .label { font-size: 11px; color: var(--muted); }
 .picker .value { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .picker svg { flex: none; width: 16px; height: 16px; color: var(--muted); }
+.more-count { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 600; }
 
 /* выпадающее окно: список с поиском и календарь */
 .popover {
@@ -167,6 +168,19 @@ button, select, input { font: inherit; color: var(--text); }
 .option:hover, .option.focus { background: var(--surface-sunken); }
 .option.on { color: var(--accent); font-weight: 600; }
 .option .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* фильтр с несколькими значениями: галочки и кнопки внизу */
+.option.check { justify-content: flex-start; gap: 10px; }
+.option.check.on { color: var(--text); font-weight: 500; }
+.option.check .name { flex: 1; }
+.box {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+  border-radius: 5px; border: 1.5px solid var(--border-strong); color: transparent; transition: background 0.1s, border-color 0.1s;
+}
+.box svg { width: 12px; height: 12px; }
+.option.on .box { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.pop-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 8px 8px 12px; border-top: 1px solid var(--border); font-size: 12px; }
+.pop-foot .btn { height: 30px; padding: 0 14px; }
+
 /* вторая строка подписи: полный UUID MID Solidgate — в таблице и в списке фильтра */
 .value-id { display: block; margin-top: 1px; font: 400 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
 .option .count { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; }

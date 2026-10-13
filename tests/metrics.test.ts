@@ -172,10 +172,13 @@ describe('измерения: фильтры и разбивки', () => {
 
   it('фильтры применяются к ряду и итогам; none — значение не определено; фильтры складываются', () => {
     const store = storeWith(rows());
-    expect(getMetrics(store.db, { ...opts, filters: { country: 'US' } }).totals).toMatchObject({ started: 2, paid_first: 1, rate_first: 0.5 });
-    expect(getMetrics(store.db, { ...opts, filters: { country: 'none' } }).totals.started).toBe(1);
-    expect(getMetrics(store.db, { ...opts, filters: { country: 'US', payment_method: 'google_pay' } }).totals.started).toBe(1);
-    expect(getMetrics(store.db, { ...opts, filters: { bank: 'AL RAJHI' } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { country: ['US'] } }).totals).toMatchObject({ started: 2, paid_first: 1, rate_first: 0.5 });
+    expect(getMetrics(store.db, { ...opts, filters: { country: ['none'] } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { country: ['US'], payment_method: ['google_pay'] } }).totals.started).toBe(1);
+    // несколько значений одного фильтра — через ИЛИ, в том числе «не определено»
+    expect(getMetrics(store.db, { ...opts, filters: { country: ['US', 'none'] } }).totals.started).toBe(3);
+    expect(getMetrics(store.db, { ...opts, filters: { country: ['US', 'none'], payment_method: ['google_pay'] } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { bank: ['AL RAJHI'] } }).totals.started).toBe(1);
     expect(getMetrics(store.db, opts).totals.started).toBe(5);
   });
 
@@ -192,8 +195,9 @@ describe('измерения: фильтры и разбивки', () => {
       ['solidgate:sgH2H', 1],
       ['stripe:org', 1],
     ]);
-    expect(getMetrics(store.db, { ...range, filters: { account: 'stripe:org' } }).totals.started).toBe(1);
-    expect(getMetrics(store.db, { ...range, filters: { account: 'solidgate:corp' } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...range, filters: { account: ['stripe:org'] } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...range, filters: { account: ['solidgate:corp'] } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...range, filters: { account: ['stripe:org', 'solidgate:corp'] } }).totals.started).toBe(2);
   });
 
   it('разбивка: по убыванию числа триалов, «не определено» в конце, с учётом провайдера и периода', () => {
@@ -418,8 +422,9 @@ describe('оборот', () => {
       ['solidgate:mid-1', 1_000, 0.2],
     ]);
     expect(getTurnoverBreakdown(db, range, 'country').map((r) => r.value)).toEqual(['US', 'GB', null]);
-    expect(getTurnover(db, { ...range, granularity: 'day', filters: { country: 'none' } }).totals.payments).toBe(1);
+    expect(getTurnover(db, { ...range, granularity: 'day', filters: { country: ['none'] } }).totals.payments).toBe(1);
+    expect(getTurnover(db, { ...range, granularity: 'day', filters: { country: ['GB', 'none'] } }).totals.payments).toBe(2);
     expect(getTurnover(db, { ...range, granularity: 'day', provider: 'solidgate' }).totals.gross).toBe(1_000);
-    expect(getTurnover(db, { ...range, granularity: 'day', filters: { mid: 'stripe:corp', payment_method: 'google_pay' } }).totals.payments).toBe(1);
+    expect(getTurnover(db, { ...range, granularity: 'day', filters: { mid: ['stripe:corp'], payment_method: ['google_pay'] } }).totals.payments).toBe(1);
   });
 });

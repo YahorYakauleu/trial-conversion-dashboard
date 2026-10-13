@@ -115,6 +115,10 @@ describe('server', () => {
     expect((await get('country=us')).totals.started).toBe(2);
     expect((await get('country=none')).totals.started).toBe(1);
     expect((await get('country=US&payment_method=google_pay')).totals.started).toBe(1);
+    // несколько значений — повторяющимся параметром; без повторов и в одном порядке
+    const multi = await get('country=us&country=none&country=US');
+    expect([multi.totals.started, multi.filters]).toEqual([3, { country: ['US', 'none'] }]);
+    expect((await get('country=US&country=<script>')).filters).toEqual({ country: ['US'] });
     expect((await get(`bank=${encodeURIComponent('SUTTON BANK')}`)).totals.started).toBe(1);
     expect((await get('country=<script>')).filters).toEqual({});
     expect((await get('account=stripe:corp')).totals.started).toBe(3);
