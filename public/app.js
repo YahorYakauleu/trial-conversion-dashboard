@@ -36,11 +36,13 @@ const ACCOUNT_NAMES = {
   'solidgate:sg': 'Solidgate · платёжная форма',
   'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
 };
-// MID Solidgate: по API известны только UUID и дескриптор; у Stripe MID = аккаунт (названия — из ACCOUNT_NAMES)
-const MID_NAMES = {
-  'solidgate:237b93d9-0bac-43c4-8844-938d6f354c66': 'Solidgate · VPN TOGGLE.ORG · 237b93d9',
-  'solidgate:fb1f49fb-1fb7-4c21-b300-17334b737a47': 'Solidgate · VPN TOGGLE.ORG · fb1f49fb',
-  'solidgate:5e6da293-9dd7-4709-9502-97ac9f128471': 'Solidgate · ORG (через Stripe) · 5e6da293',
+// MID Solidgate: по API известны только UUID и дескриптор — подписываем дескриптором, UUID показываем целиком.
+// У Stripe MID = аккаунт (названия — из ACCOUNT_NAMES)
+const MID_DESCRIPTORS = {
+  '237b93d9-0bac-43c4-8844-938d6f354c66': 'VPN TOGGLE.ORG',
+  'fb1f49fb-1fb7-4c21-b300-17334b737a47': 'VPN TOGGLE.ORG',
+  '5e6da293-9dd7-4709-9502-97ac9f128471': 'ORG (через Stripe)',
+  '4980d35c-f792-4ebb-895d-c161ba9b4fd5': 'toggle.org', // один тестовый заказ 23.09
 };
 const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Карта', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
 const BRAND_NAMES = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', discover: 'Discover', jcb: 'JCB', unionpay: 'UnionPay', diners: 'Diners Club', maestro: 'Maestro' };
@@ -109,7 +111,19 @@ const addMonths = (month, n) => {
 };
 const regionNames = new Intl.DisplayNames(['ru'], { type: 'region' });
 
-function valueLabel(dimension, value) {
+// Подпись значения в одну строку: в чипах, в поле фильтра, для поиска и сортировки
+const valueLabel = (dimension, value) => valueParts(dimension, value).filter(Boolean).join(' · ');
+
+// Подпись из двух частей: название и, для MID Solidgate, полный UUID — в таблице и списке он идёт второй строкой
+function valueParts(dimension, value) {
+  if (dimension === 'mid' && value?.startsWith('solidgate:')) {
+    const mid = value.slice('solidgate:'.length);
+    return [MID_DESCRIPTORS[mid] ? `Solidgate · ${MID_DESCRIPTORS[mid]}` : 'Solidgate', mid];
+  }
+  return [valueName(dimension, value), null];
+}
+
+function valueName(dimension, value) {
   if (value === null || value === 'none') return dimension === 'country' || dimension === 'card_brand' ? 'Не определена' : 'Не определён';
   if (dimension === 'country') {
     try { return `${regionNames.of(value)} (${value})`; } catch { return value; }
@@ -118,11 +132,7 @@ function valueLabel(dimension, value) {
     const [provider, account] = value.split(':');
     return ACCOUNT_NAMES[value] ?? `${provider === 'stripe' ? 'Stripe' : 'Solidgate'} · ${account}`;
   }
-  if (dimension === 'mid') {
-    const [provider, mid] = value.split(':');
-    if (provider === 'stripe') return ACCOUNT_NAMES[value] ?? `Stripe · ${mid}`;
-    return MID_NAMES[value] ?? `Solidgate · ${mid.slice(0, 8)}`;
-  }
+  if (dimension === 'mid') return ACCOUNT_NAMES[value] ?? `Stripe · ${value.split(':')[1]}`; // MID Stripe — аккаунт
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
   return value;
@@ -239,7 +249,7 @@ function renderSidebar(data) {
     .map((d) => {
       const value = state.filters[d];
       return `<button class="picker${value ? ' active' : ''}" data-dimension="${d}" aria-haspopup="listbox">
-        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value">${value ? esc(valueLabel(d, value)) : 'Все'}</span></span>${ICONS.chevron}</button>`;
+        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value" title="${value ? esc(valueLabel(d, value)) : ''}">${value ? esc(valueLabel(d, value)) : 'Все'}</span></span>${ICONS.chevron}</button>`;
     })
     .join('');
   $('reset-filters').hidden = Object.keys(state.filters).length === 0;
@@ -263,7 +273,7 @@ function renderHeader(data) {
   button.classList.toggle('spinning', data.sync_running);
   button.querySelector('span').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
   $('chips').innerHTML = Object.entries(state.filters)
-    .map(([d, v]) => `<span class="chip">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${ICONS.close}</button></span>`)
+    .map(([d, v]) => `<span class="chip" title="${esc(valueLabel(d, v))}">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${ICONS.close}</button></span>`)
     .join('');
 }
 
@@ -327,8 +337,8 @@ const valueColumn = () => ({
   text: true,
   sort: (r) => (r.value === null ? null : valueLabel(state.view, r.value)),
   cell: (r) => {
-    const label = esc(valueLabel(state.view, r.value));
-    return `<td title="${label}">${label}</td>`;
+    const [name, sub] = valueParts(state.view, r.value);
+    return `<td title="${esc(valueLabel(state.view, r.value))}">${esc(name)}${sub ? `<span class="value-id">${esc(sub)}</span>` : ''}</td>`;
   },
 });
 const CONVERSION_COLUMNS = [
@@ -526,10 +536,11 @@ async function openFilter(anchor, dimension) {
   const current = state.filters[dimension] ?? '';
   const options = [
     { value: '', name: 'Все' },
-    ...values.filter((v) => v.value !== null).map((v) => ({ value: v.value, name: valueLabel(dimension, v.value), count: v.count })),
-    ...values.filter((v) => v.value === null).map((v) => ({ value: 'none', name: valueLabel(dimension, null), count: v.count })),
+    ...values.filter((v) => v.value !== null).map((v) => ({ value: v.value, count: v.count })),
+    ...values.filter((v) => v.value === null).map((v) => ({ value: 'none', count: v.count })),
   ];
-  if (current && !options.some((o) => o.value === current)) options.push({ value: current, name: valueLabel(dimension, current) });
+  if (current && !options.some((o) => o.value === current)) options.push({ value: current });
+  for (const o of options.slice(1)) [o.name, o.sub] = valueParts(dimension, o.value);
 
   const choose = (value) => {
     closePopover();
@@ -540,16 +551,19 @@ async function openFilter(anchor, dimension) {
   };
 
   openPopover(anchor, (el) => {
-    el.style.width = `${Math.max(anchor.offsetWidth, 280)}px`;
+    el.style.width = `${Math.max(anchor.offsetWidth, options.some((o) => o.sub) ? 360 : 280)}px`; // UUID — целиком
     const withSearch = options.length > 8;
     el.innerHTML = `${withSearch ? `<input class="search" placeholder="Поиск: ${DIMENSION_TITLES[dimension].toLowerCase()}" aria-label="Поиск" />` : ''}<div class="options" role="listbox"></div>`;
     const list = el.querySelector('.options');
     const draw = (text = '') => {
       const q = text.trim().toLowerCase();
-      const shown = options.filter((o) => !q || o.name.toLowerCase().includes(q) || o.value.toLowerCase().includes(q));
+      const shown = options.filter((o) => !q || `${o.name} ${o.sub ?? ''} ${o.value}`.toLowerCase().includes(q));
       list.innerHTML =
         shown
-          .map((o) => `<button class="option${o.value === current ? ' on' : ''}" role="option" data-value="${esc(o.value)}"><span class="name">${esc(o.name)}</span>${o.count ? `<span class="count">${num(o.count)}</span>` : ''}</button>`)
+          .map(
+            (o) =>
+              `<button class="option${o.value === current ? ' on' : ''}" role="option" data-value="${esc(o.value)}"><span class="name">${esc(o.name)}${o.sub ? `<span class="value-id">${esc(o.sub)}</span>` : ''}</span>${o.count ? `<span class="count">${num(o.count)}</span>` : ''}</button>`,
+          )
           .join('') || '<div class="empty">Ничего не найдено</div>';
     };
     draw();
