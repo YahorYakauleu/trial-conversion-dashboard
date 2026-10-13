@@ -79,7 +79,7 @@ let charts = {};
 let pollTimer;
 let loadSeq = 0; // номер последнего запроса: ответы на устаревшие выборы не рисуем
 let loading = false;
-const valuesCache = new Map(); // «экран:провайдер» → значения измерений для фильтров
+const valuesCache = new Map(); // «экран:провайдер» → { version, values } — значения измерений для фильтров
 
 function parseSort(raw) {
   const [key, dir] = (raw ?? '').split(':');
@@ -158,13 +158,14 @@ async function load(kind = 'data') {
   // лоадер — только если ответ не пришёл сразу: быстрые ответы (из кэша) обходятся без мигания
   const loader = kind === 'silent' ? null : setTimeout(() => showLoading(kind), 120);
   try {
-    const [res] = await Promise.all([api(`${MODES[state.mode].api}?${query()}`), loadValues()]);
+    const res = await api(`${MODES[state.mode].api}?${query()}`);
     if (seq !== loadSeq) return; // пока ждали ответа, выбрали другое
     if (res.status === 401) return location.assign('/login');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     lastData = await res.json();
     if (seq !== loadSeq) return;
     render(lastData);
+    void loadValues(lastData.data_version); // в фоне: значения нужны, только когда откроют фильтр
     if (lastData.sync_running) pollTimer = setTimeout(() => load('silent'), 10_000);
   } catch (error) {
     if (seq === loadSeq) $('status').textContent = `Не удалось загрузить данные: ${error.message}`;
@@ -203,14 +204,22 @@ function markControls() {
   }
 }
 
-// Значения для фильтров — один раз на экран и провайдера
-async function loadValues() {
+// Значения для фильтров — на экран и провайдера, заново после каждого синка: version — версия данных на сервере
+// (иначе, например, MID, которые синк заполнил после открытия страницы, в фильтр не попадут)
+function loadValues(version) {
   const key = `${state.mode}:${state.provider}`;
-  if (valuesCache.has(key)) return;
-  const res = await api(`/api/values?mode=${state.mode}&provider=${state.provider}`);
-  if (res.ok) valuesCache.set(key, (await res.json()).values);
+  const hit = valuesCache.get(key);
+  if (hit && hit.version === version) return hit.values;
+  const values = api(`/api/values?mode=${state.mode}&provider=${state.provider}`)
+    .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+    .then((body) => body.values)
+    .catch(() => {
+      valuesCache.delete(key); // не получилось — спросим снова при следующем открытии
+      return {};
+    });
+  valuesCache.set(key, { version, values });
+  return values;
 }
-const currentValues = () => valuesCache.get(`${state.mode}:${state.provider}`) ?? {};
 
 function render(data) {
   renderSidebar(data);
@@ -512,8 +521,8 @@ function closePopover() {
   popover = null;
 }
 
-function openFilter(anchor, dimension) {
-  const values = currentValues()[dimension] ?? [];
+async function openFilter(anchor, dimension) {
+  const values = (await loadValues(lastData?.data_version))[dimension] ?? [];
   const current = state.filters[dimension] ?? '';
   const options = [
     { value: '', name: 'Все' },
