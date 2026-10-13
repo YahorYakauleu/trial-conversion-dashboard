@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { openStore } from '../src/db.js';
 import { DAY } from '../src/metrics.js';
-import { syncStripeAccount, type StripeLike } from '../src/providers/stripe.js';
+import { syncStripeAccount, trialFromSubscription, type StripeLike } from '../src/providers/stripe.js';
 
 const NOW = Date.parse('2026-10-12T10:00:00Z') / 1000;
 const TODAY = NOW - (NOW % DAY);
 const HISTORY_FROM = Date.parse('2026-09-01T00:00:00Z') / 1000;
 // валюта зачисления в тестах — всегда USD
-const cfg = { historyFrom: HISTORY_FROM, toUsd: async (amount: number) => amount };
+const cfg = { historyFrom: HISTORY_FROM, retryWindowDays: 30, toUsd: async (amount: number) => amount };
 const HOUR = 3600;
 // Окна бэкфилла — сутки, окна ежедневного синка — час
 const isWindow = (c: { params: { created: Range } }, size: number) => c.params.created.lt! - c.params.created.gte! === size;
@@ -167,6 +167,7 @@ describe('syncStripeAccount', () => {
   it('база до версии 2: один раз проходит подписки (с картой клиента) и списания, инвойсы не трогает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 3600);
+    store.setState('stripe', 'corp', 'loaded_from', HISTORY_FROM);
     store.setState('stripe', 'corp', 'country_done', 1); // старый флаг ничего не значит
     const withCard = {
       ...subscription,
@@ -242,6 +243,44 @@ describe('syncStripeAccount', () => {
     expect(payments(store)).toEqual([{ payment_id: 'ch_9', mid: 'corp', amount_usd_cents: 1199, refunded_usd_cents: 600 }]);
     expect(next.calls.find((c) => c.method === 'refunds')!.params.expand).toEqual(['data.charge']);
     expect(next.calls.some((c) => c.method === 'charges' && isWindow(c, DAY))).toBe(false); // догрузка — один раз
+  });
+
+  it('HISTORY_FROM раньше загруженного: догружает только начало — подписки до старого начала, инвойсы и списания до конца его триалов плюс окно ретраев', async () => {
+    const store = openStore(':memory:');
+    const loadedFrom = TODAY - 20 * DAY; // база выгружена с этого дня
+    store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'details_version', 2);
+    store.setState('stripe', 'corp', 'payments_version', 1);
+    store.upsertTrial({ ...trialFromSubscription({ id: 'sub_old', trial_start: loadedFrom + 3600, trial_end: loadedFrom + 3600 + 7 * DAY } as never, 'corp')! });
+    const gapTrial = { id: 'sub_gap', created: loadedFrom - 2 * DAY, trial_start: loadedFrom - 2 * DAY, trial_end: loadedFrom + 5 * DAY };
+    const { client, calls } = fakeStripe({ subs: [gapTrial], invoices: [], events: [] });
+    await syncStripeAccount(store, client, 'corp', { ...cfg, historyFrom: loadedFrom - 10 * DAY }, NOW);
+
+    const days = (method: string) => calls.filter((c) => c.method === method && isWindow(c, DAY)).map((c) => c.params.created.gte!);
+    expect(Math.min(...days('subscriptions'))).toBe(loadedFrom - 10 * DAY);
+    // начало старой базы — первый её триал (loadedFrom + час); кусок — до него плюс день запаса
+    expect(Math.max(...days('subscriptions'))).toBe(loadedFrom + DAY);
+    // последний триал куска — sub_old: конец loadedFrom + 7 дней + час; инвойсы — до него плюс день
+    expect(Math.max(...days('invoices'))).toBe(loadedFrom + 8 * DAY);
+    expect(Math.max(...days('charges'))).toBe(TODAY - DAY); // + 30 дней ретраев — упирается в сегодня
+    expect(store.getTrial('stripe', 'sub_gap')).not.toBeNull();
+    expect(store.getState('stripe', 'corp', 'loaded_from')).toBe(loadedFrom - 10 * DAY);
+
+    calls.length = 0;
+    await syncStripeAccount(store, client, 'corp', { ...cfg, historyFrom: loadedFrom - 10 * DAY }, NOW + 60);
+    expect(calls.some((c) => isWindow(c, DAY))).toBe(false); // второй раз — только свежее
+  });
+
+  it('старая база без записи о начале истории и тот же HISTORY_FROM — ничего не догружает', async () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'details_version', 2);
+    store.setState('stripe', 'corp', 'payments_version', 1);
+    store.upsertTrial({ ...trialFromSubscription({ id: 'sub_1', trial_start: HISTORY_FROM + 4 * 3600, trial_end: HISTORY_FROM + 7 * DAY } as never, 'corp')! });
+    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+    expect(calls.some((c) => isWindow(c, DAY))).toBe(false);
+    expect(store.getState('stripe', 'corp', 'loaded_from')).toBe(HISTORY_FROM);
   });
 });
 

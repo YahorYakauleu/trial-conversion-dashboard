@@ -119,6 +119,7 @@ describe('syncSolidgateAccount', () => {
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
     store.setState('solidgate', 'sgH2H', 'details_version', 2);
     store.setState('solidgate', 'sgH2H', 'payments_version', 1); // база с оборотом, но без MID триала
+    store.setState('solidgate', 'sgH2H', 'loaded_from', HISTORY_FROM);
     store.upsertTrial({ ...trialFromSolidgate(trialSub, 'sgH2H')! });
     const renewal: SgCardOrder = {
       order_id: 'o9', subscription_id: 'sg_1', status: 'refunded', created_at: '2026-09-01 12:00:00', amount: 1199, currency: 'USD',
@@ -139,6 +140,27 @@ describe('syncSolidgateAccount', () => {
     await syncSolidgateAccount(store, acc, cfg, NOW + 60, list, listOrders);
     expect(orderCalls.length).toBeGreaterThan(0);
     expect(orderCalls.every((c) => c.filter === 'updated_at')).toBe(true);
+  });
+
+  it('HISTORY_FROM раньше загруженного: подписки и заказы недостающего начала, по дате создания, один раз', async () => {
+    const store = openStore(':memory:');
+    const loadedFrom = HISTORY_FROM + 10 * DAY;
+    store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
+    store.setState('solidgate', 'sgH2H', 'details_version', 2);
+    store.setState('solidgate', 'sgH2H', 'orders_version', 2);
+    store.setState('solidgate', 'sgH2H', 'loaded_from', loadedFrom);
+    const { list, listOrders, calls } = fakeList([trialSub]);
+    await syncSolidgateAccount(store, acc, cfg, NOW, list, listOrders);
+
+    const created = calls.filter((c) => c.filter === 'created_at');
+    expect(created[0].from).toBe(HISTORY_FROM);
+    expect(created.at(-1)!.to).toBe(loadedFrom + DAY);
+    expect(store.getTrial('solidgate', 'sg_1')).not.toBeNull();
+    expect(store.getState('solidgate', 'sgH2H', 'loaded_from')).toBe(HISTORY_FROM);
+
+    calls.length = 0;
+    await syncSolidgateAccount(store, acc, cfg, NOW + 60, list, listOrders);
+    expect(calls.every((c) => c.filter === 'updated_at')).toBe(true);
   });
 });
 
