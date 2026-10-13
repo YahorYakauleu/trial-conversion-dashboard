@@ -54,7 +54,7 @@ npm run typecheck
 
 ## Посмотреть базу
 
-Файл `data/dashboard.sqlite` (SQLite) можно открыть в DBeaver или `sqlite3 -readonly`. Время хранится в unix-секундах (`trial_started_at`, `paid_at`, …), а рядом есть вычисляемые колонки с обычной датой по UTC — `trial_started_utc`, `trial_ended_utc`, `paid_utc`, `attempted_utc`, `started_utc`/`finished_utc` у синков, `value_utc` у курсоров. Они не занимают места и считаются при чтении. Сутки в дашборде режутся по часовому поясу провайдера (Stripe — Нью-Йорк, Solidgate — UTC).
+Файл `data/dashboard.sqlite` (SQLite) можно открыть в DBeaver или `sqlite3 -readonly`. Время хранится в unix-секундах (`trial_started_at`, `paid_at`, …), а рядом есть вычисляемые колонки с обычной датой по UTC — `trial_started_utc`, `trial_ended_utc`, `paid_utc`, `attempted_utc`, `started_utc`/`finished_utc` у синков, `value_utc` у курсоров. Они не занимают места и считаются при чтении. В строке триала лежат и итоги его попыток (`attempts`, `approved`, `refunded`) и `mid` — так метрики считаются одним проходом по `trials`; посчитанные ответы сервер держит в памяти до следующего синка. Сутки в дашборде режутся по часовому поясу провайдера (Stripe — Нью-Йорк, Solidgate — UTC).
 
 ## Docker
 

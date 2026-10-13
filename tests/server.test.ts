@@ -192,4 +192,27 @@ describe('server', () => {
     expect((await values('provider=solidgate')).account).toEqual([{ value: 'solidgate:sgH2H', count: 2 }]);
     expect(Object.keys(await values('mode=turnover'))).toEqual(['mid', 'country', 'payment_method', 'bank', 'card_brand']);
   });
+
+  it('ответ кэшируется до следующего синка: новые данные видны после того, как синк закончился', async () => {
+    const store = openStore(':memory:');
+    const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    const trial = (id: string) =>
+      store.upsertTrial({
+        provider: 'stripe', account: 'corp', subscription_id: id, trial_started_at: started, trial_ended_at: started + 7 * 86_400,
+        first_invoice_id: null, first_attempt_succeeded: null, paid_at: null, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, mid: 'corp',
+      });
+    trial('a');
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const started_ = async () =>
+      (await (await fetch(`${url}/api/metrics?period=custom&from=2026-09-10&to=2026-09-10&view=country`, { headers: auth })).json()).totals.started;
+
+    expect(await started_()).toBe(1);
+    trial('b'); // синк пишет в базу…
+    expect(await started_()).toBe(1); // …а до его конца отдаётся посчитанное
+    store.finishRun(store.startRun('stripe', 'corp', 'daily'), 'ok', 1, null);
+    expect(await started_()).toBe(2);
+  });
 });

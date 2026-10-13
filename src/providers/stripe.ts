@@ -47,6 +47,7 @@ export function trialFromSubscription(sub: Stripe.Subscription, account: string)
     first_attempt_succeeded: null,
     paid_at: null,
     ...cardDetails(sub),
+    mid: account, // у Stripe MID — сам аккаунт
   };
 }
 

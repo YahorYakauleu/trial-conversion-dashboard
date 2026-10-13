@@ -33,6 +33,7 @@ const trial: TrialRow = {
   payment_method: null,
   card_brand: null,
   bank: null,
+  mid: 'org', // у Stripe MID — сам аккаунт
 };
 
 describe('trialFromSubscription', () => {

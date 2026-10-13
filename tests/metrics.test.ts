@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type AttemptRow, type PaymentRow, type TrialRow } from '../src/db.js';
-import { DAY, getBreakdown, getDeclineReasons, getMetrics, latestDay, resolveRange } from '../src/metrics.js';
+import { DAY, getBreakdown, getDeclineReasons, getMetrics, latestDay, resolveRange, totalsOf } from '../src/metrics.js';
 import { getTurnover, getTurnoverBreakdown } from '../src/turnover.js';
 
 // «Сегодня» = понедельник 2026-10-12, история с 1 сентября, триалы по 7 дней, окно ретраев 30 дней
@@ -35,6 +35,7 @@ function trial(startedIso: string, patch: Partial<TrialRow> = {}): TrialRow {
     payment_method: 'apple_pay',
     card_brand: 'visa',
     bank: null,
+    mid: 'corp',
     ...patch,
   };
 }
@@ -274,6 +275,24 @@ describe('платёжные метрики: проходимость, decline, 
       'Недостаточно средств',
       'Подозрение на фрод (банк)',
     ]);
+  });
+});
+
+describe('разбивка по MID и итоги из строк разбивки', () => {
+  it('MID: у Stripe — аккаунт, у Solidgate — MID заказа, без заказа — не определён; сумма строк = итоги периода', () => {
+    const solidgate = { provider: 'solidgate' as const, account: 'sgH2H' };
+    const store = storeWith([
+      trial('2026-10-05T12:00:00Z', { paid_at: ts('2026-10-12T13:00:00Z'), first_attempt_succeeded: true }),
+      trial('2026-10-05T12:00:00Z', { ...solidgate, mid: 'uuid-1' }),
+      trial('2026-10-06T12:00:00Z', { ...solidgate, mid: null }),
+    ]);
+    const rows = getBreakdown(store.db, opts, 'mid');
+    expect(rows.map((r) => [r.value, r.started])).toEqual([
+      ['solidgate:uuid-1', 1],
+      ['stripe:corp', 1],
+      [null, 1],
+    ]);
+    expect(totalsOf(rows)).toEqual(getMetrics(store.db, opts).totals);
   });
 });
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { openStore } from '../src/db.js';
 import { DAY } from '../src/metrics.js';
 import type { ReportFilter, SgCardOrder, SgSubscription } from '../src/providers/solidgate-client.js';
-import { syncSolidgateAccount } from '../src/providers/solidgate.js';
+import { syncSolidgateAccount, trialFromSolidgate } from '../src/providers/solidgate.js';
 
 const NOW = Date.parse('2026-10-12T10:00:00Z') / 1000;
 const HISTORY_FROM = Date.parse('2026-09-01T00:00:00Z') / 1000;
@@ -114,12 +114,14 @@ describe('syncSolidgateAccount', () => {
     expect(calls.every((c) => c.filter === 'updated_at')).toBe(true); // второй раз — только свежие изменения
   });
 
-  it('оборот: списанные платные заказы → платежи; догрузка заказов с HISTORY_FROM — один раз; дальше заказы по дате изменения', async () => {
+  it('заказы: платежи для оборота и MID триала; догрузка заказов с HISTORY_FROM — один раз; дальше заказы по дате изменения', async () => {
     const store = openStore(':memory:');
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
     store.setState('solidgate', 'sgH2H', 'details_version', 2);
+    store.setState('solidgate', 'sgH2H', 'payments_version', 1); // база с оборотом, но без MID триала
+    store.upsertTrial({ ...trialFromSolidgate(trialSub, 'sgH2H')! });
     const renewal: SgCardOrder = {
-      order_id: 'o9', status: 'refunded', created_at: '2026-09-01 12:00:00', amount: 1199, currency: 'USD',
+      order_id: 'o9', subscription_id: 'sg_1', status: 'refunded', created_at: '2026-09-01 12:00:00', amount: 1199, currency: 'USD',
       processing_amount: 1199, processing_currency: 'USD', refunded_amount: 1199, mid: 'mid-1',
     };
     const { list, listOrders, calls, orderCalls } = fakeList([], [renewal, { order_id: 'o0', status: 'auth_ok', amount: 0, currency: 'USD', created_at: '2026-09-01 12:00:00' }]);
@@ -130,7 +132,8 @@ describe('syncSolidgateAccount', () => {
     ]);
     expect(orderCalls[0]).toEqual({ from: HISTORY_FROM - 3600, to: HISTORY_FROM + DAY, filter: 'created_at' });
     expect(calls.every((c) => c.filter === 'updated_at')).toBe(true); // подписки заново не грузятся
-    expect(store.getState('solidgate', 'sgH2H', 'payments_version')).toBe(1);
+    expect(store.getTrial('solidgate', 'sg_1')?.mid).toBe('mid-1');
+    expect(store.getState('solidgate', 'sgH2H', 'orders_version')).toBe(2);
 
     orderCalls.length = 0;
     await syncSolidgateAccount(store, acc, cfg, NOW + 60, list, listOrders);
