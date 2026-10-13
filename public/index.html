@@ -277,6 +277,9 @@
   <div class="status" id="status"></div>
 
   <div class="toolbar">
+    <div class="seg" id="mode" role="group" aria-label="Экран">
+      <button data-v="conversion">Конверсия</button><button data-v="turnover">Оборот</button>
+    </div>
     <div class="seg" id="provider" role="group" aria-label="Провайдер">
       <button data-v="all">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
     </div>
@@ -298,15 +301,7 @@
   <div id="content">
     <section class="kpis" id="kpis"></section>
 
-    <nav class="tabs" id="view" aria-label="Разрез">
-      <button data-v="time">Динамика</button>
-      <button data-v="account">Аккаунты</button>
-      <button data-v="country">Страны</button>
-      <button data-v="payment_method">Способы оплаты</button>
-      <button data-v="bank">Банки</button>
-      <button data-v="card_brand">Платёжные системы</button>
-      <button data-v="decline_reason">Причины отказа</button>
-    </nav>
+    <nav class="tabs" id="view" aria-label="Разрез"></nav>
 
     <div class="view-head">
       <div class="seg" id="granularity" role="group" aria-label="Шаг">
@@ -330,6 +325,13 @@
       <div class="panel">
         <div class="chart-head"><h2>Оформлено триалов</h2></div>
         <div class="chart small"><canvas id="count-chart" aria-label="Число оформленных триалов"></canvas></div>
+      </div>
+    </section>
+
+    <section id="turnover-charts" hidden>
+      <div class="panel">
+        <div class="chart-head"><h2>Оборот, $</h2></div>
+        <div class="chart"><canvas id="turnover-chart" aria-label="Оборот по дате платежа, доллары"></canvas></div>
       </div>
     </section>
 
@@ -362,9 +364,20 @@
   const DAY_MS = 86_400_000;
   const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
   const PRESETS = ['last7', 'last30', 'thisMonth', 'prevMonth', 'all', 'custom'];
-  const DIMENSIONS = ['account', 'country', 'payment_method', 'bank', 'card_brand'];
-  const VIEWS = ['time', ...DIMENSIONS, 'decline_reason'];
-  const DIMENSION_TITLES = { account: 'Аккаунт', country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
+  // Два экрана: конверсия триалов (когорты по дню оформления) и оборот (все успешные платежи по дню платежа)
+  const MODES = {
+    conversion: {
+      api: '/api/metrics',
+      dimensions: ['account', 'country', 'payment_method', 'bank', 'card_brand'],
+      tabs: [['time', 'Динамика'], ['account', 'Аккаунты'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы'], ['decline_reason', 'Причины отказа']],
+    },
+    turnover: {
+      api: '/api/turnover',
+      dimensions: ['mid', 'country', 'payment_method', 'bank', 'card_brand'],
+      tabs: [['time', 'Динамика'], ['mid', 'MID'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы']],
+    },
+  };
+  const DIMENSION_TITLES = { account: 'Аккаунт', mid: 'MID', country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
   const ACCOUNT_NAMES = {
     'stripe:corp': 'Stripe · Toggle Corp',
     'stripe:org': 'Stripe · Toggle Org',
@@ -374,6 +387,12 @@
     'solidgate:sg': 'Solidgate · платёжная форма',
     'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
   };
+  // MID Solidgate: по API известны только UUID и дескриптор; у Stripe MID = аккаунт (названия — из ACCOUNT_NAMES)
+  const MID_NAMES = {
+    'solidgate:237b93d9-0bac-43c4-8844-938d6f354c66': 'Solidgate · VPN TOGGLE.ORG · 237b93d9',
+    'solidgate:fb1f49fb-1fb7-4c21-b300-17334b737a47': 'Solidgate · VPN TOGGLE.ORG · fb1f49fb',
+    'solidgate:5e6da293-9dd7-4709-9502-97ac9f128471': 'Solidgate · ORG (через Stripe) · 5e6da293',
+  };
   const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Карта', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
   const BRAND_NAMES = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', discover: 'Discover', jcb: 'JCB', unionpay: 'UnionPay', diners: 'Diners Club', maestro: 'Maestro' };
   const ROW_LIMIT = 50;
@@ -382,16 +401,20 @@
   // Выбор хранится в адресе страницы — ссылкой можно поделиться
   const params = new URLSearchParams(location.search);
   const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
+  const mode = pick(params.get('mode'), Object.keys(MODES), 'conversion');
   const state = {
+    mode,
     provider: pick(params.get('provider'), ['all', 'stripe', 'solidgate'], 'all'),
     granularity: pick(params.get('granularity'), ['day', 'week', 'month'], 'day'),
-    view: pick(params.get('view'), VIEWS, 'time'),
+    view: pick(params.get('view'), MODES[mode].tabs.map(([v]) => v), 'time'),
     preset: pick(params.get('period'), PRESETS, params.get('from') ? 'custom' : 'all'),
     from: params.get('from') ?? '',
     to: params.get('to') ?? '',
-    filters: Object.fromEntries(DIMENSIONS.filter((d) => params.get(d)).map((d) => [d, params.get(d)])),
+    filters: Object.fromEntries(MODES[mode].dimensions.filter((d) => params.get(d)).map((d) => [d, params.get(d)])),
     showAll: false,
   };
+  const isTurnover = () => state.mode === 'turnover';
+  const dimensions = () => MODES[state.mode].dimensions;
 
   let lastData = null;
   let charts = {};
@@ -403,6 +426,12 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const num = (n) => n.toLocaleString('ru-RU');
   const pct = (r) => (r === null || r === undefined ? '—' : `${(r * 100).toFixed(1)}%`);
+  // суммы оборота приходят в центах USD
+  const usdWhole = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+  const usdExact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+  const usdCompact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 });
+  const usd = (cents) => usdWhole.format(cents / 100);
+  const usdAverage = (cents) => (cents === null ? '—' : usdExact.format(cents / 100));
   const ddmm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
   const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
   const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
@@ -418,13 +447,18 @@
       const [provider, account] = value.split(':');
       return ACCOUNT_NAMES[value] ?? `${provider === 'stripe' ? 'Stripe' : 'Solidgate'} · ${account}`;
     }
+    if (dimension === 'mid') {
+      const [provider, mid] = value.split(':');
+      if (provider === 'stripe') return ACCOUNT_NAMES[value] ?? `Stripe · ${mid}`;
+      return MID_NAMES[value] ?? `Solidgate · ${mid.slice(0, 8)}`;
+    }
     if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
     if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
     return value;
   }
 
   function query() {
-    const q = new URLSearchParams({ provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
+    const q = new URLSearchParams({ mode: state.mode, provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
     if (state.preset === 'custom') {
       q.set('from', state.from);
       q.set('to', state.to);
@@ -438,7 +472,7 @@
     history.replaceState(null, '', `${location.pathname}?${query()}`);
     document.getElementById('content').classList.add('loading'); // держим прошлую отрисовку, без мигания
     try {
-      const res = await api(`/api/metrics?${query()}`);
+      const res = await api(`${MODES[state.mode].api}?${query()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       lastData = await res.json();
       render(lastData);
@@ -453,10 +487,21 @@
   function render(data) {
     renderControls(data);
     renderStatus(data);
-    renderKpis(data.totals, data.range);
     const isTime = state.view === 'time';
-    document.getElementById('charts').hidden = !isTime;
+    document.getElementById('charts').hidden = !isTime || isTurnover();
+    document.getElementById('turnover-charts').hidden = !isTime || !isTurnover();
     document.getElementById('granularity').hidden = !isTime;
+    if (isTurnover()) {
+      renderTurnoverKpis(data.totals, data.range);
+      if (isTime) {
+        renderTurnoverTimeTable(data.series);
+        renderTurnoverChart(data.series);
+      } else {
+        renderTurnoverBreakdown(data.breakdown);
+      }
+      return;
+    }
+    renderKpis(data.totals, data.range);
     if (isTime) {
       renderTimeTable(data.series);
       renderCharts(data.series);
@@ -468,7 +513,8 @@
   }
 
   function renderControls(data) {
-    for (const id of ['provider', 'granularity', 'view']) {
+    document.getElementById('view').innerHTML = MODES[state.mode].tabs.map(([v, title]) => `<button data-v="${v}">${title}</button>`).join('');
+    for (const id of ['mode', 'provider', 'granularity', 'view']) {
       document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
     }
     document.getElementById('preset').value = state.preset;
@@ -482,10 +528,12 @@
     document.getElementById('chips').innerHTML = Object.entries(state.filters)
       .map(([d, v]) => `<span class="chip">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${CLOSE_ICON}</button></span>`)
       .join('');
-    const hints = {
-      time: 'Сконвертилось — оплатили первый платный период в течение 30 дней после конца триала',
-      decline_reason: 'Отклонённые попытки списания первого платежа, по причинам',
-    };
+    const hints = isTurnover()
+      ? { time: 'Оборот — все успешные списания по дню платежа, в долларах' }
+      : {
+          time: 'Сконвертилось — оплатили первый платный период в течение 30 дней после конца триала',
+          decline_reason: 'Отклонённые попытки списания первого платежа, по причинам',
+        };
     document.getElementById('hint').textContent = hints[state.view] ?? 'Нажмите на строку, чтобы посмотреть её динамику';
   }
 
@@ -554,13 +602,88 @@
     document.getElementById('show-all').textContent = `Показать все (${num(rows.length)})`;
   }
 
+  const shareCell = (share) =>
+    `<td><span class="bar-cell"><span class="bar"><span style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span>${pct(share)}</span></td>`;
+
   function renderReasons(rows) {
     document.getElementById('thead').innerHTML = '<tr><th>Причина отказа</th><th>Отказов</th><th>Доля от всех отказов</th></tr>';
     document.getElementById('rows').innerHTML =
-      rows
-        .map((r) => `<tr><td>${esc(r.reason)}</td><td>${num(r.count)}</td><td><span class="bar-cell"><span class="bar"><span style="width:${(r.share * 100).toFixed(1)}%"></span></span>${pct(r.share)}</span></td></tr>`)
-        .join('') || '<tr><td colspan="3" class="muted">Отказов за этот период нет</td></tr>';
+      rows.map((r) => `<tr><td>${esc(r.reason)}</td><td>${num(r.count)}</td>${shareCell(r.share)}</tr>`).join('') ||
+      '<tr><td colspan="3" class="muted">Отказов за этот период нет</td></tr>';
     document.getElementById('more').hidden = true;
+  }
+
+  // --- оборот
+  function renderTurnoverKpis(t, range) {
+    const cards = [
+      ['Оборот', usd(t.gross), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
+      ['Оборот без рефандов', usd(t.net), 'оборот − рефанды'],
+      ['Рефанды', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} оборота` : '—'],
+      ['Платежей', num(t.payments), 'успешных списаний'],
+      ['Средний чек', usdAverage(t.average), 'оборот ÷ платежи'],
+    ];
+    document.getElementById('kpis').innerHTML = cards
+      .map(([label, value, sub]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
+      .join('');
+  }
+
+  const TURNOVER_HEAD = '<th>Оборот</th><th>Платежей</th><th>Средний чек</th><th>Рефанды</th><th>Без рефандов</th>';
+  const turnoverCells = (p) =>
+    `<td>${usd(p.gross)}</td><td>${num(p.payments)}</td><td>${usdAverage(p.average)}</td><td>${usd(p.refunded)}</td><td>${usd(p.net)}</td>`;
+
+  function renderTurnoverTimeTable(series) {
+    const head = { day: 'Дата платежа', week: 'Неделя', month: 'Месяц' }[state.granularity];
+    document.getElementById('thead').innerHTML = `<tr><th>${head}</th>${TURNOVER_HEAD}</tr>`;
+    document.getElementById('rows').innerHTML = [...series].reverse().map((p) => `<tr><td>${periodLabel(p)}</td>${turnoverCells(p)}</tr>`).join('');
+    document.getElementById('more').hidden = true;
+  }
+
+  // Разбивка оборота: доля — от оборота периода; клик по строке — фильтр и динамика
+  function renderTurnoverBreakdown(rows) {
+    const shown = state.showAll ? rows : rows.slice(0, ROW_LIMIT);
+    document.getElementById('thead').innerHTML = `<tr><th>${DIMENSION_TITLES[state.view]}</th><th>Доля в обороте</th>${TURNOVER_HEAD}</tr>`;
+    document.getElementById('rows').innerHTML =
+      shown
+        .map((r) => {
+          const label = esc(valueLabel(state.view, r.value));
+          return `<tr class="link" data-value="${esc(r.value ?? 'none')}"><td title="${label}">${label}</td>${shareCell(r.share)}${turnoverCells(r)}</tr>`;
+        })
+        .join('') || '<tr><td colspan="7" class="muted">Нет платежей за этот период</td></tr>';
+    document.getElementById('more').hidden = rows.length <= ROW_LIMIT || state.showAll;
+    document.getElementById('show-all').textContent = `Показать все (${num(rows.length)})`;
+  }
+
+  function renderTurnoverChart(series) {
+    const muted = css('--muted');
+    const grid = css('--grid');
+    const titles = series.map(periodLabel);
+    for (const chart of Object.values(charts)) chart.destroy();
+    charts = {
+      turnover: new Chart(document.getElementById('turnover-chart'), {
+        type: 'bar',
+        data: {
+          labels: series.map((p) => (state.granularity === 'month' ? monthName(p.period) : ddmm(p.period))),
+          datasets: [{ label: 'Оборот', data: series.map((p) => p.gross / 100), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+        },
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              padding: 10, cornerRadius: 8,
+              callbacks: {
+                title: (items) => titles[items[0].dataIndex],
+                label: (c) => ` Оборот: ${usd(series[c.dataIndex].gross)} · платежей: ${num(series[c.dataIndex].payments)}`,
+              },
+            },
+          },
+          scales: {
+            x: { grid: { display: false }, border: { color: grid }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 16 } },
+            y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdCompact.format(v) } },
+          },
+        },
+      }),
+    };
   }
 
   function renderCharts(series) {
@@ -580,6 +703,7 @@
     const common = { animation: false, responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false } };
 
     for (const chart of Object.values(charts)) chart.destroy();
+    charts = {};
     charts.rate = new Chart(document.getElementById('rate-chart'), {
       type: 'line',
       data: {
@@ -607,6 +731,17 @@
   }
 
   // --- обработчики
+  // Смена экрана: фильтры, которых у него нет (аккаунт ↔ MID), снимаются; вкладка, которой нет, — на динамику
+  document.getElementById('mode').addEventListener('click', (event) => {
+    const value = event.target.closest('button')?.dataset.v;
+    if (!value || value === state.mode) return;
+    state.mode = value;
+    state.filters = Object.fromEntries(Object.entries(state.filters).filter(([d]) => dimensions().includes(d)));
+    if (!MODES[value].tabs.some(([v]) => v === state.view)) state.view = 'time';
+    state.showAll = false;
+    load();
+  });
+
   for (const id of ['provider', 'granularity', 'view']) {
     document.getElementById(id).addEventListener('click', (event) => {
       const value = event.target.closest('button')?.dataset.v;
@@ -640,7 +775,7 @@
 
   document.getElementById('rows').addEventListener('click', (event) => {
     const row = event.target.closest('tr.link');
-    if (!row || !DIMENSIONS.includes(state.view)) return;
+    if (!row || !dimensions().includes(state.view)) return;
     state.filters[state.view] = row.dataset.value;
     state.view = 'time';
     load();
@@ -648,7 +783,7 @@
 
   document.getElementById('show-all').addEventListener('click', () => {
     state.showAll = true;
-    if (lastData) renderBreakdown(lastData.breakdown);
+    if (lastData) (isTurnover() ? renderTurnoverBreakdown : renderBreakdown)(lastData.breakdown);
   });
 
   document.getElementById('refresh').addEventListener('click', async () => {
@@ -666,7 +801,7 @@
       localStorage.setItem('theme', value);
     } catch {}
     markTheme();
-    if (lastData && state.view === 'time') renderCharts(lastData.series); // цвета графиков берутся из темы
+    if (lastData && state.view === 'time') (isTurnover() ? renderTurnoverChart : renderCharts)(lastData.series); // цвета графиков берутся из темы
   });
 
   // «Как считается»: тексты — public/metrics.md и public/data-sources.md, один источник для дашборда и репозитория

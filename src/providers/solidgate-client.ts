@@ -44,15 +44,29 @@ export interface SgCard {
   bank?: string | null;
 }
 
+export interface SgTransaction {
+  card?: SgCard;
+  original_payment_method?: string | null;
+}
+
 export interface SgCardOrder {
   order_id: string;
+  status?: string; // settle_ok — списано, refunded — списано и возвращено, auth_failed — отказ
+  created_at?: string;
+  // суммы — в минимальных единицах валюты; processing — в валюте, в которой списал MID (часто уже USD)
+  amount?: number;
+  currency?: string;
+  processing_amount?: number | null;
+  processing_currency?: string | null;
+  mid?: string | null;
   subscription_id?: string | null;
   geo_country?: string | null; // страна по IP, которую передаёт workflow-service (alpha-3)
   payment_method?: string | null; // google-pay, apple-pay, card, token…
   error_code?: string | null; // код отказа, например 3.02
   refunded_amount?: number | null;
   card?: SgCard;
-  transactions?: Record<string, { card?: SgCard }> | { card?: SgCard }[];
+  // original_payment_method — каким способом карта была сохранена (у списаний по токену самого способа нет)
+  transactions?: Record<string, SgTransaction> | SgTransaction[];
 }
 
 export type ReportFilter = 'created_at' | 'updated_at';

@@ -7,7 +7,7 @@ export const DAY = 86_400;
 const FIRST_ATTEMPT_SETTLE = DAY;
 // Корзины по 15 минут: смещения всех часовых поясов кратны 15 минутам, поэтому корзина целиком
 // лежит в одних местных сутках. Так SQLite отдаёт сотни строк вместо сотен тысяч триалов.
-const BUCKET = 900;
+export const BUCKET = 900;
 
 export type ProviderFilter = Provider | 'all';
 export type Granularity = 'day' | 'week' | 'month';
@@ -287,7 +287,7 @@ function totals(days: Point[]): Totals {
   });
 }
 
-function mondayOf(period: string): string {
+export function mondayOf(period: string): string {
   const ts = Date.parse(`${period}T00:00:00Z`) / 1000;
   return dayKey(ts - ((new Date(ts * 1000).getUTCDay() + 6) % 7) * DAY);
 }

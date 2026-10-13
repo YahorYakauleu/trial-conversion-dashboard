@@ -1,6 +1,7 @@
 import type { SolidgateAccount } from '../config.js';
 import { toAlpha2 } from '../countries.js';
-import type { AttemptRow, CardDetails, Store, TrialRow } from '../db.js';
+import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow } from '../db.js';
+import type { ToUsd } from '../fx.js';
 import { DAY, dayKey } from '../metrics.js';
 import {
   listCardOrders,
@@ -21,7 +22,12 @@ const SUCCESS = new Set(['approved', 'settle_ok', 'auth_ok', 'refunded']);
 const PENDING = new Set(['created', 'processing', '3ds_verify']);
 // Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк, попытки, причины отказа, рефанды
 const DETAILS_VERSION = 2;
-// Способ оплаты Solidgate → как в Stripe; token — повторное списание по сохранённой карте, способа не говорит
+// Версия оборота: 1 — успешные платные заказы сохраняются как платежи
+const PAYMENTS_VERSION = 1;
+// Деньги списаны: settle_ok, а refunded — списали и потом вернули (сумма возврата — в refunded_amount)
+const CHARGED = new Set(['settle_ok', 'refunded']);
+// Способ оплаты Solidgate → как в Stripe. token — списание по сохранённой карте: сам способ не говорит,
+// но у транзакции есть original_payment_method — каким способом карту сохранили
 const PAYMENT_METHODS: Record<string, string> = { 'apple-pay': 'apple_pay', 'google-pay': 'google_pay', card: 'card', 'paypal-vault': 'paypal' };
 
 export function parseSgDate(value: string): number {
@@ -109,12 +115,36 @@ function trialPeriod(sub: SgSubscription): { start: number; end: number } | null
 
 // Данные карты из заказа: страна (трёхбуквенный код → двухбуквенный, как в Stripe), способ оплаты, система, банк
 export function orderCardDetails(order: SgCardOrder): CardDetails {
-  const card = Object.values(order.transactions ?? {}).find((t) => t.card)?.card ?? order.card;
+  const transactions = Object.values(order.transactions ?? {});
+  const card = transactions.find((t) => t.card)?.card ?? order.card;
+  const savedWith = transactions.find((t) => t.original_payment_method)?.original_payment_method ?? '';
   return {
     country: toAlpha2(card?.country),
-    payment_method: PAYMENT_METHODS[order.payment_method ?? ''] ?? null,
+    payment_method: PAYMENT_METHODS[order.payment_method ?? ''] ?? PAYMENT_METHODS[savedWith] ?? null,
     card_brand: card?.brand ? card.brand.toLowerCase() : null,
     bank: card?.bank?.trim() || null,
+  };
+}
+
+// Платный заказ, по которому списали деньги, → платёж для оборота. Заказы на $0 (проверка карты при оформлении триала) — не оборот.
+// Сумму берём в валюте процессинга: Solidgate часто уже перевёл её в USD; иначе — по курсу дня.
+export async function paymentFromOrder(order: SgCardOrder, account: string, toUsd: ToUsd): Promise<PaymentRow | null> {
+  if (!order.amount || order.amount <= 0 || !CHARGED.has(order.status ?? '') || !order.created_at || !order.currency) return null;
+  const paidAt = parseSgDate(order.created_at);
+  const amountUsd = order.processing_amount && order.processing_currency
+    ? await toUsd(order.processing_amount, order.processing_currency, paidAt)
+    : await toUsd(order.amount, order.currency, paidAt);
+  if (amountUsd === null) return null;
+  return {
+    provider: 'solidgate',
+    payment_id: order.order_id,
+    account,
+    mid: order.mid ?? null,
+    paid_at: paidAt,
+    amount_usd_cents: amountUsd,
+    // возврат — в валюте заказа, переводим той же долей
+    refunded_usd_cents: Math.round((amountUsd * Math.min(order.refunded_amount ?? 0, order.amount)) / order.amount),
+    ...orderCardDetails(order),
   };
 }
 
@@ -125,11 +155,14 @@ function firstAttempt(order: SgOrder | undefined): boolean | null {
 
 interface SolidgateSyncConfig {
   historyFrom: number;
+  toUsd: ToUsd;
 }
 
 // Отчёт подписок отдаёт подписку целиком (с инвойсами и попытками) — строка триала каждый раз собирается заново.
-// Отчёт заказов дополняет: данные карты (у каждого заказа есть subscription_id), код отказа и рефанд (по id попытки).
-// Без курсора — бэкфилл подписок, созданных с HISTORY_FROM; затем изменения с (курсор − 1 день).
+// Отчёт заказов дополняет: данные карты (у каждого заказа есть subscription_id), код отказа и рефанд (по id попытки),
+// а успешные платные заказы — это платежи для оборота.
+// Без курсора — бэкфилл подписок, созданных с HISTORY_FROM; затем изменения с (курсор − 1 день):
+// подписки и заказы по дате изменения — так доходят и рефанды старых платежей.
 export async function syncSolidgateAccount(
   store: Store,
   acc: SolidgateAccount,
@@ -150,16 +183,18 @@ export async function syncSolidgateAccount(
       items++;
     }
   };
-  const saveOrders = async (from: number, to: number) => {
-    for await (const order of listOrders(acc, from - ORDERS_LOOKBACK, to, 'created_at')) {
+  const saveOrders = (filter: ReportFilter) => async (from: number, to: number) => {
+    for await (const order of listOrders(acc, from - ORDERS_LOOKBACK, to, filter)) {
       if (order.subscription_id) store.setCardDetails('solidgate', order.subscription_id, orderCardDetails(order));
       if (order.error_code) store.setAttemptReason('solidgate', order.order_id, order.error_code);
       if ((order.refunded_amount ?? 0) > 0) store.markRefunded('solidgate', order.order_id);
+      const payment = await paymentFromOrder(order, acc.account, cfg.toUsd);
+      if (payment) store.upsertPayment(payment);
     }
   };
   const subscriptionsAndOrders = (filter: ReportFilter) => async (from: number, to: number) => {
     await saveSubscriptions(from, to, filter);
-    await saveOrders(from, to);
+    await saveOrders(filter)(from, to);
   };
   // Окна по суткам до now; после каждого — onWindow(начало следующего окна)
   const inWindows = async (from: number, work: (from: number, to: number) => Promise<void>, onWindow?: (next: number) => void) => {
@@ -182,6 +217,12 @@ export async function syncSolidgateAccount(
     const from = store.getState('solidgate', acc.account, 'details_day') ?? cfg.historyFrom;
     await inWindows(from, subscriptionsAndOrders('created_at'), progress('details_day'));
     store.setState('solidgate', acc.account, 'details_version', DETAILS_VERSION);
+  }
+  if ((store.getState('solidgate', acc.account, 'payments_version') ?? 0) < PAYMENTS_VERSION) {
+    // Оборот появился позже — один раз проходим заказы с HISTORY_FROM (это минуты, поэтому и после бэкфилла тоже)
+    const from = store.getState('solidgate', acc.account, 'payments_day') ?? cfg.historyFrom;
+    await inWindows(from, saveOrders('created_at'), progress('payments_day'));
+    store.setState('solidgate', acc.account, 'payments_version', PAYMENTS_VERSION);
   }
 
   await inWindows((cursor ?? now) - DAY, subscriptionsAndOrders('updated_at'));

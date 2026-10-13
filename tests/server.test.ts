@@ -101,4 +101,33 @@ describe('server', () => {
     expect((await fetch(`${url}/api/sync`, { method: 'POST', headers: auth })).status).toBe(409);
     release();
   });
+
+  it('/api/turnover: итоги, разбивка по MID с долями, фильтры', async () => {
+    const store = openStore(':memory:');
+    const paidAt = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    const base = { account: 'corp', paid_at: paidAt, refunded_usd_cents: 0, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null };
+    store.upsertPayment({ ...base, provider: 'stripe', payment_id: 'ch_1', mid: 'corp', amount_usd_cents: 3_000 });
+    store.upsertPayment({ ...base, provider: 'solidgate', payment_id: 'o1', account: 'sgH2H', mid: '237b93d9-0bac-43c4-8844-938d6f354c66', amount_usd_cents: 1_000 });
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const get = async (q: string) => (await fetch(`${url}/api/turnover?period=custom&from=2026-09-10&to=2026-09-10&${q}`, { headers: auth })).json();
+
+    const all = await get('');
+    expect(all).toMatchObject({ view: 'time', range: { from: '2026-09-10', to: '2026-09-10' }, sync_running: false, breakdown: [] });
+    expect(all.totals).toEqual({ payments: 2, gross: 4_000, refunded: 0, net: 4_000, average: 2_000 });
+    expect(all.series).toHaveLength(1);
+
+    const byMid = await get('view=mid');
+    expect(byMid.breakdown.map((r: { value: string; share: number }) => [r.value, r.share])).toEqual([
+      ['stripe:corp', 0.75],
+      ['solidgate:237b93d9-0bac-43c4-8844-938d6f354c66', 0.25],
+    ]);
+    expect(byMid.series).toEqual([]);
+    expect((await get('mid=solidgate:237b93d9-0bac-43c4-8844-938d6f354c66')).totals.gross).toBe(1_000);
+    expect((await get('mid=<script>')).filters).toEqual({});
+    expect((await get('account=stripe:corp')).filters).toEqual({}); // у оборота нет разреза «аккаунт» — есть MID
+  });
 });
+
