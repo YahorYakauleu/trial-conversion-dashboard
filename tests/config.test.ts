@@ -22,10 +22,10 @@ describe('loadConfig', () => {
       timeZones: { stripe: 'America/New_York', solidgate: 'UTC' },
       historyFromDay: '2026-09-01',
       historyFrom: Date.parse('2026-09-01T00:00:00Z') / 1000, // самая ранняя полночь — по UTC (Solidgate)
-      syncCron: '0 5 * * *',
+      syncCron: '0 */4 * * *',
       dataDir: './data',
       port: 3000,
-      basicAuth: { user: 'billing', password: 'secret' },
+      users: { admin: { user: 'billing', password: 'secret' }, guest: null }, // BASIC_AUTH_* — вход админа
     });
   });
 
@@ -34,7 +34,7 @@ describe('loadConfig', () => {
   });
 
   it('требует basic auth и дату начала истории', () => {
-    expect(() => loadConfig({ STRIPE_KEYS: 'org=rk', HISTORY_FROM: '2026-09-01' })).toThrow(/BASIC_AUTH_USER/);
+    expect(() => loadConfig({ STRIPE_KEYS: 'org=rk', HISTORY_FROM: '2026-09-01' })).toThrow(/ADMIN_USER/);
     expect(() => loadConfig({ ...base, HISTORY_FROM: undefined })).toThrow(/HISTORY_FROM/);
   });
 
@@ -52,5 +52,11 @@ describe('loadConfig', () => {
     const ny = { ...base, SOLIDGATE_TIMEZONE: 'America/New_York' };
     expect(loadConfig(ny).historyFrom).toBe(Date.parse('2026-09-01T04:00:00Z') / 1000);
     expect(loadConfig({ ...ny, TIMEZONE: 'Asia/Tokyo' }).historyFrom).toBe(Date.parse('2026-08-31T15:00:00Z') / 1000);
+  });
+
+  it('админ и гость: ADMIN_* важнее старых BASIC_AUTH_*; гостевые логин и пароль — только вместе', () => {
+    const users = loadConfig({ ...base, ADMIN_USER: 'admin', ADMIN_PASSWORD: 'a', GUEST_USER: 'guest', GUEST_PASSWORD: 'g' }).users;
+    expect(users).toEqual({ admin: { user: 'admin', password: 'a' }, guest: { user: 'guest', password: 'g' } });
+    expect(() => loadConfig({ ...base, GUEST_USER: 'guest' })).toThrow(/GUEST_USER и GUEST_PASSWORD/);
   });
 });

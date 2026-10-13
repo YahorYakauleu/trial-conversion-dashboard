@@ -9,6 +9,8 @@ const config = loadConfig({
   STRIPE_KEYS: 'org=rk',
   BASIC_AUTH_USER: 'billing',
   BASIC_AUTH_PASSWORD: 'p:ss',
+  GUEST_USER: 'guest',
+  GUEST_PASSWORD: 'g-pass',
   HISTORY_FROM: '2026-09-01',
 });
 const auth = { authorization: `Basic ${Buffer.from('billing:p:ss').toString('base64')}` };
@@ -24,13 +26,51 @@ async function start(sources: Source[] = []) {
 afterEach(() => close());
 
 describe('server', () => {
-  it('/health без авторизации, остальное — под basic auth', async () => {
+  it('/health, форма входа и иконка — без входа; страницы ведут на вход, API — 401; Basic тоже принимается', async () => {
     const url = await start();
     expect((await fetch(`${url}/health`)).status).toBe(200);
+    expect((await fetch(`${url}/login`)).status).toBe(200);
+    expect((await fetch(`${url}/assets/favicon.svg`)).status).toBe(200);
+    expect((await fetch(`${url}/assets/app.css`)).status).toBe(200);
     expect((await fetch(`${url}/api/metrics`)).status).toBe(401);
+    const page = await fetch(`${url}/?mode=turnover`, { redirect: 'manual' });
+    expect([page.status, page.headers.get('location')]).toEqual([303, '/login?next=%2F%3Fmode%3Dturnover']);
     const wrong = { authorization: `Basic ${Buffer.from('wrong:pass').toString('base64')}` };
     expect((await fetch(`${url}/api/metrics`, { headers: wrong })).status).toBe(401);
     expect((await fetch(`${url}/`, { headers: auth })).status).toBe(200);
+  });
+
+  it('вход по форме: cookie сессии и роль; гость не запускает синк; выход', async () => {
+    const url = await start([{ provider: 'stripe', account: 'org', run: async () => 0 }]);
+    const login = (user: string, password: string, next = '/') =>
+      fetch(`${url}/login`, { method: 'POST', redirect: 'manual', body: new URLSearchParams({ user, password, next }) });
+
+    const failed = await login('guest', 'wrong', '/?mode=turnover');
+    expect([failed.status, failed.headers.get('location'), failed.headers.get('set-cookie')]).toEqual([
+      303,
+      '/login?error=1&next=%2F%3Fmode%3Dturnover',
+      null,
+    ]);
+    expect((await login('guest', 'g-pass', '//evil.example')).headers.get('location')).toBe('/'); // только свой сайт
+
+    const asGuest = await login('guest', 'g-pass', '/?mode=turnover');
+    expect(asGuest.headers.get('location')).toBe('/?mode=turnover'); // обратно на ссылку, с которой пришли
+    const cookie = { cookie: asGuest.headers.get('set-cookie')!.split(';')[0] };
+    expect(asGuest.headers.get('set-cookie')).toMatch(/HttpOnly/);
+    expect((await (await fetch(`${url}/api/metrics`, { headers: cookie })).json()).role).toBe('guest');
+    expect((await fetch(`${url}/api/sync`, { method: 'POST', headers: cookie })).status).toBe(403);
+    expect((await fetch(`${url}/login`, { headers: cookie, redirect: 'manual' })).status).toBe(303); // уже вошёл
+
+    const forged = { cookie: cookie.cookie.replace('guest.', 'admin.') };
+    expect((await fetch(`${url}/api/metrics`, { headers: forged })).status).toBe(401);
+
+    const asAdmin = await login('billing', 'p:ss');
+    const adminCookie = { cookie: asAdmin.headers.get('set-cookie')!.split(';')[0] };
+    expect((await (await fetch(`${url}/api/metrics`, { headers: adminCookie })).json()).role).toBe('admin');
+    expect((await fetch(`${url}/api/sync`, { method: 'POST', headers: adminCookie })).status).toBe(202);
+
+    const out = await fetch(`${url}/logout`, { method: 'POST', headers: adminCookie, redirect: 'manual' });
+    expect([out.headers.get('location'), out.headers.get('set-cookie')]).toEqual(['/login', expect.stringMatching(/bd_session=;/)]);
   });
 
   it('/api/metrics отдаёт итоги за период, ряд и статус синка', async () => {
@@ -129,5 +169,27 @@ describe('server', () => {
     expect((await get('mid=<script>')).filters).toEqual({});
     expect((await get('account=stripe:corp')).filters).toEqual({}); // у оборота нет разреза «аккаунт» — есть MID
   });
-});
 
+  it('/api/values: значения измерений для фильтров по убыванию частоты, с учётом провайдера', async () => {
+    const store = openStore(':memory:');
+    const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    const trial = (id: string, provider: 'stripe' | 'solidgate', country: string | null) =>
+      store.upsertTrial({
+        provider, account: provider === 'stripe' ? 'corp' : 'sgH2H', subscription_id: id, trial_started_at: started, trial_ended_at: started + 7 * 86_400,
+        first_invoice_id: null, first_attempt_succeeded: null, paid_at: null, country, payment_method: 'apple_pay', card_brand: 'visa', bank: null,
+      });
+    trial('a', 'stripe', 'US');
+    trial('b', 'stripe', 'US');
+    trial('c', 'solidgate', 'SA');
+    trial('d', 'solidgate', null);
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const values = async (q: string) => (await (await fetch(`${url}/api/values?${q}`, { headers: auth })).json()).values;
+
+    expect((await values('')).country).toEqual([{ value: 'US', count: 2 }, { value: 'SA', count: 1 }, { value: null, count: 1 }]);
+    expect((await values('provider=solidgate')).account).toEqual([{ value: 'solidgate:sgH2H', count: 2 }]);
+    expect(Object.keys(await values('mode=turnover'))).toEqual(['mid', 'country', 'payment_method', 'bank', 'card_brand']);
+  });
+});

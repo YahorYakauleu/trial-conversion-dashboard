@@ -1,0 +1,751 @@
+// Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
+// данные — /api/metrics (конверсия), /api/turnover (оборот), значения фильтров — /api/values.
+
+const DAY_MS = 86_400_000;
+const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+const PRESETS = [
+  ['last7', 'Последние 7 дней'],
+  ['last30', 'Последние 30 дней'],
+  ['thisMonth', 'Этот месяц'],
+  ['prevMonth', 'Прошлый месяц'],
+  ['all', 'Всё время'],
+];
+// Два экрана: конверсия триалов (когорты по дню оформления) и оборот (все успешные платежи по дню платежа)
+const MODES = {
+  conversion: {
+    title: 'Конверсия триалов',
+    api: '/api/metrics',
+    dimensions: ['account', 'country', 'payment_method', 'bank', 'card_brand'],
+    tabs: [['time', 'Динамика'], ['account', 'Аккаунты'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы'], ['decline_reason', 'Причины отказа']],
+  },
+  turnover: {
+    title: 'Оборот',
+    api: '/api/turnover',
+    dimensions: ['mid', 'country', 'payment_method', 'bank', 'card_brand'],
+    tabs: [['time', 'Динамика'], ['mid', 'MID'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы']],
+  },
+};
+const DIMENSION_TITLES = { account: 'Аккаунт', mid: 'MID', country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
+const ACCOUNT_NAMES = {
+  'stripe:corp': 'Stripe · Toggle Corp',
+  'stripe:org': 'Stripe · Toggle Org',
+  'stripe:inc': 'Stripe · Toggle Inc',
+  'stripe:incorp': 'Stripe · Toggle Incorp',
+  'stripe:eu': 'Stripe · Toggle EU',
+  'solidgate:sg': 'Solidgate · платёжная форма',
+  'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
+};
+// MID Solidgate: по API известны только UUID и дескриптор; у Stripe MID = аккаунт (названия — из ACCOUNT_NAMES)
+const MID_NAMES = {
+  'solidgate:237b93d9-0bac-43c4-8844-938d6f354c66': 'Solidgate · VPN TOGGLE.ORG · 237b93d9',
+  'solidgate:fb1f49fb-1fb7-4c21-b300-17334b737a47': 'Solidgate · VPN TOGGLE.ORG · fb1f49fb',
+  'solidgate:5e6da293-9dd7-4709-9502-97ac9f128471': 'Solidgate · ORG (через Stripe) · 5e6da293',
+};
+const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Карта', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
+const BRAND_NAMES = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', discover: 'Discover', jcb: 'JCB', unionpay: 'UnionPay', diners: 'Diners Club', maestro: 'Maestro' };
+const ROW_LIMIT = 50;
+const svg = (path, width = 2) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+const ICONS = {
+  close: svg('<path d="M18 6 6 18M6 6l12 12"/>', 2.5),
+  chevron: svg('<path d="m6 9 6 6 6-6"/>'),
+  calendar: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>'),
+  left: svg('<path d="m15 18-6-6 6-6"/>'),
+  right: svg('<path d="m9 18 6-6-6-6"/>'),
+};
+
+// --- состояние из адреса страницы
+const params = new URLSearchParams(location.search);
+const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
+const initialMode = pick(params.get('mode'), Object.keys(MODES), 'conversion');
+const state = {
+  mode: initialMode,
+  provider: pick(params.get('provider'), ['all', 'stripe', 'solidgate'], 'all'),
+  granularity: pick(params.get('granularity'), ['day', 'week', 'month'], 'day'),
+  view: pick(params.get('view'), MODES[initialMode].tabs.map(([v]) => v), 'time'),
+  preset: pick(params.get('period'), [...PRESETS.map(([v]) => v), 'custom'], params.get('from') ? 'custom' : 'all'),
+  from: params.get('from') ?? '',
+  to: params.get('to') ?? '',
+  filters: Object.fromEntries(MODES[initialMode].dimensions.filter((d) => params.get(d)).map((d) => [d, params.get(d)])),
+  sort: parseSort(params.get('sort')),
+  showAll: false,
+};
+const isTurnover = () => state.mode === 'turnover';
+const dimensions = () => MODES[state.mode].dimensions;
+
+let lastData = null;
+let charts = {};
+let pollTimer;
+const valuesCache = new Map(); // «экран:провайдер» → значения измерений для фильтров
+
+function parseSort(raw) {
+  const [key, dir] = (raw ?? '').split(':');
+  return key && (dir === 'asc' || dir === 'desc') ? { key, dir } : null;
+}
+
+// От origin, а не от адреса страницы: если дашборд открыт как user:pass@host, fetch отвергает относительный URL
+const api = (path, init) => fetch(new URL(path, location.origin), init);
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const num = (n) => n.toLocaleString('ru-RU');
+const pct = (r) => (r === null || r === undefined ? '—' : `${(r * 100).toFixed(1)}%`);
+// суммы оборота приходят в центах USD
+const usdWhole = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+const usdExact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+const usdCompact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 });
+const usd = (cents) => usdWhole.format(cents / 100);
+const usdAverage = (cents) => (cents === null ? '—' : usdExact.format(cents / 100));
+const ddmm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
+const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
+const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
+const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
+const addMonths = (month, n) => {
+  const [y, m] = month.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
+};
+const regionNames = new Intl.DisplayNames(['ru'], { type: 'region' });
+
+function valueLabel(dimension, value) {
+  if (value === null || value === 'none') return dimension === 'country' || dimension === 'card_brand' ? 'Не определена' : 'Не определён';
+  if (dimension === 'country') {
+    try { return `${regionNames.of(value)} (${value})`; } catch { return value; }
+  }
+  if (dimension === 'account') {
+    const [provider, account] = value.split(':');
+    return ACCOUNT_NAMES[value] ?? `${provider === 'stripe' ? 'Stripe' : 'Solidgate'} · ${account}`;
+  }
+  if (dimension === 'mid') {
+    const [provider, mid] = value.split(':');
+    if (provider === 'stripe') return ACCOUNT_NAMES[value] ?? `Stripe · ${mid}`;
+    return MID_NAMES[value] ?? `Solidgate · ${mid.slice(0, 8)}`;
+  }
+  if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
+  if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
+  return value;
+}
+
+function query() {
+  const q = new URLSearchParams({ mode: state.mode, provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
+  if (state.preset === 'custom') {
+    q.set('from', state.from);
+    q.set('to', state.to);
+  }
+  for (const [dimension, value] of Object.entries(state.filters)) q.set(dimension, value);
+  return q;
+}
+
+function saveUrl() {
+  const q = query();
+  if (state.sort) q.set('sort', `${state.sort.key}:${state.sort.dir}`);
+  history.replaceState(null, '', `${location.pathname}?${q}`);
+}
+
+async function load() {
+  clearTimeout(pollTimer);
+  saveUrl();
+  $('content').classList.add('loading'); // держим прошлую отрисовку, без мигания
+  try {
+    const [res] = await Promise.all([api(`${MODES[state.mode].api}?${query()}`), loadValues()]);
+    if (res.status === 401) return location.assign('/login');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    lastData = await res.json();
+    render(lastData);
+    if (lastData.sync_running) pollTimer = setTimeout(load, 10_000);
+  } catch (error) {
+    $('status').textContent = `Не удалось загрузить данные: ${error.message}`;
+  } finally {
+    $('content').classList.remove('loading');
+  }
+}
+
+// Значения для фильтров — один раз на экран и провайдера
+async function loadValues() {
+  const key = `${state.mode}:${state.provider}`;
+  if (valuesCache.has(key)) return;
+  const res = await api(`/api/values?mode=${state.mode}&provider=${state.provider}`);
+  if (res.ok) valuesCache.set(key, (await res.json()).values);
+}
+const currentValues = () => valuesCache.get(`${state.mode}:${state.provider}`) ?? {};
+
+function render(data) {
+  renderSidebar(data);
+  renderHeader(data);
+  if (isTurnover()) renderTurnoverKpis(data.totals, data.range);
+  else renderKpis(data.totals, data.range);
+  renderTabs();
+  renderView(data);
+}
+
+// --- панель выборки
+function renderSidebar(data) {
+  for (const id of ['mode', 'provider', 'granularity']) {
+    document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
+  }
+  const presetName = PRESETS.find(([v]) => v === state.preset)?.[1] ?? 'Свой период';
+  $('period').innerHTML = `<span class="text"><span class="label">${presetName}</span><span class="value">${ddmmyyyy(data.range.from)} — ${ddmmyyyy(data.range.to)}</span></span>${ICONS.calendar}`;
+  $('filters').innerHTML = dimensions()
+    .map((d) => {
+      const value = state.filters[d];
+      return `<button class="picker${value ? ' active' : ''}" data-dimension="${d}" aria-haspopup="listbox">
+        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value">${value ? esc(valueLabel(d, value)) : 'Все'}</span></span>${ICONS.chevron}</button>`;
+    })
+    .join('');
+  $('reset-filters').hidden = Object.keys(state.filters).length === 0;
+  $('role').textContent = data.role === 'admin' ? 'Админ' : 'Гость';
+}
+
+function renderHeader(data) {
+  $('title').textContent = MODES[state.mode].title;
+  document.title = `${MODES[state.mode].title} · Billing Dashboard`;
+  // сутки у провайдеров свои — как в их кабинетах
+  const zone = (tz) => tz.split('/').pop().replace('_', ' ');
+  $('subtitle').textContent = `Сутки: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
+  const errors = data.sync
+    .filter((s) => s.last_status === 'error')
+    .map((s) => `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}: синк упал — ${s.last_error ?? ''}`);
+  $('status').textContent = errors.join(' · ');
+  // синк запускает только админ; пока он идёт, кнопка неактивна
+  const button = $('refresh');
+  button.hidden = data.role !== 'admin';
+  button.disabled = data.sync_running;
+  button.classList.toggle('spinning', data.sync_running);
+  button.querySelector('span').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
+  $('chips').innerHTML = Object.entries(state.filters)
+    .map(([d, v]) => `<span class="chip">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${ICONS.close}</button></span>`)
+    .join('');
+}
+
+function kpiCards(cards) {
+  $('kpis').innerHTML = cards
+    .map(([label, value, sub]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
+    .join('');
+}
+
+function renderKpis(t, range) {
+  kpiCards([
+    ['Оформлено триалов', num(t.started), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
+    ['Сконвертилось', pct(t.rate_retry), `${num(t.paid_retry)} из ${num(t.started)}`],
+    ['С первой попытки', pct(t.rate_first), `${num(t.paid_first)} из ${num(t.started)}`],
+    ['Проходимость', pct(t.approval_rate), `${num(t.approved)} из ${num(t.attempts)} попыток`],
+    ['Decline rate', pct(t.decline_rate), `${num(t.attempts - t.approved)} отказов`],
+    ['Рефанды', pct(t.refund_rate), `${num(t.refunded)} из ${num(t.paid_retry)} оплат`],
+  ]);
+}
+
+function renderTurnoverKpis(t, range) {
+  kpiCards([
+    ['Оборот', usd(t.gross), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
+    ['Оборот без рефандов', usd(t.net), 'оборот − рефанды'],
+    ['Рефанды', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} оборота` : '—'],
+    ['Платежей', num(t.payments), 'успешных списаний'],
+    ['Средний чек', usdAverage(t.average), 'оборот ÷ платежи'],
+  ]);
+}
+
+function renderTabs() {
+  $('view').innerHTML = MODES[state.mode].tabs
+    .map(([v, title]) => `<button data-v="${v}" class="${v === state.view ? 'on' : ''}">${title}</button>`)
+    .join('');
+  $('granularity').hidden = state.view !== 'time';
+  const hints = isTurnover()
+    ? { time: 'Оборот — все успешные списания по дню платежа, в долларах' }
+    : {
+        time: 'Сконвертилось — оплатили первый платный период в течение 30 дней после конца триала',
+        decline_reason: 'Отклонённые попытки списания первого платежа, по причинам',
+      };
+  $('hint').textContent = hints[state.view] ?? 'Нажмите на строку, чтобы посмотреть её динамику; на заголовок — чтобы отсортировать';
+}
+
+// --- таблицы: колонки описываются один раз, сортировка — по клику на заголовок
+function periodLabel(p) {
+  if (state.granularity === 'day') return ddmmyyyy(p.period);
+  if (state.granularity === 'week') return `${ddmm(p.period)} — ${ddmm(p.period_end)}`;
+  const name = monthName(p.period);
+  return p.period.endsWith('-01') && isMonthEnd(p.period_end) ? name : `${name} (${ddmm(p.period)} — ${ddmm(p.period_end)})`;
+}
+
+const pendingCell = (html, final, title = '') => `<td class="${final ? '' : 'pending'}" title="${title}">${final ? '' : '≈ '}${html}</td>`;
+const shareCell = (share) =>
+  `<td><span class="bar-cell"><span class="bar"><span style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span>${pct(share)}</span></td>`;
+
+const periodColumn = (title) => ({ key: 'period', title, text: true, sort: (p) => p.period, cell: (p) => `<td>${periodLabel(p)}</td>` });
+const valueColumn = () => ({
+  key: 'value',
+  title: DIMENSION_TITLES[state.view],
+  text: true,
+  sort: (r) => (r.value === null ? null : valueLabel(state.view, r.value)),
+  cell: (r) => {
+    const label = esc(valueLabel(state.view, r.value));
+    return `<td title="${label}">${label}</td>`;
+  },
+});
+const CONVERSION_COLUMNS = [
+  { key: 'started', title: 'Оформлено', sort: (p) => p.started, cell: (p) => `<td>${num(p.started)}</td>` },
+  { key: 'rate_retry', title: 'Сконвертилось', sort: (p) => p.rate_retry, cell: (p) => pendingCell(`${pct(p.rate_retry)}<span class="n">${num(p.paid_retry)}</span>`, p.final_retry) },
+  { key: 'rate_first', title: 'С 1-й попытки', sort: (p) => p.rate_first, cell: (p) => pendingCell(`${pct(p.rate_first)}<span class="n">${num(p.paid_first)}</span>`, p.final_first) },
+  { key: 'approval_rate', title: 'Проходимость', sort: (p) => p.approval_rate, cell: (p) => pendingCell(pct(p.approval_rate), p.final_retry, `${num(p.approved)} из ${num(p.attempts)} попыток`) },
+  { key: 'decline_rate', title: 'Decline', sort: (p) => p.decline_rate, cell: (p) => pendingCell(pct(p.decline_rate), p.final_retry, `${num(p.attempts - p.approved)} отказов`) },
+  { key: 'refund_rate', title: 'Рефанды', sort: (p) => p.refund_rate, cell: (p) => pendingCell(pct(p.refund_rate), p.final_retry, `${num(p.refunded)} из ${num(p.paid_retry)} оплат`) },
+];
+const TURNOVER_COLUMNS = [
+  { key: 'gross', title: 'Оборот', sort: (p) => p.gross, cell: (p) => `<td>${usd(p.gross)}</td>` },
+  { key: 'payments', title: 'Платежей', sort: (p) => p.payments, cell: (p) => `<td>${num(p.payments)}</td>` },
+  { key: 'average', title: 'Средний чек', sort: (p) => p.average, cell: (p) => `<td>${usdAverage(p.average)}</td>` },
+  { key: 'refunded', title: 'Рефанды', sort: (p) => p.refunded, cell: (p) => `<td>${usd(p.refunded)}</td>` },
+  { key: 'net', title: 'Без рефандов', sort: (p) => p.net, cell: (p) => `<td>${usd(p.net)}</td>` },
+];
+const SHARE_COLUMN = { key: 'share', title: 'Доля в обороте', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
+const REASON_COLUMNS = [
+  { key: 'reason', title: 'Причина отказа', text: true, sort: (r) => r.reason, cell: (r) => `<td>${esc(r.reason)}</td>` },
+  { key: 'count', title: 'Отказов', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
+  { key: 'share', title: 'Доля от всех отказов', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
+];
+
+// Без выбранной сортировки: динамика — свежие дни сверху, разбивки — как отдал сервер (по главной метрике)
+const defaultSort = () => (state.view === 'time' ? { key: 'period', dir: 'desc' } : null);
+
+function sortRows(rows, columns) {
+  const sort = state.sort ?? defaultSort();
+  const column = sort && columns.find((c) => c.key === sort.key);
+  if (!column) return rows;
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const x = column.sort(a);
+    const y = column.sort(b);
+    if (x === null || y === null) return Number(x === null) - Number(y === null); // пустые — всегда внизу
+    return (typeof x === 'string' ? x.localeCompare(y, 'ru') : x - y) * dir;
+  });
+}
+
+let table = null; // текущие колонки и строки — для пересортировки без запроса
+
+function renderTable(columns, rows, { link = false, limit = false, empty = 'Нет данных за этот период' } = {}) {
+  table = { columns, rows, link, limit, empty };
+  const sort = state.sort ?? defaultSort();
+  const sorted = sortRows(rows, columns);
+  const shown = limit && !state.showAll ? sorted.slice(0, ROW_LIMIT) : sorted;
+  $('thead').innerHTML = `<tr>${columns
+    .map((c) => {
+      const on = sort?.key === c.key;
+      const arrow = on && sort.dir === 'asc' ? '↑' : '↓';
+      return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sort" data-sort="${c.key}">${c.title}<span class="arrow">${arrow}</span></button></th>`;
+    })
+    .join('')}</tr>`;
+  $('rows').innerHTML =
+    shown
+      .map((r) => `<tr${link ? ` class="link" data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}</tr>`)
+      .join('') || `<tr><td colspan="${columns.length}" class="muted">${empty}</td></tr>`;
+  $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
+  $('show-all').textContent = `Показать все (${num(rows.length)})`;
+}
+
+function renderView(data) {
+  const isTime = state.view === 'time';
+  $('charts').hidden = !isTime || isTurnover();
+  $('turnover-charts').hidden = !isTime || !isTurnover();
+  const timeHead = (payment) => ({ day: payment ? 'Дата платежа' : 'Дата оформления', week: 'Неделя', month: 'Месяц' })[state.granularity];
+
+  if (isTurnover()) {
+    if (isTime) {
+      renderTable([periodColumn(timeHead(true)), ...TURNOVER_COLUMNS], data.series);
+      renderTurnoverChart(data.series);
+    } else {
+      renderTable([valueColumn(), SHARE_COLUMN, ...TURNOVER_COLUMNS], data.breakdown, { link: true, limit: true, empty: 'Нет платежей за этот период' });
+    }
+    return;
+  }
+  if (isTime) {
+    renderTable([periodColumn(timeHead(false)), ...CONVERSION_COLUMNS], data.series);
+    renderCharts(data.series);
+  } else if (state.view === 'decline_reason') {
+    renderTable(REASON_COLUMNS, data.reasons, { empty: 'Отказов за этот период нет' });
+  } else {
+    renderTable([valueColumn(), ...CONVERSION_COLUMNS], data.breakdown, { link: true, limit: true });
+  }
+}
+
+// --- графики (под таблицей)
+function chartBase() {
+  const muted = css('--muted');
+  const grid = css('--grid');
+  for (const chart of Object.values(charts)) chart.destroy();
+  charts = {};
+  return {
+    muted,
+    grid,
+    x: { grid: { display: false }, border: { color: grid }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 16 } },
+    common: { animation: false, responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false } },
+  };
+}
+const chartLabels = (series) => series.map((p) => (state.granularity === 'month' ? monthName(p.period) : ddmm(p.period)));
+const chartTooltip = (series, label) => ({ padding: 10, cornerRadius: 8, callbacks: { title: (items) => periodLabel(series[items[0].dataIndex]), label } });
+
+function renderCharts(series) {
+  const { muted, grid, x, common } = chartBase();
+  const toPct = (r) => (r === null ? null : +(r * 100).toFixed(1));
+  const dashed = (key) => (ctx) => (series[ctx.p1DataIndex][key] ? undefined : [5, 4]);
+  const line = (label, key, finalKey, color) => ({
+    label, data: series.map((p) => toPct(p[key])), borderColor: color, backgroundColor: color,
+    borderWidth: 2, pointRadius: series.length > 31 ? 0 : 3, pointHoverRadius: 5, tension: 0.25, spanGaps: true,
+    segment: { borderDash: dashed(finalKey) },
+  });
+  charts.rate = new Chart($('rate-chart'), {
+    type: 'line',
+    data: {
+      labels: chartLabels(series),
+      datasets: [line('Сконвертилось', 'rate_retry', 'final_retry', css('--s-converted')), line('С первой попытки', 'rate_first', 'final_first', css('--s-first'))],
+    },
+    options: {
+      ...common,
+      plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` ${c.dataset.label}: ${c.raw ?? '—'}%`) },
+      scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => `${v}%` } } },
+    },
+  });
+  charts.count = new Chart($('count-chart'), {
+    type: 'bar',
+    data: {
+      labels: chartLabels(series),
+      datasets: [{ label: 'Оформлено триалов', data: series.map((p) => p.started), backgroundColor: css('--s-started'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+    },
+    options: {
+      ...common,
+      plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` Оформлено: ${num(c.raw)}`) },
+      scales: { x, y: { grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => num(v) } } },
+    },
+  });
+}
+
+function renderTurnoverChart(series) {
+  const { muted, grid, x, common } = chartBase();
+  charts.turnover = new Chart($('turnover-chart'), {
+    type: 'bar',
+    data: {
+      labels: chartLabels(series),
+      datasets: [{ label: 'Оборот', data: series.map((p) => p.gross / 100), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+    },
+    options: {
+      ...common,
+      plugins: {
+        legend: { display: false },
+        tooltip: chartTooltip(series, (c) => ` Оборот: ${usd(series[c.dataIndex].gross)} · платежей: ${num(series[c.dataIndex].payments)}`),
+      },
+      scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdCompact.format(v) } } },
+    },
+  });
+}
+
+// --- выпадающие окна: список значений фильтра и выбор периода
+let popover = null;
+
+function openPopover(anchor, build) {
+  const toggle = popover?.anchor === anchor; // повторный клик по той же кнопке — закрыть
+  closePopover();
+  if (toggle) return;
+  const el = document.createElement('div');
+  el.className = 'popover';
+  el.setAttribute('role', 'dialog');
+  document.body.append(el);
+  popover = { el, anchor };
+  anchor.setAttribute('aria-expanded', 'true');
+  build(el);
+  placePopover();
+}
+
+// Под кнопкой; не влезает справа или снизу — сдвигаем ровно настолько, чтобы влезло
+function placePopover() {
+  if (!popover) return;
+  const { el, anchor } = popover;
+  const r = anchor.getBoundingClientRect();
+  const left = Math.max(12, Math.min(r.left, innerWidth - 12 - el.offsetWidth));
+  const top = Math.max(12, Math.min(r.bottom + 6, innerHeight - 12 - el.offsetHeight));
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function closePopover() {
+  if (!popover) return;
+  popover.anchor.setAttribute('aria-expanded', 'false');
+  popover.el.remove();
+  popover = null;
+}
+
+function openFilter(anchor, dimension) {
+  const values = currentValues()[dimension] ?? [];
+  const current = state.filters[dimension] ?? '';
+  const options = [
+    { value: '', name: 'Все' },
+    ...values.filter((v) => v.value !== null).map((v) => ({ value: v.value, name: valueLabel(dimension, v.value), count: v.count })),
+    ...values.filter((v) => v.value === null).map((v) => ({ value: 'none', name: valueLabel(dimension, null), count: v.count })),
+  ];
+  if (current && !options.some((o) => o.value === current)) options.push({ value: current, name: valueLabel(dimension, current) });
+
+  const choose = (value) => {
+    closePopover();
+    if (value) state.filters[dimension] = value;
+    else delete state.filters[dimension];
+    state.showAll = false;
+    load();
+  };
+
+  openPopover(anchor, (el) => {
+    el.style.width = `${Math.max(anchor.offsetWidth, 280)}px`;
+    const withSearch = options.length > 8;
+    el.innerHTML = `${withSearch ? `<input class="search" placeholder="Поиск: ${DIMENSION_TITLES[dimension].toLowerCase()}" aria-label="Поиск" />` : ''}<div class="options" role="listbox"></div>`;
+    const list = el.querySelector('.options');
+    const draw = (text = '') => {
+      const q = text.trim().toLowerCase();
+      const shown = options.filter((o) => !q || o.name.toLowerCase().includes(q) || o.value.toLowerCase().includes(q));
+      list.innerHTML =
+        shown
+          .map((o) => `<button class="option${o.value === current ? ' on' : ''}" role="option" data-value="${esc(o.value)}"><span class="name">${esc(o.name)}</span>${o.count ? `<span class="count">${num(o.count)}</span>` : ''}</button>`)
+          .join('') || '<div class="empty">Ничего не найдено</div>';
+    };
+    draw();
+    list.addEventListener('click', (event) => {
+      const option = event.target.closest('.option');
+      if (option) choose(option.dataset.value);
+    });
+    const search = el.querySelector('.search');
+    if (search) {
+      search.addEventListener('input', () => draw(search.value));
+      search.addEventListener('keydown', (event) => {
+        const first = list.querySelector('.option');
+        if (event.key === 'Enter' && first) choose(first.dataset.value);
+      });
+      requestAnimationFrame(() => search.focus());
+    } else {
+      requestAnimationFrame(() => (list.querySelector('.on') ?? list.querySelector('.option'))?.focus());
+    }
+  });
+}
+
+// Период: пресеты слева, календарь справа — два клика по дням задают свой период
+function openPeriod(anchor) {
+  if (!lastData) return;
+  const { range, history_from: first, today } = lastData;
+  let month = range.to.slice(0, 7);
+  let start = null;
+
+  const choose = (patch) => {
+    closePopover();
+    Object.assign(state, patch, { showAll: false });
+    load();
+  };
+
+  openPopover(anchor, (el) => {
+    const draw = () => {
+      const [y, m] = month.split('-').map(Number);
+      const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const offset = (new Date(Date.UTC(y, m - 1, 1)).getUTCDay() + 6) % 7;
+      const [from, to] = start ? [start, start] : [range.from, range.to];
+      const cells = [];
+      for (let i = 1; i <= days; i++) {
+        const day = `${month}-${String(i).padStart(2, '0')}`;
+        const cls = ['day', day === from || day === to ? 'edge' : day > from && day < to ? 'in' : '', day === today ? 'today' : ''].join(' ');
+        cells.push(`<button class="${cls}" data-day="${day}" ${day < first || day > today ? 'disabled' : ''}>${i}</button>`);
+      }
+      el.innerHTML = `
+        <div class="range">
+          <div class="presets">${PRESETS.map(([v, name]) => `<button class="option${state.preset === v ? ' on' : ''}" data-preset="${v}"><span class="name">${name}</span></button>`).join('')}</div>
+          <div class="calendar">
+            <div class="cal-head">
+              <button class="btn" data-month="${addMonths(month, -1)}" aria-label="Предыдущий месяц" ${month <= first.slice(0, 7) ? 'disabled' : ''}>${ICONS.left}</button>
+              <span>${MONTHS[m - 1][0].toUpperCase() + MONTHS[m - 1].slice(1)} ${y}</span>
+              <button class="btn" data-month="${addMonths(month, 1)}" aria-label="Следующий месяц" ${month >= today.slice(0, 7) ? 'disabled' : ''}>${ICONS.right}</button>
+            </div>
+            <div class="cal-grid">${WEEKDAYS.map((d) => `<span class="dow">${d}</span>`).join('')}${'<span></span>'.repeat(offset)}${cells.join('')}</div>
+            <div class="cal-hint">${start ? `С ${ddmmyyyy(start)} — выберите вторую дату` : 'Выберите первую дату или период слева'}</div>
+          </div>
+        </div>`;
+    };
+    el.addEventListener('click', (event) => {
+      const preset = event.target.closest('[data-preset]')?.dataset.preset;
+      const nav = event.target.closest('[data-month]')?.dataset.month;
+      const day = event.target.closest('[data-day]')?.dataset.day;
+      if (preset) return choose({ preset });
+      if (nav) {
+        month = nav;
+        draw();
+      } else if (day && !start) {
+        start = day;
+        draw();
+      } else if (day) {
+        const [from, to] = start <= day ? [start, day] : [day, start];
+        choose({ preset: 'custom', from, to });
+      }
+    });
+    draw();
+  });
+}
+
+// --- панель выборки на узком экране выезжает слева
+const openSidebar = () => {
+  document.body.classList.add('sidebar-open');
+  $('sidebar-overlay').hidden = false;
+};
+const closeSidebar = () => {
+  document.body.classList.remove('sidebar-open');
+  $('sidebar-overlay').hidden = true;
+};
+
+// --- обработчики
+// Смена экрана: фильтры, которых у него нет (аккаунт ↔ MID), снимаются; вкладка, которой нет, — на динамику
+$('mode').addEventListener('click', (event) => {
+  const value = event.target.closest('button')?.dataset.v;
+  if (!value || value === state.mode) return;
+  state.mode = value;
+  state.filters = Object.fromEntries(Object.entries(state.filters).filter(([d]) => dimensions().includes(d)));
+  if (!MODES[value].tabs.some(([v]) => v === state.view)) state.view = 'time';
+  state.sort = null;
+  state.showAll = false;
+  load();
+});
+
+for (const id of ['provider', 'granularity']) {
+  $(id).addEventListener('click', (event) => {
+    const value = event.target.closest('button')?.dataset.v;
+    if (!value) return;
+    state[id] = value;
+    state.showAll = false;
+    load();
+  });
+}
+
+$('view').addEventListener('click', (event) => {
+  const value = event.target.closest('button')?.dataset.v;
+  if (!value || value === state.view) return;
+  state.view = value;
+  state.sort = null; // у вкладок разные колонки
+  state.showAll = false;
+  load();
+});
+
+$('period').addEventListener('click', (event) => openPeriod(event.currentTarget));
+
+$('filters').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-dimension]');
+  if (button) openFilter(button, button.dataset.dimension);
+});
+
+$('reset-filters').addEventListener('click', () => {
+  state.filters = {};
+  state.showAll = false;
+  load();
+});
+
+$('chips').addEventListener('click', (event) => {
+  const dimension = event.target.closest('button')?.dataset.remove;
+  if (!dimension) return;
+  delete state.filters[dimension];
+  load();
+});
+
+$('thead').addEventListener('click', (event) => {
+  const key = event.target.closest('[data-sort]')?.dataset.sort;
+  if (!key || !table) return;
+  const current = state.sort ?? defaultSort();
+  const column = table.columns.find((c) => c.key === key);
+  // повторный клик меняет направление; новая колонка: текст — по алфавиту, числа — от большего к меньшему
+  state.sort = current?.key === key ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: column.text ? 'asc' : 'desc' };
+  saveUrl();
+  renderTable(table.columns, table.rows, table);
+});
+
+$('rows').addEventListener('click', (event) => {
+  const row = event.target.closest('tr.link');
+  if (!row || !dimensions().includes(state.view)) return;
+  state.filters[state.view] = row.dataset.value;
+  state.view = 'time';
+  state.sort = null;
+  load();
+});
+
+$('show-all').addEventListener('click', () => {
+  state.showAll = true;
+  if (table) renderTable(table.columns, table.rows, table);
+});
+
+$('refresh').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  if (button.disabled) return;
+  button.disabled = true; // сразу, не дожидаясь ответа — без двойного запуска
+  const res = await api('/api/sync', { method: 'POST' });
+  if (res.status === 403) $('status').textContent = 'Синк запускает только админ';
+  load();
+});
+
+$('menu-open').addEventListener('click', openSidebar);
+$('sidebar-overlay').addEventListener('click', closeSidebar);
+
+// Тема: светлая или тёмная; выбор хранится в браузере
+const markTheme = () => document.querySelectorAll('#theme button').forEach((b) => b.classList.toggle('on', b.dataset.v === document.documentElement.dataset.theme));
+$('theme').addEventListener('click', (event) => {
+  const value = event.target.closest('button')?.dataset.v;
+  if (!value) return;
+  document.documentElement.dataset.theme = value;
+  try {
+    localStorage.setItem('theme', value);
+  } catch {}
+  markTheme();
+  if (lastData && state.view === 'time') (isTurnover() ? renderTurnoverChart : renderCharts)(lastData.series); // цвета графиков берутся из темы
+});
+
+document.addEventListener('mousedown', (event) => {
+  if (popover && !popover.el.contains(event.target) && !popover.anchor.contains(event.target)) closePopover();
+});
+addEventListener('resize', closePopover);
+
+// «Как считается»: тексты — public/metrics.md и public/data-sources.md, один источник для дашборда и репозитория
+const helpCache = {};
+let helpTab = 'metrics';
+async function showHelpTab(tab) {
+  helpTab = tab;
+  document.querySelectorAll('#help-tabs button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.v === tab);
+    b.setAttribute('aria-selected', String(b.dataset.v === tab));
+  });
+  const body = $('help-body');
+  try {
+    if (!helpCache[tab]) {
+      body.textContent = 'Загрузка…';
+      const res = await api(`/${tab}.md`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      helpCache[tab] = marked.parse(await res.text());
+    }
+    if (helpTab === tab) body.innerHTML = helpCache[tab];
+    $('help').scrollTop = 0;
+  } catch (error) {
+    body.textContent = `Не удалось загрузить описание: ${error.message}`;
+  }
+}
+function openHelp() {
+  $('help').hidden = false;
+  $('help-overlay').hidden = false;
+  $('help-close').focus();
+  showHelpTab(helpTab);
+}
+function closeHelp() {
+  $('help').hidden = true;
+  $('help-overlay').hidden = true;
+  $('help-open').focus();
+}
+$('help-open').addEventListener('click', openHelp);
+$('help-tabs').addEventListener('click', (event) => {
+  const tab = event.target.closest('button')?.dataset.v;
+  if (tab) showHelpTab(tab);
+});
+$('help-close').addEventListener('click', closeHelp);
+$('help-overlay').addEventListener('click', closeHelp);
+
+// Esc закрывает верхнее: выпадающее окно, «Как считается», панель выборки
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (popover) closePopover();
+  else if (!$('help').hidden) closeHelp();
+  else if (document.body.classList.contains('sidebar-open')) closeSidebar();
+});
+
+markTheme();
+load();

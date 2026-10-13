@@ -101,6 +101,21 @@ export function getTurnover(db: Db, o: TurnoverOptions & { granularity: Granular
   return { totals: withTotals(series.reduce<Sums>(add, zero())), series };
 }
 
+// Значения измерений для фильтров (вся история провайдера) — по убыванию числа платежей; null — «не определено»
+export function getTurnoverDimensionValues(db: Db, provider: ProviderFilter) {
+  return Object.fromEntries(
+    TURNOVER_DIMENSIONS.map((d) => [
+      d,
+      db
+        .prepare(
+          `SELECT ${DIMENSION_SQL[d]} AS value, COUNT(*) AS count FROM payments p
+           WHERE @provider = 'all' OR p.provider = @provider GROUP BY value ORDER BY count DESC LIMIT 1000`,
+        )
+        .all({ provider }) as unknown as { value: string | null; count: number }[],
+    ]),
+  );
+}
+
 // Разбивка по измерению: по убыванию оборота, доля — от оборота периода; «не определено» — всегда в конце
 export function getTurnoverBreakdown(db: Db, o: TurnoverOptions, dimension: TurnoverDimension): TurnoverRow[] {
   const rows = sums(db, o, DIMENSION_SQL[dimension]);

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Вход · Billing Dashboard</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/app.css" />
+  <script>
+    // Тема — как на дашборде: выбор из браузера, без выбора — как в системе
+    let theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    try {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'light' || saved === 'dark') theme = saved;
+    } catch {}
+    document.documentElement.dataset.theme = theme;
+  </script>
+</head>
+<body>
+<main class="login">
+  <form class="login-card" method="post" action="/login">
+    <div class="brand">
+      <img class="brand-mark" src="/assets/favicon.svg" alt="" />
+      <div class="brand-name">Billing Dashboard</div>
+    </div>
+    <label>Логин <input name="user" autocomplete="username" required autofocus /></label>
+    <label>Пароль <input name="password" type="password" autocomplete="current-password" required /></label>
+    <p class="login-error" id="error" hidden>Неверный логин или пароль</p>
+    <input type="hidden" name="next" id="next" value="/" />
+    <button class="btn primary" type="submit">Войти</button>
+  </form>
+</main>
+<script>
+  // после входа — обратно на ссылку, с которой пришли
+  const query = new URLSearchParams(location.search);
+  document.getElementById('error').hidden = !query.has('error');
+  document.getElementById('next').value = query.get('next') ?? '/';
+</script>
+</body>
+</html>
