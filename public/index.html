@@ -177,11 +177,7 @@
     }
     .kpi .label { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .kpi .value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 4px; }
-    .kpi .sub { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
-    .pill {
-      font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--surface-sunken);
-      color: var(--text-2); border: 1px solid var(--border); white-space: nowrap;
-    }
+    .kpi .sub { font-size: 12px; color: var(--muted); }
 
     /* вкладки */
     .tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 2px; scrollbar-width: none; }
@@ -340,7 +336,7 @@
           <div class="legend">
             <span><i style="background: var(--s-converted)"></i>Сконвертилось</span>
             <span><i style="background: var(--s-first)"></i>С первой попытки</span>
-            <span><i class="dashed"></i>ещё растёт</span>
+            <span><i class="dashed"></i>≈ неокончательно</span>
           </div>
         </div>
         <div class="chart"><canvas id="rate-chart" aria-label="Конверсия триалов в платные, проценты"></canvas></div>
@@ -517,18 +513,17 @@
   }
 
   function renderKpis(t, range) {
-    const growing = (final) => (final ? '' : '<span class="pill" title="По периоду ещё идут триалы или ретраи — цифра будет расти">ещё растёт</span>');
     const declined = t.attempts - t.approved;
     const cards = [
-      ['Оформлено триалов', num(t.started), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`, ''],
-      ['Сконвертилось', pct(t.rate_retry), `${num(t.paid_retry)} из ${num(t.started)}`, growing(t.final_retry)],
-      ['С первой попытки', pct(t.rate_first), `${num(t.paid_first)} из ${num(t.started)}`, growing(t.final_first)],
-      ['Проходимость', pct(t.approval_rate), `${num(t.approved)} из ${num(t.attempts)} попыток`, growing(t.final_retry)],
-      ['Decline rate', pct(t.decline_rate), `${num(declined)} отказов`, growing(t.final_retry)],
-      ['Рефанды', pct(t.refund_rate), `${num(t.refunded)} из ${num(t.paid_retry)} оплат`, growing(t.final_retry)],
+      ['Оформлено триалов', num(t.started), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
+      ['Сконвертилось', pct(t.rate_retry), `${num(t.paid_retry)} из ${num(t.started)}`],
+      ['С первой попытки', pct(t.rate_first), `${num(t.paid_first)} из ${num(t.started)}`],
+      ['Проходимость', pct(t.approval_rate), `${num(t.approved)} из ${num(t.attempts)} попыток`],
+      ['Decline rate', pct(t.decline_rate), `${num(declined)} отказов`],
+      ['Рефанды', pct(t.refund_rate), `${num(t.refunded)} из ${num(t.paid_retry)} оплат`],
     ];
     document.getElementById('kpis').innerHTML = cards
-      .map(([label, value, sub, pill]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub"><span>${sub}</span>${pill}</div></div>`)
+      .map(([label, value, sub]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
       .join('');
   }
 
