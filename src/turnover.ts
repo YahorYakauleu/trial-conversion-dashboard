@@ -1,5 +1,5 @@
 import type { Db } from './db.js';
-import { bucketDay, bucketSql, mondayOf, periodSql, type Granularity, type ProviderFilter, type TimeZones } from './metrics.js';
+import { bucketDay, bucketSql, dimensionFilterSql, mondayOf, periodSql, type Granularity, type ProviderFilter, type TimeZones } from './metrics.js';
 import { addDays } from './time.js';
 
 // Оборот — все успешные платежи по дате платежа (не по когортам триалов). Суммы — в центах USD.
@@ -13,8 +13,8 @@ const DIMENSION_SQL: Record<TurnoverDimension, string> = {
   bank: 'p.bank',
   card_brand: 'p.card_brand',
 };
-// Фильтр по измерению: значение или 'none' — «не определено»
-export type TurnoverFilters = Partial<Record<TurnoverDimension, string>>;
+// Фильтр по измерению — список значений, 'none' — «не определено» (как у триалов)
+export type TurnoverFilters = Partial<Record<TurnoverDimension, string[]>>;
 
 interface Sums {
   payments: number;
@@ -53,21 +53,11 @@ const withTotals = <T extends Sums>(s: T): T & TurnoverTotals => ({
   average: s.payments === 0 ? null : Math.round(s.gross / s.payments),
 });
 
-// node:sqlite не принимает лишние именованные параметры — параметры фильтров добавляются только используемые
 function paymentFilter(o: TurnoverOptions) {
   const period = periodSql('p', 'p.paid_at', o);
-  const params: Record<string, string | number> = { ...period.params, provider: o.provider };
-  const clauses = [period.sql, "(@provider = 'all' OR p.provider = @provider)"];
-  for (const dimension of TURNOVER_DIMENSIONS) {
-    const value = o.filters[dimension];
-    if (!value) continue;
-    if (value === 'none') {
-      clauses.push(`${DIMENSION_SQL[dimension]} IS NULL`);
-    } else {
-      clauses.push(`${DIMENSION_SQL[dimension]} = @f_${dimension}`);
-      params[`f_${dimension}`] = value;
-    }
-  }
+  const dimensions = dimensionFilterSql(DIMENSION_SQL, o.filters);
+  const params: Record<string, string | number> = { ...period.params, ...dimensions.params, provider: o.provider };
+  const clauses = [period.sql, "(@provider = 'all' OR p.provider = @provider)", ...dimensions.clauses];
   return { sql: clauses.join(' AND '), params };
 }
 

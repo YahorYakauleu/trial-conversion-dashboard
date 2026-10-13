@@ -55,6 +55,7 @@ const ICONS = {
   calendar: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>'),
   left: svg('<path d="m15 18-6-6 6-6"/>'),
   right: svg('<path d="m9 18 6-6-6-6"/>'),
+  check: svg('<path d="M5 12.5 10 17.5 19 7"/>', 3),
 };
 
 // --- состояние из адреса страницы
@@ -69,7 +70,8 @@ const state = {
   preset: pick(params.get('period'), [...PRESETS.map(([v]) => v), 'custom'], params.get('from') ? 'custom' : 'all'),
   from: params.get('from') ?? '',
   to: params.get('to') ?? '',
-  filters: Object.fromEntries(MODES[initialMode].dimensions.filter((d) => params.get(d)).map((d) => [d, params.get(d)])),
+  // фильтр — список значений: в одном фильтре они складываются (ИЛИ), разные фильтры сужают выборку (И)
+  filters: Object.fromEntries(MODES[initialMode].dimensions.filter((d) => params.getAll(d).length).map((d) => [d, params.getAll(d)])),
   sort: parseSort(params.get('sort')),
   showAll: false,
 };
@@ -144,7 +146,7 @@ function query() {
     q.set('from', state.from);
     q.set('to', state.to);
   }
-  for (const [dimension, value] of Object.entries(state.filters)) q.set(dimension, value);
+  for (const [dimension, values] of Object.entries(state.filters)) for (const value of values) q.append(dimension, value);
   return q;
 }
 
@@ -247,9 +249,11 @@ function renderSidebar(data) {
   $('period').innerHTML = `<span class="text"><span class="label">${presetName}</span><span class="value">${ddmmyyyy(data.range.from)} — ${ddmmyyyy(data.range.to)}</span></span>${ICONS.calendar}`;
   $('filters').innerHTML = dimensions()
     .map((d) => {
-      const value = state.filters[d];
-      return `<button class="picker${value ? ' active' : ''}" data-dimension="${d}" aria-haspopup="listbox">
-        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value" title="${value ? esc(valueLabel(d, value)) : ''}">${value ? esc(valueLabel(d, value)) : 'Все'}</span></span>${ICONS.chevron}</button>`;
+      const labels = (state.filters[d] ?? []).map((v) => valueLabel(d, v));
+      // первое значение названием, остальные — счётчиком «+N»: он не обрезается, даже если название длинное
+      const more = labels.length > 1 ? `<span class="more-count">+${labels.length - 1}</span>` : '';
+      return `<button class="picker${labels.length ? ' active' : ''}" data-dimension="${d}" aria-haspopup="listbox" title="${esc(labels.join('\n'))}">
+        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value">${esc(labels[0] ?? 'Все')}</span></span>${more}${ICONS.chevron}</button>`;
     })
     .join('');
   $('reset-filters').hidden = Object.keys(state.filters).length === 0;
@@ -273,7 +277,12 @@ function renderHeader(data) {
   button.classList.toggle('spinning', data.sync_running);
   button.querySelector('span').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
   $('chips').innerHTML = Object.entries(state.filters)
-    .map(([d, v]) => `<span class="chip" title="${esc(valueLabel(d, v))}">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${ICONS.close}</button></span>`)
+    .flatMap(([d, values]) =>
+      values.map(
+        (v) =>
+          `<span class="chip" title="${esc(valueLabel(d, v))}">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" data-value="${esc(v)}" aria-label="Убрать фильтр">${ICONS.close}</button></span>`,
+      ),
+    )
     .join('');
 }
 
@@ -499,7 +508,8 @@ function renderTurnoverChart(series) {
 // --- выпадающие окна: список значений фильтра и выбор периода
 let popover = null;
 
-function openPopover(anchor, build) {
+// onClose — после закрытия любым способом: кнопкой, кликом мимо, Esc, открытием другого окна
+function openPopover(anchor, build, onClose = () => {}) {
   const toggle = popover?.anchor === anchor; // повторный клик по той же кнопке — закрыть
   closePopover();
   if (toggle) return;
@@ -507,7 +517,7 @@ function openPopover(anchor, build) {
   el.className = 'popover';
   el.setAttribute('role', 'dialog');
   document.body.append(el);
-  popover = { el, anchor };
+  popover = { el, anchor, onClose };
   anchor.setAttribute('aria-expanded', 'true');
   build(el);
   placePopover();
@@ -526,63 +536,86 @@ function placePopover() {
 
 function closePopover() {
   if (!popover) return;
-  popover.anchor.setAttribute('aria-expanded', 'false');
-  popover.el.remove();
+  const { el, anchor, onClose } = popover;
+  anchor.setAttribute('aria-expanded', 'false');
+  el.remove();
   popover = null;
+  onClose();
 }
 
+// Фильтр с несколькими значениями: галочки отмечаются сразу, а данные пересчитываются, когда окно закрыли
 async function openFilter(anchor, dimension) {
   const values = (await loadValues(lastData?.data_version))[dimension] ?? [];
-  const current = state.filters[dimension] ?? '';
+  const initial = state.filters[dimension] ?? [];
+  const selected = new Set(initial);
   const options = [
-    { value: '', name: 'Все' },
     ...values.filter((v) => v.value !== null).map((v) => ({ value: v.value, count: v.count })),
     ...values.filter((v) => v.value === null).map((v) => ({ value: 'none', count: v.count })),
   ];
-  if (current && !options.some((o) => o.value === current)) options.push({ value: current });
-  for (const o of options.slice(1)) [o.name, o.sub] = valueParts(dimension, o.value);
+  for (const value of initial) if (!options.some((o) => o.value === value)) options.push({ value });
+  for (const o of options) [o.name, o.sub] = valueParts(dimension, o.value);
 
-  const choose = (value) => {
-    closePopover();
-    if (value) state.filters[dimension] = value;
+  const apply = () => {
+    const next = options.map((o) => o.value).filter((v) => selected.has(v));
+    if (next.length === initial.length && next.every((v) => initial.includes(v))) return; // ничего не поменяли
+    if (next.length) state.filters[dimension] = next;
     else delete state.filters[dimension];
     state.showAll = false;
     load();
   };
 
-  openPopover(anchor, (el) => {
-    el.style.width = `${Math.max(anchor.offsetWidth, options.some((o) => o.sub) ? 360 : 280)}px`; // UUID — целиком
-    const withSearch = options.length > 8;
-    el.innerHTML = `${withSearch ? `<input class="search" placeholder="Поиск: ${DIMENSION_TITLES[dimension].toLowerCase()}" aria-label="Поиск" />` : ''}<div class="options" role="listbox"></div>`;
-    const list = el.querySelector('.options');
-    const draw = (text = '') => {
-      const q = text.trim().toLowerCase();
-      const shown = options.filter((o) => !q || `${o.name} ${o.sub ?? ''} ${o.value}`.toLowerCase().includes(q));
-      list.innerHTML =
-        shown
-          .map(
-            (o) =>
-              `<button class="option${o.value === current ? ' on' : ''}" role="option" data-value="${esc(o.value)}"><span class="name">${esc(o.name)}${o.sub ? `<span class="value-id">${esc(o.sub)}</span>` : ''}</span>${o.count ? `<span class="count">${num(o.count)}</span>` : ''}</button>`,
-          )
-          .join('') || '<div class="empty">Ничего не найдено</div>';
-    };
-    draw();
-    list.addEventListener('click', (event) => {
-      const option = event.target.closest('.option');
-      if (option) choose(option.dataset.value);
-    });
-    const search = el.querySelector('.search');
-    if (search) {
-      search.addEventListener('input', () => draw(search.value));
-      search.addEventListener('keydown', (event) => {
-        const first = list.querySelector('.option');
-        if (event.key === 'Enter' && first) choose(first.dataset.value);
+  openPopover(
+    anchor,
+    (el) => {
+      el.style.width = `${Math.max(anchor.offsetWidth, options.some((o) => o.sub) ? 360 : 280)}px`; // UUID — целиком
+      const withSearch = options.length > 8;
+      el.innerHTML = `
+        ${withSearch ? `<input class="search" placeholder="Поиск: ${DIMENSION_TITLES[dimension].toLowerCase()}" aria-label="Поиск" />` : ''}
+        <div class="options" role="listbox" aria-multiselectable="true"></div>
+        <div class="pop-foot"><button class="link-btn" data-clear>Очистить</button><span class="muted" data-picked></span><button class="btn primary" data-done>Готово</button></div>`;
+      const list = el.querySelector('.options');
+      const search = el.querySelector('.search');
+      const draw = () => {
+        const q = (search?.value ?? '').trim().toLowerCase();
+        const shown = options.filter((o) => !q || `${o.name} ${o.sub ?? ''} ${o.value}`.toLowerCase().includes(q));
+        list.innerHTML =
+          shown
+            .map((o) => {
+              const on = selected.has(o.value);
+              return `<button class="option check${on ? ' on' : ''}" role="option" aria-selected="${on}" data-value="${esc(o.value)}"><span class="box">${ICONS.check}</span><span class="name">${esc(o.name)}${o.sub ? `<span class="value-id">${esc(o.sub)}</span>` : ''}</span>${o.count ? `<span class="count">${num(o.count)}</span>` : ''}</button>`;
+            })
+            .join('') || '<div class="empty">Ничего не найдено</div>';
+        el.querySelector('[data-picked]').textContent = selected.size ? `Выбрано: ${selected.size}` : 'Все';
+      };
+      const toggle = (value) => {
+        if (selected.has(value)) selected.delete(value);
+        else selected.add(value);
+        draw();
+      };
+      draw();
+      el.addEventListener('click', (event) => {
+        const option = event.target.closest('.option');
+        if (option) toggle(option.dataset.value);
+        if (event.target.closest('[data-clear]')) {
+          selected.clear();
+          draw();
+        }
+        if (event.target.closest('[data-done]')) closePopover();
       });
-      requestAnimationFrame(() => search.focus());
-    } else {
-      requestAnimationFrame(() => (list.querySelector('.on') ?? list.querySelector('.option'))?.focus());
-    }
-  });
+      if (search) {
+        search.addEventListener('input', draw);
+        // Enter — отметить первое найденное
+        search.addEventListener('keydown', (event) => {
+          const first = list.querySelector('.option');
+          if (event.key === 'Enter' && first) toggle(first.dataset.value);
+        });
+        requestAnimationFrame(() => search.focus());
+      } else {
+        requestAnimationFrame(() => list.querySelector('.option')?.focus());
+      }
+    },
+    apply,
+  );
 }
 
 // Период: пресеты слева, календарь справа — два клика по дням задают свой период
@@ -701,9 +734,12 @@ $('reset-filters').addEventListener('click', () => {
 });
 
 $('chips').addEventListener('click', (event) => {
-  const dimension = event.target.closest('button')?.dataset.remove;
-  if (!dimension) return;
-  delete state.filters[dimension];
+  const button = event.target.closest('button[data-remove]');
+  if (!button) return;
+  const { remove: dimension, value } = button.dataset;
+  const rest = (state.filters[dimension] ?? []).filter((v) => v !== value);
+  if (rest.length) state.filters[dimension] = rest;
+  else delete state.filters[dimension];
   load();
 });
 
@@ -721,7 +757,7 @@ $('thead').addEventListener('click', (event) => {
 $('rows').addEventListener('click', (event) => {
   const row = event.target.closest('tr.link');
   if (loading || !row || !dimensions().includes(state.view)) return; // строки старой вкладки, пока грузится новая
-  state.filters[state.view] = row.dataset.value;
+  state.filters[state.view] = [row.dataset.value];
   state.view = 'time';
   state.sort = null;
   load();
