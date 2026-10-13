@@ -3,7 +3,7 @@
 Дашборд конверсии триальных подписок в платные для Stripe и Solidgate. Данные берутся напрямую из API провайдеров, складываются в локальную SQLite и обновляются раз в сутки.
 
 **Что считаем** (коротко с примером — [public/metrics.md](public/metrics.md), откуда берутся данные и как связываются — [public/data-sources.md](public/data-sources.md); оба открываются в дашборде по кнопке «Как считается»; решения — в [спеке](docs/specs/2026-10-12-trial-conversion-dashboard-design.md)):
-- **Когорта** — триалы, оформленные в день D по времени `TIMEZONE` (по умолчанию America/New_York — как в Stripe и Campaignswell), начиная с `HISTORY_FROM`. Отменённые во время триала входят в знаменатель.
+- **Когорта** — триалы, оформленные в день D по времени провайдера, как в его кабинете: Stripe — `TIMEZONE` (по умолчанию America/New_York — как в Stripe и Campaignswell), Solidgate — `SOLIDGATE_TIMEZONE` (по умолчанию UTC — как в Solidgate Hub), начиная с `HISTORY_FROM`. Отменённые во время триала входят в знаменатель.
 - **Сконвертилось** — первый платный инвойс оплачен в течение `RETRY_WINDOW_DAYS` (30) дней после конца триала, с любой попытки.
 - **Из них с первой попытки** — оплачен первой автоматической попыткой.
 - Пока по дню ещё идут триалы или ретраи, цифра растёт: в таблице это «≈», на графике — пунктир.
@@ -53,7 +53,7 @@ npm run typecheck
 
 ## Посмотреть базу
 
-Файл `data/dashboard.sqlite` (SQLite) можно открыть в DBeaver или `sqlite3 -readonly`. Время хранится в unix-секундах (`trial_started_at`, `paid_at`, …), а рядом есть вычисляемые колонки с обычной датой по UTC — `trial_started_utc`, `trial_ended_utc`, `paid_utc`, `attempted_utc`, `started_utc`/`finished_utc` у синков, `value_utc` у курсоров. Они не занимают места и считаются при чтении. Сутки в дашборде режутся по `TIMEZONE` (Нью-Йорк), а не по UTC.
+Файл `data/dashboard.sqlite` (SQLite) можно открыть в DBeaver или `sqlite3 -readonly`. Время хранится в unix-секундах (`trial_started_at`, `paid_at`, …), а рядом есть вычисляемые колонки с обычной датой по UTC — `trial_started_utc`, `trial_ended_utc`, `paid_utc`, `attempted_utc`, `started_utc`/`finished_utc` у синков, `value_utc` у курсоров. Они не занимают места и считаются при чтении. Сутки в дашборде режутся по часовому поясу провайдера (Stripe — Нью-Йорк, Solidgate — UTC).
 
 ## Docker
 

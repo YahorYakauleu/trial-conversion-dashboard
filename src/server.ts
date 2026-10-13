@@ -9,6 +9,7 @@ import {
   getBreakdown,
   getDeclineReasons,
   getMetrics,
+  latestDay,
   resolveRange,
   type Dimension,
   type Filters,
@@ -16,7 +17,6 @@ import {
   type ProviderFilter,
 } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
-import { localDay } from './time.js';
 import { getTurnover, getTurnoverBreakdown, TURNOVER_DIMENSIONS, type TurnoverDimension } from './turnover.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
@@ -56,20 +56,21 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
 
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
   //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&account=stripe:corp&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
-  //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки в config.timeZone.
+  //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки провайдера (config.timeZones).
   // Общее для обоих экранов: провайдер, шаг, период (в местных сутках) и статус синка
   const common = (query: Record<string, unknown>) => {
     const now = nowSec();
+    const today = latestDay(now, config.timeZones);
     return {
       now,
       provider: PROVIDERS.find((p) => p === query.provider) ?? 'all',
       granularity: GRANULARITIES.find((g) => g === query.granularity) ?? 'day',
-      range: resolveRange(config.historyFrom, now, config.timeZone, { period: query.period, from: query.from, to: query.to }),
+      range: resolveRange(config.historyFromDay, today, { period: query.period, from: query.from, to: query.to }),
       meta: {
         generated_at: now,
-        time_zone: config.timeZone,
-        history_from: localDay(config.historyFrom, config.timeZone),
-        today: localDay(now, config.timeZone),
+        time_zones: config.timeZones,
+        history_from: config.historyFromDay,
+        today,
         sync_running: isSyncRunning(),
         sync: store.latestRuns(),
       },
@@ -80,7 +81,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const { now, provider, granularity, range, meta } = common(req.query);
     const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
     const filters: Filters = parseFilters(req.query, DIMENSIONS);
-    const options = { provider, filters, now, ...range, timeZone: config.timeZone, retryWindowDays: config.retryWindowDays };
+    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
     const { totals, series } = getMetrics(store.db, { ...options, granularity });
     res.json({
       ...meta,
@@ -100,7 +101,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const { provider, granularity, range, meta } = common(req.query);
     const view = TURNOVER_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
     const filters = parseFilters(req.query, TURNOVER_DIMENSIONS);
-    const options = { provider, filters, ...range, timeZone: config.timeZone };
+    const options = { provider, filters, ...range, timeZones: config.timeZones };
     const { totals, series } = getTurnover(store.db, { ...options, granularity });
     res.json({
       ...meta,
