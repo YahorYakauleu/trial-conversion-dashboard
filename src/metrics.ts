@@ -7,9 +7,12 @@ export const DAY = 86_400;
 const FIRST_ATTEMPT_SETTLE = DAY;
 // Корзины по 15 минут: смещения всех часовых поясов кратны 15 минутам, поэтому корзина целиком
 // лежит в одних местных сутках. Так SQLite отдаёт сотни строк вместо сотен тысяч триалов.
-export const BUCKET = 900;
+const BUCKET = 900;
+const PROVIDERS: Provider[] = ['stripe', 'solidgate'];
 
 export type ProviderFilter = Provider | 'all';
+// Сутки у каждого провайдера свои — как в его кабинете: Stripe — по часовому поясу аккаунта, Solidgate Hub — по UTC
+export type TimeZones = Record<Provider, string>;
 export type Granularity = 'day' | 'week' | 'month';
 export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'custom';
 // Измерения для разбивки и фильтров и их значение в SQL по триалу (алиас t)
@@ -67,7 +70,7 @@ export interface MetricsOptions {
   now: number;
   from: string; // первый день периода (YYYY-MM-DD, местные сутки)
   to: string; // последний день периода включительно
-  timeZone: string;
+  timeZones: TimeZones;
   retryWindowDays: number;
 }
 
@@ -80,16 +83,38 @@ const isDay = (value: unknown): value is string =>
   typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
 const zero = (): Counts => ({ started: 0, paid_first: 0, paid_retry: 0, attempts: 0, approved: 0, refunded: 0 });
 
+// Условие «момент column попал в местные сутки периода» — в часовом поясе провайдера строки (alias — алиас таблицы).
+// node:sqlite не принимает лишние именованные параметры — условия есть для всех провайдеров, параметры используются все.
+export function periodSql(alias: string, column: string, o: { from: string; to: string; timeZones: TimeZones }) {
+  const params: Record<string, number> = {};
+  const byProvider = PROVIDERS.map((p) => {
+    params[`from_${p}`] = localMidnight(o.from, o.timeZones[p]);
+    params[`until_${p}`] = localMidnight(addDays(o.to, 1), o.timeZones[p]);
+    return `(${alias}.provider = '${p}' AND ${column} >= @from_${p} AND ${column} < @until_${p})`;
+  });
+  return { sql: `(${byProvider.join(' OR ')})`, params };
+}
+
+// Ключ корзины вместе с провайдером: корзина переводится в местный день по часовому поясу своего провайдера
+export const bucketSql = (alias: string, column: string) => `${alias}.provider || ':' || ((${column} / ${BUCKET}) * ${BUCKET})`;
+export function bucketDay(key: unknown, timeZones: TimeZones): string {
+  const [provider, bucket] = String(key).split(':');
+  return localDay(Number(bucket), timeZones[provider as Provider]);
+}
+
+// «Сегодня» — самый поздний из местных дней провайдеров: по UTC новые сутки начинаются раньше, чем в Нью-Йорке
+export const latestDay = (now: number, timeZones: TimeZones) => PROVIDERS.map((p) => localDay(now, timeZones[p])).sort().at(-1)!;
+
+// Конец местных суток: у провайдеров он разный — берём самый поздний
+const dayEnd = (day: string, timeZones: TimeZones) => Math.max(...PROVIDERS.map((p) => localMidnight(addDays(day, 1), timeZones[p])));
+
 // Период из адреса страницы: пресет или свои даты, в местных сутках; обрезается по началу истории и сегодняшнему дню.
 // Сегодня — неполный день, но показывается как обычный (его цифры неокончательные, «≈»).
 export function resolveRange(
-  historyFrom: number,
-  now: number,
-  timeZone: string,
+  first: string,
+  today: string,
   query: { period?: unknown; from?: unknown; to?: unknown } = {},
 ): { from: string; to: string } {
-  const first = localDay(historyFrom, timeZone);
-  const today = localDay(now, timeZone);
   const monthStart = (day: string) => `${day.slice(0, 8)}01`;
   const period = typeof query.period === 'string' ? query.period : isDay(query.from) || isDay(query.to) ? 'custom' : 'all';
 
@@ -116,12 +141,9 @@ export function resolveRange(
 // Фильтр по триалам (алиас t): период оформления в местных сутках, провайдер, измерения.
 // node:sqlite не принимает лишние именованные параметры — параметры фильтров добавляются только используемые.
 function trialFilter(o: RangeOptions) {
-  const params: Record<string, string | number> = {
-    from: localMidnight(o.from, o.timeZone),
-    until: localMidnight(addDays(o.to, 1), o.timeZone),
-    provider: o.provider,
-  };
-  const clauses = ['t.trial_started_at >= @from', 't.trial_started_at < @until', "(@provider = 'all' OR t.provider = @provider)"];
+  const period = periodSql('t', 't.trial_started_at', o);
+  const params: Record<string, string | number> = { ...period.params, provider: o.provider };
+  const clauses = [period.sql, "(@provider = 'all' OR t.provider = @provider)"];
   for (const dimension of DIMENSIONS) {
     const value = o.filters[dimension];
     if (!value) continue;
@@ -177,7 +199,7 @@ function finality(db: Db, o: RangeOptions, lastDay: string) {
   const { max_len: maxLength } = db
     .prepare(`SELECT COALESCE(MAX(t.trial_ended_at - t.trial_started_at), 0) AS max_len FROM trials t WHERE ${filter.sql}`)
     .get(filter.params) as { max_len: number };
-  const lastTrialEnd = localMidnight(addDays(lastDay, 1), o.timeZone) + maxLength;
+  const lastTrialEnd = dayEnd(lastDay, o.timeZones) + maxLength;
   return {
     final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,
     final_retry: lastTrialEnd + o.retryWindowDays * DAY <= o.now,
@@ -203,15 +225,15 @@ export function getMetrics(db: Db, o: MetricsOptions): { totals: Totals; series:
 
 function dailyPoints(db: Db, o: MetricsOptions): Point[] {
   const byDay = new Map<string, Counts>();
-  for (const [bucket, counts] of aggregate(db, o, `(t.trial_started_at / ${BUCKET}) * ${BUCKET}`)) {
-    const day = localDay(Number(bucket), o.timeZone);
+  for (const [bucket, counts] of aggregate(db, o, bucketSql('t', 't.trial_started_at'))) {
+    const day = bucketDay(bucket, o.timeZones);
     byDay.set(day, add(byDay.get(day) ?? zero(), counts));
   }
   const { maxLength } = finality(db, o, o.to);
 
   const points: Point[] = [];
   for (let day = o.from; day <= o.to; day = addDays(day, 1)) {
-    const lastTrialEnd = localMidnight(addDays(day, 1), o.timeZone) + maxLength;
+    const lastTrialEnd = dayEnd(day, o.timeZones) + maxLength;
     points.push(
       withRates({
         period: day,

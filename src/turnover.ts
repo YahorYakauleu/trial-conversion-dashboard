@@ -1,6 +1,6 @@
 import type { Db } from './db.js';
-import { BUCKET, mondayOf, type Granularity, type ProviderFilter } from './metrics.js';
-import { addDays, localDay, localMidnight } from './time.js';
+import { bucketDay, bucketSql, mondayOf, periodSql, type Granularity, type ProviderFilter, type TimeZones } from './metrics.js';
+import { addDays } from './time.js';
 
 // Оборот — все успешные платежи по дате платежа (не по когортам триалов). Суммы — в центах USD.
 export const TURNOVER_DIMENSIONS = ['mid', 'country', 'payment_method', 'bank', 'card_brand'] as const;
@@ -42,7 +42,7 @@ export interface TurnoverOptions {
   filters: TurnoverFilters;
   from: string; // первый день периода (местные сутки)
   to: string; // последний день включительно
-  timeZone: string;
+  timeZones: TimeZones;
 }
 
 const zero = (): Sums => ({ payments: 0, gross: 0, refunded: 0 });
@@ -55,12 +55,9 @@ const withTotals = <T extends Sums>(s: T): T & TurnoverTotals => ({
 
 // node:sqlite не принимает лишние именованные параметры — параметры фильтров добавляются только используемые
 function paymentFilter(o: TurnoverOptions) {
-  const params: Record<string, string | number> = {
-    from: localMidnight(o.from, o.timeZone),
-    until: localMidnight(addDays(o.to, 1), o.timeZone),
-    provider: o.provider,
-  };
-  const clauses = ['p.paid_at >= @from', 'p.paid_at < @until', "(@provider = 'all' OR p.provider = @provider)"];
+  const period = periodSql('p', 'p.paid_at', o);
+  const params: Record<string, string | number> = { ...period.params, provider: o.provider };
+  const clauses = [period.sql, "(@provider = 'all' OR p.provider = @provider)"];
   for (const dimension of TURNOVER_DIMENSIONS) {
     const value = o.filters[dimension];
     if (!value) continue;
@@ -85,10 +82,10 @@ function sums(db: Db, o: TurnoverOptions, key: string) {
 }
 
 export function getTurnover(db: Db, o: TurnoverOptions & { granularity: Granularity }): { totals: TurnoverTotals; series: TurnoverPoint[] } {
-  // корзины по 15 минут → местные сутки (как у триалов)
+  // корзины по 15 минут → местные сутки провайдера (как у триалов)
   const byDay = new Map<string, Sums>();
-  for (const { key, ...s } of sums(db, o, `(p.paid_at / ${BUCKET}) * ${BUCKET}`)) {
-    const day = localDay(Number(key), o.timeZone);
+  for (const { key, ...s } of sums(db, o, bucketSql('p', 'p.paid_at'))) {
+    const day = bucketDay(key, o.timeZones);
     byDay.set(day, add(byDay.get(day) ?? zero(), s));
   }
 

@@ -524,7 +524,9 @@
       input.max = data.today;
       input.value = data.range[id];
     }
-    document.getElementById('subtitle').textContent = `Stripe · Solidgate · сутки по ${data.time_zone.replace('_', ' ')}`;
+    // сутки у провайдеров свои — как в их кабинетах
+    const zone = (tz) => tz.split('/').pop().replace('_', ' ');
+    document.getElementById('subtitle').textContent = `Сутки: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
     document.getElementById('chips').innerHTML = Object.entries(state.filters)
       .map(([d, v]) => `<span class="chip">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" aria-label="Убрать фильтр">${CLOSE_ICON}</button></span>`)
       .join('');

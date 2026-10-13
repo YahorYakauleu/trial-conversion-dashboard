@@ -19,8 +19,9 @@ describe('loadConfig', () => {
     expect(c.solidgateAccounts).toEqual([{ account: 'sg', publicKey: 'api_pk_1', secretKey: 'api_sk_1' }]);
     expect(c).toMatchObject({
       retryWindowDays: 30,
-      timeZone: 'America/New_York',
-      historyFrom: Date.parse('2026-09-01T04:00:00Z') / 1000, // полночь по Нью-Йорку
+      timeZones: { stripe: 'America/New_York', solidgate: 'UTC' },
+      historyFromDay: '2026-09-01',
+      historyFrom: Date.parse('2026-09-01T00:00:00Z') / 1000, // самая ранняя полночь — по UTC (Solidgate)
       syncCron: '0 5 * * *',
       dataDir: './data',
       port: 3000,
@@ -44,9 +45,12 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, HISTORY_FROM: '01.09.2026' })).toThrow(/YYYY-MM-DD/);
     expect(() => loadConfig({ ...base, HISTORY_FROM: '2026-13-01' })).toThrow(/YYYY-MM-DD/);
     expect(() => loadConfig({ ...base, TIMEZONE: 'Mars/Olympus' })).toThrow(/TIMEZONE/);
+    expect(() => loadConfig({ ...base, SOLIDGATE_TIMEZONE: 'Mars/Olympus' })).toThrow(/SOLIDGATE_TIMEZONE/);
   });
 
-  it('HISTORY_FROM — полночь в заданном часовом поясе', () => {
-    expect(loadConfig({ ...base, TIMEZONE: 'UTC' }).historyFrom).toBe(Date.parse('2026-09-01T00:00:00Z') / 1000);
+  it('выгрузка начинается с самой ранней полуночи HISTORY_FROM по часовым поясам провайдеров', () => {
+    const ny = { ...base, SOLIDGATE_TIMEZONE: 'America/New_York' };
+    expect(loadConfig(ny).historyFrom).toBe(Date.parse('2026-09-01T04:00:00Z') / 1000);
+    expect(loadConfig({ ...ny, TIMEZONE: 'Asia/Tokyo' }).historyFrom).toBe(Date.parse('2026-08-31T15:00:00Z') / 1000);
   });
 });

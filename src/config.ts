@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import type { Provider } from './db.js';
 import { assertTimeZone, localMidnight } from './time.js';
 
 export interface StripeAccount {
@@ -16,8 +17,10 @@ export interface Config {
   stripeAccounts: StripeAccount[];
   solidgateAccounts: SolidgateAccount[];
   retryWindowDays: number;
-  timeZone: string; // по какому времени резать сутки (как в Stripe-аккаунте)
-  historyFrom: number; // unix-секунды, полночь HISTORY_FROM в timeZone
+  // По какому времени резать сутки — как в кабинете провайдера: Stripe — часовой пояс аккаунта, Solidgate Hub — UTC
+  timeZones: Record<Provider, string>;
+  historyFromDay: string; // HISTORY_FROM, YYYY-MM-DD
+  historyFrom: number; // начало выгрузки, unix-секунды: самая ранняя из полуночей HISTORY_FROM по часовым поясам провайдеров
   syncCron: string;
   basicAuth: { user: string; password: string };
   dataDir: string;
@@ -44,19 +47,19 @@ export function loadConfig(env: Env = process.env): Config {
     throw new Error('Нужен хотя бы один ключ в STRIPE_KEYS или SOLIDGATE_KEYS');
   }
 
-  const timeZone = env.TIMEZONE?.trim() || 'America/New_York';
-  try {
-    assertTimeZone(timeZone);
-  } catch {
-    throw new Error(`TIMEZONE: неизвестный часовой пояс "${timeZone}", пример — America/New_York`);
-  }
+  const timeZones = {
+    stripe: timeZone(env, 'TIMEZONE', 'America/New_York'),
+    solidgate: timeZone(env, 'SOLIDGATE_TIMEZONE', 'UTC'),
+  };
+  const historyFromDay = date(env, 'HISTORY_FROM');
 
   return {
     stripeAccounts,
     solidgateAccounts,
     retryWindowDays: positiveInt(env, 'RETRY_WINDOW_DAYS', 30),
-    timeZone,
-    historyFrom: localMidnight(date(env, 'HISTORY_FROM'), timeZone),
+    timeZones,
+    historyFromDay,
+    historyFrom: Math.min(...Object.values(timeZones).map((tz) => localMidnight(historyFromDay, tz))),
     syncCron: env.SYNC_CRON?.trim() || '0 5 * * *',
     basicAuth: { user: required(env, 'BASIC_AUTH_USER'), password: required(env, 'BASIC_AUTH_PASSWORD') },
     dataDir: env.DATA_DIR?.trim() || './data',
@@ -76,6 +79,16 @@ function pairs(raw: string | undefined): [string, string][] {
 function required(env: Env, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new Error(`Не задана переменная ${name}`);
+  return value;
+}
+
+function timeZone(env: Env, name: string, fallback: string): string {
+  const value = env[name]?.trim() || fallback;
+  try {
+    assertTimeZone(value);
+  } catch {
+    throw new Error(`${name}: неизвестный часовой пояс "${value}", пример — America/New_York`);
+  }
   return value;
 }
 

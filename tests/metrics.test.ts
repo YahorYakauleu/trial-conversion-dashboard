@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type AttemptRow, type PaymentRow, type TrialRow } from '../src/db.js';
-import { DAY, getBreakdown, getDeclineReasons, getMetrics, resolveRange } from '../src/metrics.js';
+import { DAY, getBreakdown, getDeclineReasons, getMetrics, latestDay, resolveRange } from '../src/metrics.js';
 import { getTurnover, getTurnoverBreakdown } from '../src/turnover.js';
 
 // «Сегодня» = понедельник 2026-10-12, история с 1 сентября, триалы по 7 дней, окно ретраев 30 дней
@@ -14,7 +14,7 @@ const opts = {
   now: NOW,
   from: '2026-09-01',
   to: '2026-10-11',
-  timeZone: 'UTC',
+  timeZones: { stripe: 'UTC', solidgate: 'UTC' },
   filters: {},
   retryWindowDays: 30,
 };
@@ -278,7 +278,7 @@ describe('платёжные метрики: проходимость, decline, 
 });
 
 describe('getMetrics — сутки по Нью-Йорку', () => {
-  const ny = { ...opts, timeZone: 'America/New_York', from: '2026-10-10', to: '2026-10-11' };
+  const ny = { ...opts, timeZones: { stripe: 'America/New_York', solidgate: 'America/New_York' }, from: '2026-10-10', to: '2026-10-11' };
 
   it('день оформления считается по местному времени', () => {
     const store = storeWith([
@@ -297,44 +297,64 @@ describe('getMetrics — сутки по Нью-Йорку', () => {
     const store = storeWith([trial('2026-10-10T03:00:00Z'), trial('2026-10-12T03:59:00Z'), trial('2026-10-12T04:00:00Z')]);
     expect(getMetrics(store.db, ny).totals.started).toBe(1); // 09.10 и 12.10 по Нью-Йорку — вне периода
   });
+
+  it('у каждого провайдера свои сутки: Stripe — по Нью-Йорку, Solidgate — по UTC, как в их кабинетах', () => {
+    const mixed = { ...ny, timeZones: { stripe: 'America/New_York', solidgate: 'UTC' } };
+    const store = storeWith([
+      trial('2026-10-11T02:00:00Z'), // Stripe: 10.10 22:00 по Нью-Йорку
+      trial('2026-10-11T02:00:00Z', { provider: 'solidgate', account: 'sgH2H' }), // Solidgate: 11.10 по UTC
+      trial('2026-10-12T02:00:00Z', { provider: 'solidgate', account: 'sgH2H' }), // 12.10 по UTC — вне периода
+    ]);
+    const { series } = getMetrics(store.db, mixed);
+    expect(series.map((p) => [p.period, p.started])).toEqual([
+      ['2026-10-10', 1],
+      ['2026-10-11', 1],
+    ]);
+    expect(getMetrics(store.db, { ...mixed, provider: 'solidgate' }).series.map((p) => p.started)).toEqual([0, 1]);
+  });
+});
+
+describe('latestDay', () => {
+  it('«сегодня» — самый поздний из местных дней провайдеров', () => {
+    const at = ts('2026-10-12T01:00:00Z'); // в Нью-Йорке ещё 11.10, по UTC уже 12.10
+    expect(latestDay(at, { stripe: 'America/New_York', solidgate: 'America/New_York' })).toBe('2026-10-11');
+    expect(latestDay(at, { stripe: 'America/New_York', solidgate: 'UTC' })).toBe('2026-10-12');
+  });
 });
 
 describe('resolveRange', () => {
-  const UTC = 'UTC';
+  const FIRST = '2026-09-01';
+  const TODAY = '2026-10-12';
 
   it('по умолчанию — вся история по сегодня', () => {
-    expect(resolveRange(HISTORY_FROM, NOW, UTC)).toEqual({ from: '2026-09-01', to: '2026-10-12' });
+    expect(resolveRange(FIRST, TODAY)).toEqual({ from: '2026-09-01', to: '2026-10-12' });
   });
 
   it('пресеты считаются от сегодняшнего дня в часовом поясе дашборда', () => {
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'last7' })).toEqual({ from: '2026-10-06', to: '2026-10-12' });
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'last30' })).toEqual({ from: '2026-09-13', to: '2026-10-12' });
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'thisMonth' })).toEqual({ from: '2026-10-01', to: '2026-10-12' });
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'prevMonth' })).toEqual({ from: '2026-09-01', to: '2026-09-30' });
-    // 12.10 01:00 UTC — в Нью-Йорке ещё 11.10
-    expect(resolveRange(HISTORY_FROM, ts('2026-10-12T01:00:00Z'), 'America/New_York', { period: 'last7' })).toEqual({
-      from: '2026-10-05',
-      to: '2026-10-11',
-    });
+    expect(resolveRange(FIRST, TODAY, { period: 'last7' })).toEqual({ from: '2026-10-06', to: '2026-10-12' });
+    expect(resolveRange(FIRST, TODAY, { period: 'last30' })).toEqual({ from: '2026-09-13', to: '2026-10-12' });
+    expect(resolveRange(FIRST, TODAY, { period: 'thisMonth' })).toEqual({ from: '2026-10-01', to: '2026-10-12' });
+    expect(resolveRange(FIRST, TODAY, { period: 'prevMonth' })).toEqual({ from: '2026-09-01', to: '2026-09-30' });
+    expect(resolveRange(FIRST, '2026-10-11', { period: 'last7' })).toEqual({ from: '2026-10-05', to: '2026-10-11' });
   });
 
   it('свой период: YYYY-MM-DD, обрезается по истории и сегодняшнему дню', () => {
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'custom', from: '2026-10-01', to: '2026-10-05' })).toEqual({
+    expect(resolveRange(FIRST, TODAY, { period: 'custom', from: '2026-10-01', to: '2026-10-05' })).toEqual({
       from: '2026-10-01',
       to: '2026-10-05',
     });
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { from: '2026-08-01', to: '2026-12-31' })).toEqual({
+    expect(resolveRange(FIRST, TODAY, { from: '2026-08-01', to: '2026-12-31' })).toEqual({
       from: '2026-09-01',
       to: '2026-10-12',
     });
   });
 
   it('кривые значения → по умолчанию; from позже to → один день to', () => {
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { period: 'custom', from: 'вчера', to: 42 })).toEqual({
+    expect(resolveRange(FIRST, TODAY, { period: 'custom', from: 'вчера', to: 42 })).toEqual({
       from: '2026-09-01',
       to: '2026-10-12',
     });
-    expect(resolveRange(HISTORY_FROM, NOW, UTC, { from: '2026-10-09', to: '2026-10-02' })).toEqual({
+    expect(resolveRange(FIRST, TODAY, { from: '2026-10-09', to: '2026-10-02' })).toEqual({
       from: '2026-10-02',
       to: '2026-10-02',
     });
@@ -346,7 +366,7 @@ describe('оборот', () => {
     provider: 'stripe', payment_id: id, account: 'corp', mid: 'corp', paid_at: ts(paidIso), amount_usd_cents: 1_000, refunded_usd_cents: 0,
     country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, ...patch,
   });
-  const range = { provider: 'all' as const, filters: {}, from: '2026-10-05', to: '2026-10-11', timeZone: 'UTC' };
+  const range = { provider: 'all' as const, filters: {}, from: '2026-10-05', to: '2026-10-11', timeZones: { stripe: 'UTC', solidgate: 'UTC' } };
   function seeded() {
     const store = openStore(':memory:');
     store.upsertPayment(payment('a', '2026-10-05T10:00:00Z', { amount_usd_cents: 3_000, refunded_usd_cents: 1_000 }));
@@ -365,8 +385,9 @@ describe('оборот', () => {
   });
 
   it('сутки по часовому поясу дашборда и группировка по неделям', () => {
-    const ny = getTurnover(seeded().db, { ...range, timeZone: 'America/New_York', granularity: 'day' });
-    expect(ny.series[0]).toMatchObject({ period: '2026-10-05', payments: 2 }); // 23:30 UTC — ещё 5-е по Нью-Йорку
+    const ny = getTurnover(seeded().db, { ...range, timeZones: { stripe: 'America/New_York', solidgate: 'UTC' }, granularity: 'day' });
+    expect(ny.series[0]).toMatchObject({ period: '2026-10-05', payments: 2 }); // Stripe 23:30 UTC — ещё 5-е по Нью-Йорку
+    expect(ny.series[2]).toMatchObject({ period: '2026-10-07', payments: 1 }); // Solidgate 12:00 UTC — 7-е по UTC
     const weeks = getTurnover(seeded().db, { ...range, granularity: 'week' }).series;
     expect(weeks.map((w) => [w.period, w.period_end, w.payments])).toEqual([['2026-10-05', '2026-10-11', 3]]);
   });
