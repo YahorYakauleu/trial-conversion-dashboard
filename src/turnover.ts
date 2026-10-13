@@ -101,6 +101,9 @@ export function getTurnover(db: Db, o: TurnoverOptions & { granularity: Granular
   return { totals: withTotals(series.reduce<Sums>(add, zero())), series };
 }
 
+// Итоги из разбивки: каждый платёж попадает ровно в одну строку — второй проход по базе не нужен
+export const turnoverTotalsOf = (rows: TurnoverRow[]): TurnoverTotals => withTotals(rows.reduce<Sums>(add, zero()));
+
 // Значения измерений для фильтров (вся история провайдера) — по убыванию числа платежей; null — «не определено»
 export function getTurnoverDimensionValues(db: Db, provider: ProviderFilter) {
   return Object.fromEntries(

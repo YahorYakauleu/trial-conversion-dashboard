@@ -12,18 +12,28 @@ import {
   getMetrics,
   latestDay,
   resolveRange,
+  totalsOf,
   type Dimension,
   type Filters,
   type Granularity,
   type ProviderFilter,
 } from './metrics.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
-import { getTurnover, getTurnoverBreakdown, getTurnoverDimensionValues, TURNOVER_DIMENSIONS, type TurnoverDimension } from './turnover.js';
+import {
+  getTurnover,
+  getTurnoverBreakdown,
+  getTurnoverDimensionValues,
+  turnoverTotalsOf,
+  TURNOVER_DIMENSIONS,
+  type TurnoverDimension,
+} from './turnover.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
 const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
+// «Сегодня» и окончательность цифр зависят от текущего времени — кэш живёт не дольше этого
+const CACHE_TTL_MS = 5 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
 const FILTER_FORMAT: Record<Dimension | TurnoverDimension, RegExp> = {
   account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
@@ -64,6 +74,20 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(auth.requireLogin);
   app.use(express.static(PUBLIC_DIR));
 
+  // Данные меняет только синк, поэтому посчитанный ответ отдаётся из памяти до следующего синка.
+  // Пока синк идёт, база меняется на ходу — тогда считаем каждый раз.
+  const cache = new Map<string, { at: number; version: number; data: unknown }>();
+  const cached = <T>(key: object, compute: () => T): T => {
+    if (isSyncRunning()) return compute();
+    const id = JSON.stringify(key);
+    const hit = cache.get(id);
+    if (hit && hit.version === store.dataVersion() && Date.now() - hit.at < CACHE_TTL_MS) return hit.data as T;
+    if (cache.size > 500) cache.clear();
+    const data = compute();
+    cache.set(id, { at: Date.now(), version: store.dataVersion(), data });
+    return data;
+  };
+
   // ?provider=all|stripe|solidgate&granularity=day|week|month&period=last7|last30|thisMonth|prevMonth|all|custom
   //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&account=stripe:corp&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
   //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки провайдера (config.timeZones).
@@ -92,19 +116,17 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
     const filters: Filters = parseFilters(req.query, DIMENSIONS);
     const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
-    const { totals, series } = getMetrics(store.db, { ...options, granularity });
-    res.json({
-      ...meta,
-      role: res.locals.role,
-      retry_window_days: config.retryWindowDays,
-      range,
-      filters,
-      view,
-      totals,
-      series: view === 'time' ? series : [],
-      breakdown: (DIMENSIONS as readonly string[]).includes(view) ? getBreakdown(store.db, options, view as Dimension) : [],
-      reasons: view === 'decline_reason' ? getDeclineReasons(store.db, options) : [],
+    // разбивка — один проход по базе, итоги — сумма её строк; динамика и причины отказа — итоги из ряда по дням
+    const data = cached({ api: 'metrics', provider, granularity, range, view, filters }, () => {
+      if ((DIMENSIONS as readonly string[]).includes(view)) {
+        const breakdown = getBreakdown(store.db, options, view as Dimension);
+        return { totals: totalsOf(breakdown), series: [], breakdown, reasons: [] };
+      }
+      const { totals, series } = getMetrics(store.db, { ...options, granularity });
+      const reasons = view === 'decline_reason' ? getDeclineReasons(store.db, options) : [];
+      return { totals, series: view === 'time' ? series : [], breakdown: [], reasons };
     });
+    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
   // Оборот: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
@@ -113,23 +135,23 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const view = TURNOVER_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
     const filters = parseFilters(req.query, TURNOVER_DIMENSIONS);
     const options = { provider, filters, ...range, timeZones: config.timeZones };
-    const { totals, series } = getTurnover(store.db, { ...options, granularity });
-    res.json({
-      ...meta,
-      role: res.locals.role,
-      range,
-      filters,
-      view,
-      totals,
-      series: view === 'time' ? series : [],
-      breakdown: view === 'time' ? [] : getTurnoverBreakdown(store.db, options, view),
+    const data = cached({ api: 'turnover', provider, granularity, range, view, filters }, () => {
+      if (view !== 'time') {
+        const breakdown = getTurnoverBreakdown(store.db, options, view);
+        return { totals: turnoverTotalsOf(breakdown), series: [], breakdown };
+      }
+      return { ...getTurnover(store.db, { ...options, granularity }), breakdown: [] };
     });
+    res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
   });
 
   // Значения измерений для фильтров в боковой панели: ?mode=conversion|turnover&provider=…
   app.get('/api/values', (req, res) => {
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
-    const values = req.query.mode === 'turnover' ? getTurnoverDimensionValues(store.db, provider) : getDimensionValues(store.db, provider);
+    const turnover = req.query.mode === 'turnover';
+    const values = cached({ api: 'values', turnover, provider }, () =>
+      turnover ? getTurnoverDimensionValues(store.db, provider) : getDimensionValues(store.db, provider),
+    );
     res.json({ values });
   });
 

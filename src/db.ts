@@ -17,6 +17,7 @@ export interface TrialRow {
   payment_method: string | null; // apple_pay, google_pay, card, paypal…
   card_brand: string | null; // visa, mastercard…
   bank: string | null; // банк-эмитент (есть только у Solidgate)
+  mid: string | null; // Stripe — аккаунт; Solidgate — MID, на котором оформлен триал (через него идут и все списания)
 }
 
 // Одна попытка списания первого платного периода (Stripe charge / Solidgate order)
@@ -113,13 +114,21 @@ export function openStore(file: string) {
       PRIMARY KEY (provider, account, key)
     );
   `);
-  // Колонки карты появились позже — добавляем в уже существующую базу
+  // Колонки, появившиеся позже, — добавляем в уже существующую базу
   const columns = new Set((db.prepare('PRAGMA table_info(trials)').all() as { name: string }[]).map((c) => c.name));
-  for (const column of ['country', 'payment_method', 'card_brand', 'bank']) {
+  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid']) {
     if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} TEXT`);
+  }
+  if (!columns.has('mid')) db.exec(`UPDATE trials SET mid = account WHERE provider = 'stripe'`);
+  // Итоги попыток прямо в строке триала: метрики считаются одним проходом по trials, без соединения с attempts
+  const withoutAttemptTotals = !columns.has('attempts');
+  for (const column of ['attempts', 'approved', 'refunded']) {
+    if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
   }
   db.exec(`
     CREATE INDEX IF NOT EXISTS trials_started_idx ON trials (trial_started_at);
+    -- период задаётся по провайдеру (у каждого свои сутки) — без этого индекса SQLite читает триалы вразнобой
+    CREATE INDEX IF NOT EXISTS trials_provider_started_idx ON trials (provider, trial_started_at);
     CREATE INDEX IF NOT EXISTS trials_first_invoice_idx ON trials (provider, first_invoice_id);
     CREATE TABLE IF NOT EXISTS attempts (
       provider TEXT NOT NULL,
@@ -147,12 +156,24 @@ export function openStore(file: string) {
       PRIMARY KEY (provider, payment_id)
     );
     CREATE INDEX IF NOT EXISTS payments_paid_idx ON payments (paid_at);
+    CREATE INDEX IF NOT EXISTS payments_provider_paid_idx ON payments (provider, paid_at);
     -- курсы валют к доллару за день (JSON {валюта: сколько её за 1 USD}), чтобы не запрашивать повторно
     CREATE TABLE IF NOT EXISTS fx_rates (
       day TEXT PRIMARY KEY,
       rates TEXT NOT NULL
     );
   `);
+  // Пересчёт итогов попыток одного триала (или всех — для базы, выгруженной до появления колонок)
+  const attemptTotals = `(SELECT COUNT(*), COALESCE(SUM(a.approved), 0), COALESCE(MAX(a.refunded), 0)
+     FROM attempts a WHERE a.provider = trials.provider AND a.subscription_id = trials.subscription_id)`;
+  if (withoutAttemptTotals) {
+    db.exec(`UPDATE trials SET (attempts, approved, refunded) = ${attemptTotals}
+             WHERE EXISTS (SELECT 1 FROM attempts a WHERE a.provider = trials.provider AND a.subscription_id = trials.subscription_id)`);
+  }
+  const refreshAttemptTotals = db.prepare(
+    `UPDATE trials SET (attempts, approved, refunded) = ${attemptTotals} WHERE provider = ? AND subscription_id = ?`,
+  );
+
   for (const [table, column, expression] of READABLE_DATES) {
     // table_xinfo, а не table_info: вычисляемые колонки table_info не показывает
     const existing = (db.prepare(`PRAGMA table_xinfo(${table})`).all() as { name: string }[]).some((c) => c.name === column);
@@ -164,9 +185,9 @@ export function openStore(file: string) {
   // после отказа выглядит как успешный инвойс с attempt_count = 1.
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
-                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, synced_at)
+                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, mid, synced_at)
     VALUES (@provider, @account, @subscription_id, @trial_started_at, @trial_ended_at,
-            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @synced_at)
+            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @mid, @synced_at)
     ON CONFLICT (provider, subscription_id) DO UPDATE SET
       account = excluded.account,
       trial_started_at = excluded.trial_started_at,
@@ -179,12 +200,13 @@ export function openStore(file: string) {
       payment_method = COALESCE(excluded.payment_method, trials.payment_method),
       card_brand = COALESCE(excluded.card_brand, trials.card_brand),
       bank = COALESCE(excluded.bank, trials.bank),
+      mid = COALESCE(excluded.mid, trials.mid),
       synced_at = excluded.synced_at
   `);
   // Данные карты из отдельного источника (заказы Solidgate) — заполняют только пустые поля
   const updateCardDetails = db.prepare(`
     UPDATE trials SET country = COALESCE(country, @country), payment_method = COALESCE(payment_method, @payment_method),
-                      card_brand = COALESCE(card_brand, @card_brand), bank = COALESCE(bank, @bank)
+                      card_brand = COALESCE(card_brand, @card_brand), bank = COALESCE(bank, @bank), mid = COALESCE(mid, @mid)
     WHERE provider = @provider AND subscription_id = @subscription_id
   `);
   // Попытка: результат обновляется, причина и рефанд не стираются
@@ -223,8 +245,13 @@ export function openStore(file: string) {
     ON CONFLICT (provider, account, key) DO UPDATE SET value = excluded.value
   `);
 
+  // Версия данных: растёт с каждым законченным синком — по ней сервер сбрасывает кэш ответов
+  let dataVersion = 0;
+
   return {
     db,
+
+    dataVersion: () => dataVersion,
 
     upsertTrial(row: TrialRow, now = nowSec()): void {
       // node:sqlite не принимает лишние именованные параметры и boolean — передаём ровно колонки
@@ -241,16 +268,18 @@ export function openStore(file: string) {
         payment_method: row.payment_method,
         card_brand: row.card_brand,
         bank: row.bank,
+        mid: row.mid ?? null,
         synced_at: now,
       });
     },
 
-    setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails): void {
+    setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails & { mid: string | null }): void {
       updateCardDetails.run({ provider, subscription_id: subscriptionId, ...details });
     },
 
     upsertAttempt(a: AttemptRow): void {
       upsertAttemptStmt.run({ ...a, approved: Number(a.approved), refunded: Number(a.refunded) });
+      refreshAttemptTotals.run(a.provider, a.subscription_id);
     },
 
     // Причина отказа из отдельного источника (заказы Solidgate) и рефанды (Stripe refunds) — по id попытки
@@ -259,7 +288,10 @@ export function openStore(file: string) {
     },
 
     markRefunded(provider: Provider, attemptId: string): void {
-      db.prepare('UPDATE attempts SET refunded = 1 WHERE provider = ? AND attempt_id = ?').run(provider, attemptId);
+      const r = db
+        .prepare('UPDATE attempts SET refunded = 1 WHERE provider = ? AND attempt_id = ? RETURNING subscription_id')
+        .get(provider, attemptId) as { subscription_id: string } | undefined;
+      if (r) refreshAttemptTotals.run(provider, r.subscription_id);
     },
 
     upsertPayment(p: PaymentRow): void {
@@ -316,6 +348,7 @@ export function openStore(file: string) {
         payment_method: r.payment_method,
         card_brand: r.card_brand,
         bank: r.bank,
+        mid: r.mid,
       };
     },
 
@@ -347,6 +380,7 @@ export function openStore(file: string) {
         now,
         id,
       );
+      dataVersion++;
     },
 
     failStaleRuns(now = nowSec()): void {

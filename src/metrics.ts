@@ -16,11 +16,13 @@ export type TimeZones = Record<Provider, string>;
 export type Granularity = 'day' | 'week' | 'month';
 export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'custom';
 // Измерения для разбивки и фильтров и их значение в SQL по триалу (алиас t)
-export const DIMENSIONS = ['account', 'country', 'payment_method', 'bank', 'card_brand'] as const;
+export const DIMENSIONS = ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'] as const;
 export type Dimension = (typeof DIMENSIONS)[number];
 const DIMENSION_SQL: Record<Dimension, string> = {
   // провайдер вместе с аккаунтом: одинаковые имена у Stripe и Solidgate не склеиваются (stripe:corp, solidgate:sgH2H)
   account: "t.provider || ':' || t.account",
+  // MID, как на экране оборота: stripe:corp, solidgate:<uuid>; у Solidgate без заказа — не определён
+  mid: "t.provider || ':' || t.mid",
   country: 't.country',
   payment_method: 't.payment_method',
   bank: 't.bank',
@@ -157,55 +159,37 @@ function trialFilter(o: RangeOptions) {
   return { sql: clauses.join(' AND '), params };
 }
 
-// Агрегаты по группам (key — SQL-выражение): триалы и, отдельно, их попытки списания
-function aggregate(db: Db, o: RangeOptions, key: string): Map<string | number | null, Counts> {
+// Агрегаты по группам (key — SQL-выражение) за один проход по триалам: итоги попыток лежат в строке триала.
+// max_len — самый длинный триал группы, для окончательности цифр.
+function aggregate(db: Db, o: RangeOptions, key: string): Map<string | number | null, Counts & { max_len: number }> {
   const filter = trialFilter(o);
   const paid = 't.paid_at IS NOT NULL AND t.paid_at <= t.trial_ended_at + @window';
-  const trials = db
+  const rows = db
     .prepare(
       `SELECT ${key} AS key,
               COUNT(*) AS started,
               SUM(CASE WHEN t.first_attempt_succeeded = 1 THEN 1 ELSE 0 END) AS paid_first,
               SUM(CASE WHEN ${paid} THEN 1 ELSE 0 END) AS paid_retry,
-              SUM(CASE WHEN ${paid} AND EXISTS (SELECT 1 FROM attempts a WHERE a.provider = t.provider
-                    AND a.subscription_id = t.subscription_id AND a.refunded = 1) THEN 1 ELSE 0 END) AS refunded
+              SUM(CASE WHEN ${paid} AND t.refunded = 1 THEN 1 ELSE 0 END) AS refunded,
+              SUM(t.attempts) AS attempts,
+              SUM(t.approved) AS approved,
+              MAX(t.trial_ended_at - t.trial_started_at) AS max_len
        FROM trials t WHERE ${filter.sql} GROUP BY key`,
     )
-    .all({ ...filter.params, window: o.retryWindowDays * DAY }) as unknown as (Counts & { key: string | number | null })[];
-  const attempts = db
-    .prepare(
-      `SELECT ${key} AS key, COUNT(*) AS attempts, SUM(a.approved) AS approved
-       FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
-       WHERE ${filter.sql} GROUP BY key`,
-    )
-    .all(filter.params) as unknown as { key: string | number | null; attempts: number; approved: number }[];
-
-  const groups = new Map<string | number | null, Counts>();
-  for (const r of trials) {
-    groups.set(r.key, { ...zero(), started: r.started, paid_first: r.paid_first, paid_retry: r.paid_retry, refunded: r.refunded });
-  }
-  for (const r of attempts) {
-    const g = groups.get(r.key) ?? zero();
-    g.attempts = r.attempts;
-    g.approved = r.approved;
-    groups.set(r.key, g);
-  }
-  return groups;
+    .all({ ...filter.params, window: o.retryWindowDays * DAY }) as unknown as (Counts & { key: string | number | null; max_len: number })[];
+  return new Map(rows.map(({ key, ...counts }) => [key, counts]));
 }
 
-// Окончательность: самый длинный триал периода закончился и прошло окно ожидания оплаты
-function finality(db: Db, o: RangeOptions, lastDay: string) {
-  const filter = trialFilter(o);
-  const { max_len: maxLength } = db
-    .prepare(`SELECT COALESCE(MAX(t.trial_ended_at - t.trial_started_at), 0) AS max_len FROM trials t WHERE ${filter.sql}`)
-    .get(filter.params) as { max_len: number };
-  const lastTrialEnd = dayEnd(lastDay, o.timeZones) + maxLength;
+// Окончательность дня: самый длинный триал периода закончился и прошло окно ожидания оплаты
+function finality(o: RangeOptions, day: string, maxLength: number) {
+  const lastTrialEnd = dayEnd(day, o.timeZones) + maxLength;
   return {
     final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,
     final_retry: lastTrialEnd + o.retryWindowDays * DAY <= o.now,
-    maxLength,
   };
 }
+
+const maxLengthOf = (groups: Map<unknown, { max_len: number }>) => Math.max(0, ...[...groups.values()].map((g) => g.max_len));
 
 function withRates<T extends Counts & { final_first: boolean; final_retry: boolean }>(c: T): T & Totals {
   return {
@@ -224,25 +208,17 @@ export function getMetrics(db: Db, o: MetricsOptions): { totals: Totals; series:
 }
 
 function dailyPoints(db: Db, o: MetricsOptions): Point[] {
+  const buckets = aggregate(db, o, bucketSql('t', 't.trial_started_at'));
   const byDay = new Map<string, Counts>();
-  for (const [bucket, counts] of aggregate(db, o, bucketSql('t', 't.trial_started_at'))) {
+  for (const [bucket, counts] of buckets) {
     const day = bucketDay(bucket, o.timeZones);
     byDay.set(day, add(byDay.get(day) ?? zero(), counts));
   }
-  const { maxLength } = finality(db, o, o.to);
+  const maxLength = maxLengthOf(buckets);
 
   const points: Point[] = [];
   for (let day = o.from; day <= o.to; day = addDays(day, 1)) {
-    const lastTrialEnd = dayEnd(day, o.timeZones) + maxLength;
-    points.push(
-      withRates({
-        period: day,
-        period_end: day,
-        ...(byDay.get(day) ?? zero()),
-        final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,
-        final_retry: lastTrialEnd + o.retryWindowDays * DAY <= o.now,
-      }),
-    );
+    points.push(withRates({ period: day, period_end: day, ...(byDay.get(day) ?? zero()), ...finality(o, day, maxLength) }));
   }
   return points;
 }
@@ -250,9 +226,10 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
 // Разбивка за период по измерению: по убыванию числа триалов; «не определено» — всегда в конце
 // (у Stripe банк пуст у всех — иначе эта строка заслоняла бы остальные)
 export function getBreakdown(db: Db, o: RangeOptions, dimension: Dimension): BreakdownRow[] {
-  const { final_first, final_retry } = finality(db, o, o.to);
-  return [...aggregate(db, o, DIMENSION_SQL[dimension])]
-    .map(([value, counts]) => withRates({ value: value === null ? null : String(value), ...counts, final_first, final_retry }))
+  const groups = aggregate(db, o, DIMENSION_SQL[dimension]);
+  const final = finality(o, o.to, maxLengthOf(groups));
+  return [...groups]
+    .map(([value, { max_len: _, ...counts }]) => withRates({ value: value === null ? null : String(value), ...counts, ...final }))
     .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.started - a.started || String(a.value).localeCompare(String(b.value)));
 }
 
@@ -269,6 +246,16 @@ export function getDimensionValues(db: Db, provider: ProviderFilter) {
         .all({ provider }) as unknown as { value: string | null; count: number }[],
     ]),
   );
+}
+
+// Итоги периода из разбивки: каждый триал попадает ровно в одну строку (в том числе «не определено»),
+// поэтому сумма строк — это итоги, и второй проход по базе не нужен
+export function totalsOf(rows: BreakdownRow[]): Totals {
+  return withRates({
+    ...rows.reduce(add, zero()),
+    final_first: rows.every((r) => r.final_first),
+    final_retry: rows.every((r) => r.final_retry),
+  });
 }
 
 // Причины отказов за период: коды провайдеров сводятся к общим названиям, доля — от всех отказов

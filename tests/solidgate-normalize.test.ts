@@ -114,6 +114,7 @@ describe('trialFromSolidgate', () => {
       payment_method: null,
       card_brand: null,
       bank: null,
+      mid: null, // MID — из заказов
     });
   });
 

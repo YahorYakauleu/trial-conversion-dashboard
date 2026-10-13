@@ -16,6 +16,7 @@ const row: TrialRow = {
   payment_method: null,
   card_brand: null,
   bank: null,
+  mid: null,
 };
 
 describe('Store', () => {
@@ -158,5 +159,44 @@ describe('Store', () => {
       last_status: 'error',
       last_error: 'процесс остановился во время синка',
     });
+  });
+
+  it('итоги попыток лежат в строке триала: попытки, успешные, рефанд — обновляются вместе с попытками', () => {
+    const store = openStore(':memory:');
+    store.upsertTrial(row);
+    const attempt = { provider: 'stripe' as const, subscription_id: 'sub_1', attempted_at: 2_100, reason: null, refunded: false };
+    store.upsertAttempt({ ...attempt, attempt_id: 'ch_1', approved: false });
+    store.upsertAttempt({ ...attempt, attempt_id: 'ch_2', approved: true });
+    const totals = () => store.db.prepare('SELECT attempts, approved, refunded FROM trials').get();
+    expect(totals()).toEqual({ attempts: 2, approved: 1, refunded: 0 });
+    store.markRefunded('stripe', 'ch_2');
+    expect(totals()).toEqual({ attempts: 2, approved: 1, refunded: 1 });
+  });
+
+  it('база до итогов попыток и MID: колонки добавляются, итоги и MID Stripe заполняются при открытии', () => {
+    const file = `${import.meta.dirname}/old-schema.sqlite`;
+    rmSync(file, { force: true });
+    const old = new DatabaseSync(file);
+    old.exec(`
+      CREATE TABLE trials (provider TEXT NOT NULL, account TEXT NOT NULL, subscription_id TEXT NOT NULL, trial_started_at INTEGER NOT NULL,
+        trial_ended_at INTEGER NOT NULL, first_invoice_id TEXT, first_attempt_succeeded INTEGER, paid_at INTEGER, synced_at INTEGER NOT NULL,
+        country TEXT, payment_method TEXT, card_brand TEXT, bank TEXT, PRIMARY KEY (provider, subscription_id));
+      CREATE TABLE attempts (provider TEXT NOT NULL, attempt_id TEXT NOT NULL, subscription_id TEXT NOT NULL, attempted_at INTEGER NOT NULL,
+        approved INTEGER NOT NULL, reason TEXT, refunded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (provider, attempt_id));
+      INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at, synced_at) VALUES ('stripe', 'corp', 'sub_1', 1000, 2000, 0);
+      INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at, synced_at) VALUES ('solidgate', 'sgH2H', 'sg_1', 1000, 2000, 0);
+      INSERT INTO attempts VALUES ('stripe', 'ch_1', 'sub_1', 2100, 0, 'do_not_honor', 0), ('stripe', 'ch_2', 'sub_1', 2200, 1, NULL, 1);
+    `);
+    old.close();
+    try {
+      const store = openStore(file);
+      expect(store.db.prepare('SELECT subscription_id, mid, attempts, approved, refunded FROM trials ORDER BY provider DESC').all()).toEqual([
+        { subscription_id: 'sub_1', mid: 'corp', attempts: 2, approved: 1, refunded: 1 },
+        { subscription_id: 'sg_1', mid: null, attempts: 0, approved: 0, refunded: 0 },
+      ]);
+      store.db.close();
+    } finally {
+      for (const suffix of ['', '-wal', '-shm']) rmSync(file + suffix, { force: true });
+    }
   });
 });

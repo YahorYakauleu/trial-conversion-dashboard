@@ -16,8 +16,8 @@ const MODES = {
   conversion: {
     title: 'Конверсия триалов',
     api: '/api/metrics',
-    dimensions: ['account', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Динамика'], ['account', 'Аккаунты'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы'], ['decline_reason', 'Причины отказа']],
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
+    tabs: [['time', 'Динамика'], ['account', 'Аккаунты'], ['mid', 'MID'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы'], ['decline_reason', 'Причины отказа']],
   },
   turnover: {
     title: 'Оборот',
@@ -77,6 +77,8 @@ const dimensions = () => MODES[state.mode].dimensions;
 let lastData = null;
 let charts = {};
 let pollTimer;
+let loadSeq = 0; // номер последнего запроса: ответы на устаревшие выборы не рисуем
+let loading = false;
 const valuesCache = new Map(); // «экран:провайдер» → значения измерений для фильтров
 
 function parseSort(raw) {
@@ -142,21 +144,62 @@ function saveUrl() {
   history.replaceState(null, '', `${location.pathname}?${q}`);
 }
 
-async function load() {
+// kind: 'data' — меняются цифры (фильтры, период, провайдер, экран); 'view' — только вкладка или шаг;
+// 'silent' — фоновое обновление во время синка, без лоадера
+async function load(kind = 'data') {
   clearTimeout(pollTimer);
   saveUrl();
-  $('content').classList.add('loading'); // держим прошлую отрисовку, без мигания
+  const seq = ++loadSeq;
+  loading = true;
+  if (kind !== 'silent') {
+    markControls(); // выбранное подсвечивается сразу, не дожидаясь данных
+    renderTabs();
+  }
+  // лоадер — только если ответ не пришёл сразу: быстрые ответы (из кэша) обходятся без мигания
+  const loader = kind === 'silent' ? null : setTimeout(() => showLoading(kind), 120);
   try {
     const [res] = await Promise.all([api(`${MODES[state.mode].api}?${query()}`), loadValues()]);
+    if (seq !== loadSeq) return; // пока ждали ответа, выбрали другое
     if (res.status === 401) return location.assign('/login');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     lastData = await res.json();
+    if (seq !== loadSeq) return;
     render(lastData);
-    if (lastData.sync_running) pollTimer = setTimeout(load, 10_000);
+    if (lastData.sync_running) pollTimer = setTimeout(() => load('silent'), 10_000);
   } catch (error) {
-    $('status').textContent = `Не удалось загрузить данные: ${error.message}`;
+    if (seq === loadSeq) $('status').textContent = `Не удалось загрузить данные: ${error.message}`;
   } finally {
-    $('content').classList.remove('loading');
+    clearTimeout(loader);
+    if (seq === loadSeq) {
+      loading = false;
+      document.body.classList.remove('is-loading', 'is-loading-data');
+    }
+  }
+}
+
+// Лоадер: полоска сверху, скелетон таблицы и графиков; при смене цифр мерцают и карточки
+function showLoading(kind) {
+  document.body.classList.add('is-loading');
+  if (kind === 'data') document.body.classList.add('is-loading-data');
+  const bar = (width) => `<span class="sk" style="width:${width}px"></span>`;
+  if (!$('kpis').children.length) {
+    $('kpis').innerHTML = `<div class="kpi"><div class="label">${bar(90)}</div><div class="value">${bar(110)}</div><div class="sub">${bar(130)}</div></div>`.repeat(6);
+  }
+  table = null; // в скелетоне сортировать нечего
+  const cols = 6;
+  $('thead').innerHTML = `<tr>${Array.from({ length: cols }, (_, i) => `<th>${bar(i ? 56 : 96)}</th>`).join('')}</tr>`;
+  $('rows').innerHTML = Array.from(
+    { length: 8 },
+    (_, r) => `<tr>${Array.from({ length: cols }, (_, i) => `<td>${bar(i ? 36 + ((r * 7 + i * 11) % 28) : 100 + ((r * 23) % 70))}</td>`).join('')}</tr>`,
+  ).join('');
+  $('more').hidden = true;
+  $('charts').hidden = state.view !== 'time' || isTurnover();
+  $('turnover-charts').hidden = state.view !== 'time' || !isTurnover();
+}
+
+function markControls() {
+  for (const id of ['mode', 'provider', 'granularity']) {
+    document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
   }
 }
 
@@ -180,9 +223,7 @@ function render(data) {
 
 // --- панель выборки
 function renderSidebar(data) {
-  for (const id of ['mode', 'provider', 'granularity']) {
-    document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
-  }
+  markControls();
   const presetName = PRESETS.find(([v]) => v === state.preset)?.[1] ?? 'Свой период';
   $('period').innerHTML = `<span class="text"><span class="label">${presetName}</span><span class="value">${ddmmyyyy(data.range.from)} — ${ddmmyyyy(data.range.to)}</span></span>${ICONS.calendar}`;
   $('filters').innerHTML = dimensions()
@@ -600,16 +641,17 @@ $('mode').addEventListener('click', (event) => {
   if (!MODES[value].tabs.some(([v]) => v === state.view)) state.view = 'time';
   state.sort = null;
   state.showAll = false;
+  $('kpis').innerHTML = ''; // у другого экрана другие карточки — до ответа показываем скелетон
   load();
 });
 
 for (const id of ['provider', 'granularity']) {
   $(id).addEventListener('click', (event) => {
     const value = event.target.closest('button')?.dataset.v;
-    if (!value) return;
+    if (!value || value === state[id]) return;
     state[id] = value;
     state.showAll = false;
-    load();
+    load(id === 'granularity' ? 'view' : 'data');
   });
 }
 
@@ -619,7 +661,7 @@ $('view').addEventListener('click', (event) => {
   state.view = value;
   state.sort = null; // у вкладок разные колонки
   state.showAll = false;
-  load();
+  load('view');
 });
 
 $('period').addEventListener('click', (event) => openPeriod(event.currentTarget));
@@ -655,7 +697,7 @@ $('thead').addEventListener('click', (event) => {
 
 $('rows').addEventListener('click', (event) => {
   const row = event.target.closest('tr.link');
-  if (!row || !dimensions().includes(state.view)) return;
+  if (loading || !row || !dimensions().includes(state.view)) return; // строки старой вкладки, пока грузится новая
   state.filters[state.view] = row.dataset.value;
   state.view = 'time';
   state.sort = null;
@@ -673,7 +715,7 @@ $('refresh').addEventListener('click', async (event) => {
   button.disabled = true; // сразу, не дожидаясь ответа — без двойного запуска
   const res = await api('/api/sync', { method: 'POST' });
   if (res.status === 403) $('status').textContent = 'Синк запускает только админ';
-  load();
+  load('silent');
 });
 
 $('menu-open').addEventListener('click', openSidebar);
