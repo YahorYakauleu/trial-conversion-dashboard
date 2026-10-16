@@ -65,6 +65,9 @@ describe('eSIM: повторные покупки', () => {
       repeat_rate_30: 1 / 3, repeat_rate_90: 2 / 3, topup_rate_30: 1 / 3, revenue_per_customer_90: 1300, final_30: true, final_90: true,
     });
     expect(totals.avg_days_to_second).toBeCloseTo((9 + 48) / 2, 2); // первая успешная покупка A — в 10:02
+    // самая ранняя и самая поздняя первые покупки — у A и D; у пустых дней — 0
+    expect([totals.first_first_at, totals.last_first_at]).toEqual([ts('2026-10-01T10:02:00Z'), ts('2026-10-03T12:00:00Z')]);
+    expect(series.find((p) => p.period === '2026-10-05')).toMatchObject({ customers: 0, first_first_at: 0 });
     expect(series.find((p) => p.period === '2026-10-01')).toMatchObject({ customers: 1, repeat_30: 1, topup_30: 1 });
     // окна ещё открыты — цифры неокончательные
     const fresh = getRepeat(seeded().db, { ...opts, now: ts('2026-11-15T00:00:00Z'), granularity: 'month' }).totals;
