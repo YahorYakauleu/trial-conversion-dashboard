@@ -24,6 +24,8 @@ const SYNC_OVERLAP = HOUR;
 const DETAILS_VERSION = 2;
 // Версия оборота: 1 — успешные списания сохраняются как платежи. База, выгруженная раньше, один раз проходит списания заново.
 const PAYMENTS_VERSION = 1;
+// Версия ID клиентов у триалов: база загружена раньше — один раз проходим подписки ради ID клиента
+const CUSTOMERS_VERSION = 1;
 // В basil у charge нет ссылки на инвойс — список списаний запрашиваем в версии API, где она есть
 const CHARGES_API_VERSION = '2024-06-20';
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
@@ -49,8 +51,11 @@ export function trialFromSubscription(sub: Stripe.Subscription, account: string)
     paid_at: null,
     ...cardDetails(sub),
     mid: account, // у Stripe MID — сам аккаунт
+    customer_id: customerId(sub.customer),
   };
 }
+
+const customerId = (customer: Stripe.Subscription['customer'] | undefined) => (typeof customer === 'string' ? customer : (customer?.id ?? null));
 
 // Карта подписки, иначе карта клиента по умолчанию (если развёрнуты в ответе).
 // Банк Stripe для аккаунтов Toggle не отдаёт (issuer пустой) — останется null.
@@ -245,12 +250,31 @@ export async function syncStripeAccount(
     await invoicesPass('invoices_day');
     await chargesPassWithPayments('charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
+    store.setState('stripe', account, 'customers_version', CUSTOMERS_VERSION); // подписки уже с клиентом
     store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
     await subscriptionsPass('details_subs_day');
     await chargesPassWithPayments('details_charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
+  }
+  // Один раз для уже загруженных триалов: ID клиента (для выгрузки) — подписки без раскрытия клиента, это быстро
+  if (cursor !== null && (store.getState('stripe', account, 'customers_version') ?? 0) < CUSTOMERS_VERSION) {
+    await forEachWindow(
+      store.getState('stripe', account, 'customers_subs_day') ?? cfg.historyFrom,
+      today,
+      DAY,
+      PARALLEL,
+      async (day) => {
+        for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
+          const customer = customerId(sub.customer);
+          if (customer) store.setCustomerId('stripe', sub.id, customer);
+        }
+        console.log(`[stripe:${account}] клиенты ${dayKey(day)} готово`);
+      },
+      (next) => store.setState('stripe', account, 'customers_subs_day', next),
+    );
+    store.setState('stripe', account, 'customers_version', CUSTOMERS_VERSION);
   }
   if ((store.getState('stripe', account, 'payments_version') ?? 0) < PAYMENTS_VERSION) {
     await chargesPass('payments_charges_day');

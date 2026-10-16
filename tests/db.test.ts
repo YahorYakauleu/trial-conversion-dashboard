@@ -22,13 +22,14 @@ const row: TrialRow = {
 describe('Store', () => {
   it('upsert идемпотентен и не затирает данные об оплате пустыми значениями', () => {
     const store = openStore(':memory:');
-    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: false, paid_at: 3_000 });
-    store.upsertTrial(row); // повторная выгрузка подписки без инвойса
+    store.upsertTrial({ ...row, first_invoice_id: 'in_1', first_attempt_succeeded: false, paid_at: 3_000, customer_id: 'cus_1' });
+    store.upsertTrial(row); // повторная выгрузка подписки без инвойса и клиента
     expect(store.getTrial('stripe', 'sub_1')).toEqual({
       ...row,
       first_invoice_id: 'in_1',
       first_attempt_succeeded: false,
       paid_at: 3_000,
+      customer_id: 'cus_1',
     });
     expect(store.countTrials()).toBe(1);
   });

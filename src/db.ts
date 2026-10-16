@@ -18,6 +18,7 @@ export interface TrialRow {
   card_brand: string | null; // visa, mastercard…
   bank: string | null; // банк-эмитент (есть только у Solidgate)
   mid: string | null; // Stripe — аккаунт; Solidgate — MID, на котором оформлен триал (через него идут и все списания)
+  customer_id?: string | null; // Stripe — клиент (cus_…), Solidgate — customer_account_id (id аккаунта у нас) — для выгрузки
 }
 
 // Одна попытка списания первого платного периода (Stripe charge / Solidgate order)
@@ -128,7 +129,7 @@ export function openStore(file: string) {
   `);
   // Колонки, появившиеся позже, — добавляем в уже существующую базу
   const columns = new Set((db.prepare('PRAGMA table_info(trials)').all() as { name: string }[]).map((c) => c.name));
-  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid']) {
+  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid', 'customer_id']) {
     if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} TEXT`);
   }
   if (!columns.has('mid')) db.exec(`UPDATE trials SET mid = account WHERE provider = 'stripe'`);
@@ -209,9 +210,9 @@ export function openStore(file: string) {
   // после отказа выглядит как успешный инвойс с attempt_count = 1.
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
-                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, mid, synced_at)
+                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, mid, customer_id, synced_at)
     VALUES (@provider, @account, @subscription_id, @trial_started_at, @trial_ended_at,
-            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @mid, @synced_at)
+            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @mid, @customer_id, @synced_at)
     ON CONFLICT (provider, subscription_id) DO UPDATE SET
       account = excluded.account,
       trial_started_at = excluded.trial_started_at,
@@ -225,6 +226,7 @@ export function openStore(file: string) {
       card_brand = COALESCE(excluded.card_brand, trials.card_brand),
       bank = COALESCE(excluded.bank, trials.bank),
       mid = COALESCE(excluded.mid, trials.mid),
+      customer_id = COALESCE(excluded.customer_id, trials.customer_id),
       synced_at = excluded.synced_at
   `);
   // Данные карты из отдельного источника (заказы Solidgate) — заполняют только пустые поля
@@ -284,6 +286,7 @@ export function openStore(file: string) {
       package = excluded.package,
       order_type = excluded.order_type
   `);
+  const setCustomerIdStmt = db.prepare('UPDATE trials SET customer_id = ? WHERE provider = ? AND subscription_id = ? AND customer_id IS NULL');
   const selectByInvoice = db.prepare('SELECT subscription_id FROM trials WHERE provider = ? AND first_invoice_id = ?');
   const selectTrial = db.prepare('SELECT * FROM trials WHERE provider = ? AND subscription_id = ?');
   const selectState = db.prepare('SELECT value FROM sync_state WHERE provider = ? AND account = ? AND key = ?');
@@ -316,8 +319,14 @@ export function openStore(file: string) {
         card_brand: row.card_brand,
         bank: row.bank,
         mid: row.mid ?? null,
+        customer_id: row.customer_id ?? null,
         synced_at: now,
       });
+    },
+
+    // ID клиента для старых триалов (разовая догрузка): только пустые — сохранённый раньше не трогаем
+    setCustomerId(provider: Provider, subscriptionId: string, customerId: string): void {
+      setCustomerIdStmt.run(customerId, provider, subscriptionId);
     },
 
     setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails & { mid: string | null }): void {
@@ -400,6 +409,7 @@ export function openStore(file: string) {
         card_brand: r.card_brand,
         bank: r.bank,
         mid: r.mid,
+        customer_id: r.customer_id ?? null,
       };
     },
 

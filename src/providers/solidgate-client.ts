@@ -34,6 +34,7 @@ export interface SgSubscription {
   updated_at: string;
   trial?: boolean; // «сейчас в триале», после окончания триала — false
   product: { id: string; trial?: boolean; trial_period?: number; amount?: number };
+  customer?: { customer_account_id?: string | null }; // id аккаунта у нас (email не берём)
   invoices?: Record<string, SgInvoice>;
 }
 

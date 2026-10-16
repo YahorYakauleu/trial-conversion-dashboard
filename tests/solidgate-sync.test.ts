@@ -52,9 +52,26 @@ describe('syncSolidgateAccount', () => {
     expect(store.getState('solidgate', 'sgH2H', 'cursor')).toBe(NOW);
   });
 
+  it('база без ID клиентов: один раз проходит подписки с HISTORY_FROM и дописывает customer_account_id', async () => {
+    const store = openStore(':memory:');
+    store.upsertTrial(trialFromSolidgate(trialSub, 'sgH2H')!); // загружен раньше — без клиента
+    store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
+    store.setState('solidgate', 'sgH2H', 'details_version', 2);
+    store.setState('solidgate', 'sgH2H', 'orders_version', 2);
+    store.setState('solidgate', 'sgH2H', 'loaded_from', HISTORY_FROM);
+    const { list, listOrders, calls } = fakeList([{ ...trialSub, customer: { customer_account_id: 'acc-1' } }]);
+    await syncSolidgateAccount(store, acc, cfg, NOW, list, listOrders);
+    expect(store.getTrial('solidgate', 'sg_1')?.customer_id).toBe('acc-1');
+    expect(store.getState('solidgate', 'sgH2H', 'customers_version')).toBe(1);
+    calls.length = 0;
+    await syncSolidgateAccount(store, acc, cfg, NOW + 60, list, listOrders);
+    expect(calls.filter((c) => c.filter === 'created_at')).toEqual([]); // второй раз — только изменения
+  });
+
   it('ежедневно — только изменения с cursor − 1 день', async () => {
     const store = openStore(':memory:');
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - DAY);
+    store.setState('solidgate', 'sgH2H', 'customers_version', 1);
     store.setState('solidgate', 'sgH2H', 'details_version', 2);
     const { list, listOrders, calls } = fakeList([]);
     await syncSolidgateAccount(store, acc, cfg, NOW, list, listOrders);
@@ -97,6 +114,7 @@ describe('syncSolidgateAccount', () => {
   it('база до версии 2: один раз проходит подписки и заказы с HISTORY_FROM заново', async () => {
     const store = openStore(':memory:');
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - 3600);
+    store.setState('solidgate', 'sgH2H', 'customers_version', 1);
     store.setState('solidgate', 'sgH2H', 'country_done', 1); // старый флаг ничего не значит
     const { list, listOrders, calls, orderCalls } = fakeList(
       [trialSub],
@@ -117,6 +135,7 @@ describe('syncSolidgateAccount', () => {
   it('заказы: платежи для оборота и MID триала; догрузка заказов с HISTORY_FROM — один раз; дальше заказы по дате изменения', async () => {
     const store = openStore(':memory:');
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
+    store.setState('solidgate', 'sgH2H', 'customers_version', 1);
     store.setState('solidgate', 'sgH2H', 'details_version', 2);
     store.setState('solidgate', 'sgH2H', 'payments_version', 1); // база с оборотом, но без MID триала
     store.setState('solidgate', 'sgH2H', 'loaded_from', HISTORY_FROM);
@@ -146,6 +165,7 @@ describe('syncSolidgateAccount', () => {
     const store = openStore(':memory:');
     const loadedFrom = HISTORY_FROM + 10 * DAY;
     store.setState('solidgate', 'sgH2H', 'cursor', NOW - 60);
+    store.setState('solidgate', 'sgH2H', 'customers_version', 1);
     store.setState('solidgate', 'sgH2H', 'details_version', 2);
     store.setState('solidgate', 'sgH2H', 'orders_version', 2);
     store.setState('solidgate', 'sgH2H', 'loaded_from', loadedFrom);

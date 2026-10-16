@@ -115,7 +115,11 @@ describe('trialFromSolidgate', () => {
       card_brand: null,
       bank: null,
       mid: null, // MID — из заказов
+      customer_id: null,
     });
+    // клиент — id аккаунта у нас (customer_account_id); email не берём
+    const withCustomer = sub({}, {}, { customer: { customer_account_id: 'acc-42', customer_email: 'a@b.c' } } as never);
+    expect(trialFromSolidgate(withCustomer, 'sgH2H')?.customer_id).toBe('acc-42');
   });
 
   it('подписка без started_at — авторизация при оформлении не прошла, триала не было', () => {

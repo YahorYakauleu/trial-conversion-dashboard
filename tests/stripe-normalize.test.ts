@@ -4,7 +4,7 @@ import type { TrialRow } from '../src/db.js';
 import { applyInvoice, attemptFromCharge, chargeInvoiceId, invoiceSubscriptionId, paymentFromCharge, trialFromSubscription } from '../src/providers/stripe.js';
 
 const sub = (p: Partial<Stripe.Subscription>) =>
-  ({ id: 'sub_1', trial_start: null, trial_end: null, ...p }) as Stripe.Subscription;
+  ({ id: 'sub_1', customer: 'cus_1', trial_start: null, trial_end: null, ...p }) as Stripe.Subscription;
 
 // Инвойс продления создаётся в конце триала (10_000), финализируется через час, первая попытка — сразу
 const inv = (p: Record<string, unknown>) =>
@@ -34,6 +34,7 @@ const trial: TrialRow = {
   card_brand: null,
   bank: null,
   mid: 'org', // у Stripe MID — сам аккаунт
+  customer_id: 'cus_1', // клиент — строкой или развёрнутым объектом
 };
 
 describe('trialFromSubscription', () => {
@@ -51,6 +52,7 @@ describe('trialFromSubscription', () => {
     const card = { country: 'sa', brand: 'visa', wallet: { type: 'apple_pay' }, issuer: null };
     const customer = { id: 'cus', invoice_settings: { default_payment_method: { type: 'card', card } } };
     expect(trialFromSubscription(sub({ ...withTrial, customer } as never), 'corp')).toMatchObject({
+      customer_id: 'cus',
       country: 'SA',
       payment_method: 'apple_pay',
       card_brand: 'visa',

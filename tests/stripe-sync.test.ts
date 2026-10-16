@@ -121,6 +121,7 @@ describe('syncStripeAccount', () => {
   it('события по чужим подпискам и инвойсам без подписки пропускаются', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'org', 'cursor', NOW - DAY);
+    store.setState('stripe', 'org', 'customers_version', 1);
     const foreign = { created: NOW - 3600, data: { object: invoice({ parent: { subscription_details: { subscription: 'sub_x' } } }) } };
     const orphan = { created: NOW - 3600, data: { object: invoice({ parent: null }) } };
     const items = await syncStripeAccount(
@@ -167,6 +168,7 @@ describe('syncStripeAccount', () => {
   it('база до версии 2: один раз проходит подписки (с картой клиента) и списания, инвойсы не трогает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 3600);
+    store.setState('stripe', 'corp', 'customers_version', 1);
     store.setState('stripe', 'corp', 'loaded_from', HISTORY_FROM);
     store.setState('stripe', 'corp', 'country_done', 1); // старый флаг ничего не значит
     const withCard = {
@@ -191,9 +193,28 @@ describe('syncStripeAccount', () => {
     expect(calls.filter((c) => c.method === 'subscriptions').every((c) => isWindow(c, HOUR))).toBe(true); // второй раз — только свежие
   });
 
+  it('база без ID клиентов: один раз проходит подписки без раскрытия клиента и дописывает его, сохранённый не трогает', async () => {
+    const store = openStore(':memory:');
+    store.upsertTrial(trialFromSubscription(subscription as never, 'corp')!); // загружен раньше — без клиента
+    store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'details_version', 2);
+    store.setState('stripe', 'corp', 'payments_version', 1);
+    store.setState('stripe', 'corp', 'loaded_from', HISTORY_FROM);
+    const { client, calls } = fakeStripe({ subs: [{ ...subscription, customer: 'cus_9' } as Item], invoices: [], events: [] });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+    expect(store.getTrial('stripe', 'sub_1')?.customer_id).toBe('cus_9');
+    expect(calls.some((c) => c.method === 'subscriptions' && isWindow(c, DAY) && !c.params.expand)).toBe(true);
+    store.setCustomerId('stripe', 'sub_1', 'cus_other');
+    expect(store.getTrial('stripe', 'sub_1')?.customer_id).toBe('cus_9');
+    calls.length = 0;
+    await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);
+    expect(calls.filter((c) => c.method === 'subscriptions' && isWindow(c, DAY))).toEqual([]); // второй раз — нет
+  });
+
   it('повторный синк сразу после предыдущего читает только последний час, а не сутки', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'customers_version', 1);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
@@ -228,6 +249,7 @@ describe('syncStripeAccount', () => {
   it('оборот: база без платежей один раз проходит списания с HISTORY_FROM; рефанд позже обновляет возвращённую сумму', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'customers_version', 1);
     store.setState('stripe', 'corp', 'details_version', 2);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], charges: [paidCharge({})] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
@@ -249,6 +271,7 @@ describe('syncStripeAccount', () => {
     const store = openStore(':memory:');
     const loadedFrom = TODAY - 20 * DAY; // база выгружена с этого дня
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'customers_version', 1);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_old', trial_start: loadedFrom + 3600, trial_end: loadedFrom + 3600 + 7 * DAY } as never, 'corp')! });
@@ -274,6 +297,7 @@ describe('syncStripeAccount', () => {
   it('старая база без записи о начале истории и тот же HISTORY_FROM — ничего не догружает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
+    store.setState('stripe', 'corp', 'customers_version', 1);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_1', trial_start: HISTORY_FROM + 4 * 3600, trial_end: HISTORY_FROM + 7 * DAY } as never, 'corp')! });
