@@ -24,8 +24,9 @@ const SYNC_OVERLAP = HOUR;
 const DETAILS_VERSION = 2;
 // Версия оборота: 1 — успешные списания сохраняются как платежи. База, выгруженная раньше, один раз проходит списания заново.
 const PAYMENTS_VERSION = 1;
-// Версия ID клиентов у триалов: база загружена раньше — один раз проходим подписки ради ID клиента
-const CUSTOMERS_VERSION = 1;
+// Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз
+// проходим подписки без раскрытия клиента и дописываем их
+const SUBSCRIPTION_FIELDS_VERSION = 2;
 // В basil у charge нет ссылки на инвойс — список списаний запрашиваем в версии API, где она есть
 const CHARGES_API_VERSION = '2024-06-20';
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
@@ -52,8 +53,15 @@ export function trialFromSubscription(sub: Stripe.Subscription, account: string)
     ...cardDetails(sub),
     mid: account, // у Stripe MID — сам аккаунт
     customer_id: customerId(sub.customer),
+    ...cancellation(sub),
   };
 }
+
+// Когда попросили отменить (canceled_at — и при отмене «в конце периода») и почему; передумали — отмены нет
+const cancellation = (sub: Stripe.Subscription) => ({
+  canceled_at: sub.canceled_at ?? null,
+  cancel_reason: sub.canceled_at ? (sub.cancellation_details?.reason ?? null) : null,
+});
 
 const customerId = (customer: Stripe.Subscription['customer'] | undefined) => (typeof customer === 'string' ? customer : (customer?.id ?? null));
 
@@ -250,7 +258,7 @@ export async function syncStripeAccount(
     await invoicesPass('invoices_day');
     await chargesPassWithPayments('charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
-    store.setState('stripe', account, 'customers_version', CUSTOMERS_VERSION); // подписки уже с клиентом
+    store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом и отменой
     store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
@@ -258,10 +266,10 @@ export async function syncStripeAccount(
     await chargesPassWithPayments('details_charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
   }
-  // Один раз для уже загруженных триалов: ID клиента (для выгрузки) — подписки без раскрытия клиента, это быстро
-  if (cursor !== null && (store.getState('stripe', account, 'customers_version') ?? 0) < CUSTOMERS_VERSION) {
+  // Один раз для уже загруженных триалов: ID клиента и отмена — подписки без раскрытия клиента, это быстро
+  if (cursor !== null && (store.getState('stripe', account, 'subscription_fields_version') ?? 0) < SUBSCRIPTION_FIELDS_VERSION) {
     await forEachWindow(
-      store.getState('stripe', account, 'customers_subs_day') ?? cfg.historyFrom,
+      store.getState('stripe', account, 'subscription_fields_day') ?? cfg.historyFrom,
       now, // включая сегодняшние подписки, загруженные до появления ID клиента
       DAY,
       PARALLEL,
@@ -269,12 +277,14 @@ export async function syncStripeAccount(
         for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
           const customer = customerId(sub.customer);
           if (customer) store.setCustomerId('stripe', sub.id, customer);
+          const { canceled_at, cancel_reason } = cancellation(sub);
+          store.setCancellation('stripe', sub.id, canceled_at, cancel_reason);
         }
-        console.log(`[stripe:${account}] клиенты ${dayKey(day)} готово`);
+        console.log(`[stripe:${account}] клиенты и отмены ${dayKey(day)} готово`);
       },
-      (next) => store.setState('stripe', account, 'customers_subs_day', next),
+      (next) => store.setState('stripe', account, 'subscription_fields_day', next),
     );
-    store.setState('stripe', account, 'customers_version', CUSTOMERS_VERSION);
+    store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION);
   }
   if ((store.getState('stripe', account, 'payments_version') ?? 0) < PAYMENTS_VERSION) {
     await chargesPass('payments_charges_day');
@@ -310,6 +320,19 @@ export async function syncStripeAccount(
   await hourly(async (from) => {
     for await (const charge of listCharges({ gte: from, lt: from + HOUR })) await saveCharge(charge);
   });
+  // Отмены приходят позже оформления: по событиям об изменении подписки берём её последнее состояние
+  const latest = new Map<string, { at: number; sub: Stripe.Subscription }>();
+  await hourly(async (from) => {
+    const params = { types: ['customer.subscription.updated', 'customer.subscription.deleted'], created: { gte: from, lt: from + HOUR }, limit: 100 };
+    for await (const event of stripe.events.list(params)) {
+      const sub = event.data.object as Stripe.Subscription;
+      if ((latest.get(sub.id)?.at ?? -1) < event.created) latest.set(sub.id, { at: event.created, sub });
+    }
+  });
+  for (const { sub } of latest.values()) {
+    const { canceled_at, cancel_reason } = cancellation(sub);
+    store.setCancellation('stripe', sub.id, canceled_at, cancel_reason);
+  }
   // Рефанд приходит позже списания: помечаем попытку и обновляем возвращённую долю платежа
   for await (const refund of stripe.refunds.list({ created: { gte: since }, limit: 100, expand: ['data.charge'] })) {
     if (refund.status === 'failed' || refund.status === 'canceled') continue;

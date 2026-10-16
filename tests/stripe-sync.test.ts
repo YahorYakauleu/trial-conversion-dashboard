@@ -14,7 +14,7 @@ const isWindow = (c: { params: { created: Range } }, size: number) => c.params.c
 
 type Range = { gte?: number; lt?: number };
 type Call = { method: string; params: { created: Range; [key: string]: unknown }; options?: { apiVersion?: string } };
-type Item = { created: number };
+type Item = { created: number; type?: string };
 
 function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; charges?: Item[]; refunds?: Item[] }) {
   const calls: Call[] = [];
@@ -23,7 +23,9 @@ function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; char
   const list = (method: string, items: Item[]) => (params: Call['params'], options?: Call['options']) => {
     calls.push({ method, params, options });
     return (async function* () {
-      for (const item of items) if (inRange(item.created, params.created)) yield item;
+      // как Stripe: события — только запрошенных типов
+      const types = params.types as string[] | undefined;
+      for (const item of items) if (inRange(item.created, params.created) && (!types || !item.type || types.includes(item.type))) yield item;
     })();
   };
   const client = {
@@ -111,17 +113,37 @@ describe('syncStripeAccount', () => {
     expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ first_attempt_succeeded: false, paid_at: later - 3600 });
     expect(calls.some((c) => c.method === 'invoices')).toBe(false);
     // с прошлого синка с запасом в час, часовыми окнами без пропусков до текущего момента
-    const eventWindows = calls.filter((c) => c.method === 'events').map((c) => c.params.created);
+    const invoiceEvents = (c: Call) => c.method === 'events' && (c.params.types as string[]).includes('invoice.paid');
+    const eventWindows = calls.filter(invoiceEvents).map((c) => c.params.created);
     expect(calls.find((c) => c.method === 'events')!.params).toMatchObject({ types: ['invoice.paid', 'invoice.payment_failed'] });
     expect(eventWindows[0]).toEqual({ gte: NOW - HOUR, lt: NOW });
     expect(eventWindows.every((w, i) => i === 0 || w.gte === eventWindows[i - 1].lt)).toBe(true);
     expect(eventWindows.at(-1)!.lt!).toBeGreaterThanOrEqual(later);
   });
 
+  it('ежедневно: отмены — по событиям об изменении подписки, побеждает последнее; незнакомые подписки не добавляются', async () => {
+    const store = openStore(':memory:');
+    await syncStripeAccount(store, fakeStripe({ subs: [subscription], invoices: [], events: [] }).client, 'org', cfg, NOW);
+    const later = NOW + DAY;
+    const event = (created: number, type: string, sub: object) => ({ created, type, data: { object: { ...subscription, ...sub } } });
+    const events = [
+      event(later - 7200, 'customer.subscription.updated', { canceled_at: later - 7200, cancellation_details: { reason: 'cancellation_requested' } }),
+      event(later - 3600, 'customer.subscription.updated', { canceled_at: null }), // передумал
+      event(later - 1800, 'customer.subscription.deleted', { id: 'sub_unknown', canceled_at: later - 1800 }),
+    ];
+    await syncStripeAccount(store, fakeStripe({ subs: [], invoices: [], events }).client, 'org', cfg, later);
+    expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ canceled_at: null, cancel_reason: null });
+    expect(store.getTrial('stripe', 'sub_unknown')).toBeNull();
+
+    const cancel = [event(later + 600, 'customer.subscription.deleted', { canceled_at: later + 600, cancellation_details: { reason: 'payment_failed' } })];
+    await syncStripeAccount(store, fakeStripe({ subs: [], invoices: [], events: cancel }).client, 'org', cfg, later + 3600);
+    expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ canceled_at: later + 600, cancel_reason: 'payment_failed' });
+  });
+
   it('события по чужим подпискам и инвойсам без подписки пропускаются', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'org', 'cursor', NOW - DAY);
-    store.setState('stripe', 'org', 'customers_version', 1);
+    store.setState('stripe', 'org', 'subscription_fields_version', 2);
     const foreign = { created: NOW - 3600, data: { object: invoice({ parent: { subscription_details: { subscription: 'sub_x' } } }) } };
     const orphan = { created: NOW - 3600, data: { object: invoice({ parent: null }) } };
     const items = await syncStripeAccount(
@@ -168,7 +190,7 @@ describe('syncStripeAccount', () => {
   it('база до версии 2: один раз проходит подписки (с картой клиента) и списания, инвойсы не трогает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 3600);
-    store.setState('stripe', 'corp', 'customers_version', 1);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 2);
     store.setState('stripe', 'corp', 'loaded_from', HISTORY_FROM);
     store.setState('stripe', 'corp', 'country_done', 1); // старый флаг ничего не значит
     const withCard = {
@@ -214,15 +236,21 @@ describe('syncStripeAccount', () => {
   it('повторный синк сразу после предыдущего читает только последний час, а не сутки', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'customers_version', 1);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 2);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
 
-    for (const method of ['subscriptions', 'events', 'charges']) {
-      const windows = calls.filter((c) => c.method === method).map((c) => c.params.created);
-      expect(windows).toEqual([{ gte: NOW - 60 - HOUR, lt: NOW - 60 }, { gte: NOW - 60, lt: NOW - 60 + HOUR }]);
+    // события — двумя проходами: об оплате инвойсов и об изменении подписок (отмены)
+    const passes: [string, (c: Call) => boolean][] = [
+      ['subscriptions', (c) => c.method === 'subscriptions'],
+      ['invoice events', (c) => c.method === 'events' && (c.params.types as string[]).includes('invoice.paid')],
+      ['subscription events', (c) => c.method === 'events' && (c.params.types as string[]).includes('customer.subscription.updated')],
+      ['charges', (c) => c.method === 'charges'],
+    ];
+    for (const [, pass] of passes) {
+      expect(calls.filter(pass).map((c) => c.params.created)).toEqual([{ gte: NOW - 60 - HOUR, lt: NOW - 60 }, { gte: NOW - 60, lt: NOW - 60 + HOUR }]);
     }
     expect(calls.find((c) => c.method === 'refunds')!.params.created).toEqual({ gte: NOW - 60 - HOUR });
   });
@@ -249,7 +277,7 @@ describe('syncStripeAccount', () => {
   it('оборот: база без платежей один раз проходит списания с HISTORY_FROM; рефанд позже обновляет возвращённую сумму', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'customers_version', 1);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 2);
     store.setState('stripe', 'corp', 'details_version', 2);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], charges: [paidCharge({})] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
@@ -271,7 +299,7 @@ describe('syncStripeAccount', () => {
     const store = openStore(':memory:');
     const loadedFrom = TODAY - 20 * DAY; // база выгружена с этого дня
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'customers_version', 1);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 2);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_old', trial_start: loadedFrom + 3600, trial_end: loadedFrom + 3600 + 7 * DAY } as never, 'corp')! });
@@ -297,7 +325,7 @@ describe('syncStripeAccount', () => {
   it('старая база без записи о начале истории и тот же HISTORY_FROM — ничего не догружает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'customers_version', 1);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 2);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_1', trial_start: HISTORY_FROM + 4 * 3600, trial_end: HISTORY_FROM + 7 * DAY } as never, 'corp')! });

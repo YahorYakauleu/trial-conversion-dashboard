@@ -35,6 +35,8 @@ const trial: TrialRow = {
   bank: null,
   mid: 'org', // у Stripe MID — сам аккаунт
   customer_id: 'cus_1', // клиент — строкой или развёрнутым объектом
+  canceled_at: null,
+  cancel_reason: null,
 };
 
 describe('trialFromSubscription', () => {
@@ -45,6 +47,14 @@ describe('trialFromSubscription', () => {
 
   it('строка триала с пустыми полями оплаты', () => {
     expect(trialFromSubscription(sub({ trial_start: 1_000, trial_end: 10_000 }), 'org')).toEqual(trial);
+  });
+
+  it('отмена: когда попросили отменить и почему; нет даты отмены (передумали) — нет и причины', () => {
+    const withTrial = { trial_start: 1_000, trial_end: 10_000 };
+    const canceled = sub({ ...withTrial, canceled_at: 1_500, cancellation_details: { reason: 'cancellation_requested' } } as never);
+    expect(trialFromSubscription(canceled, 'org')).toMatchObject({ canceled_at: 1_500, cancel_reason: 'cancellation_requested' });
+    const resumed = sub({ ...withTrial, canceled_at: null, cancellation_details: { reason: 'cancellation_requested' } } as never);
+    expect(trialFromSubscription(resumed, 'org')).toMatchObject({ canceled_at: null, cancel_reason: null });
   });
 
   it('данные карты — из карты клиента по умолчанию (развёрнутой в списке) или карты подписки', () => {

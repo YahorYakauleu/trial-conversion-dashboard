@@ -30,6 +30,8 @@ describe('Store', () => {
       first_attempt_succeeded: false,
       paid_at: 3_000,
       customer_id: 'cus_1',
+      canceled_at: null,
+      cancel_reason: null,
     });
     expect(store.countTrials()).toBe(1);
   });

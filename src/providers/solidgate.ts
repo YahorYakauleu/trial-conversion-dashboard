@@ -25,8 +25,8 @@ const DETAILS_VERSION = 2;
 // Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала.
 // База, выгруженная раньше, один раз проходит заказы с HISTORY_FROM (это минуты, поэтому и после бэкфилла тоже).
 const ORDERS_VERSION = 2;
-// Версия ID клиентов у триалов (customer_account_id из отчёта подписок)
-const CUSTOMERS_VERSION = 1;
+// Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз проходим подписки заново
+const SUBSCRIPTION_FIELDS_VERSION = 2;
 // Деньги списаны: settle_ok, а refunded — списали и потом вернули (сумма возврата — в refunded_amount)
 const CHARGED = new Set(['settle_ok', 'refunded']);
 // Способ оплаты Solidgate → как в Stripe. token — списание по сохранённой карте: сам способ не говорит,
@@ -59,6 +59,8 @@ export function trialFromSolidgate(sub: SgSubscription, account: string): TrialR
     bank: null,
     mid: null,
     customer_id: sub.customer?.customer_account_id ?? null,
+    canceled_at: sub.cancelled_at ? parseSgDate(sub.cancelled_at) : null,
+    cancel_reason: sub.cancelled_at ? (sub.cancel_code ?? null) : null,
   };
 
   const firstPaid = firstPaidInvoice(sub, period.end);
@@ -223,7 +225,7 @@ export async function syncSolidgateAccount(
     const from = store.getState('solidgate', acc.account, 'backfill_day') ?? cfg.historyFrom;
     await inWindows(from, subscriptionsAndOrders('created_at'), progress('backfill_day'));
     store.setState('solidgate', acc.account, 'details_version', DETAILS_VERSION);
-    store.setState('solidgate', acc.account, 'customers_version', CUSTOMERS_VERSION); // подписки уже с клиентом
+    store.setState('solidgate', acc.account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом и отменой
     store.setState('solidgate', acc.account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('solidgate', acc.account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше — один раз проходим подписки и заказы с HISTORY_FROM заново (это быстро)
@@ -231,11 +233,11 @@ export async function syncSolidgateAccount(
     await inWindows(from, subscriptionsAndOrders('created_at'), progress('details_day'));
     store.setState('solidgate', acc.account, 'details_version', DETAILS_VERSION);
   }
-  // Один раз для уже загруженных триалов: ID клиента (customer_account_id) — проходим подписки заново
-  if (cursor !== null && (store.getState('solidgate', acc.account, 'customers_version') ?? 0) < CUSTOMERS_VERSION) {
-    const from = store.getState('solidgate', acc.account, 'customers_day') ?? cfg.historyFrom;
-    await inWindows(from, (f, t) => saveSubscriptions(f, t, 'created_at'), progress('customers_day'));
-    store.setState('solidgate', acc.account, 'customers_version', CUSTOMERS_VERSION);
+  // Один раз для уже загруженных триалов: ID клиента (customer_account_id) и отмена — проходим подписки заново
+  if (cursor !== null && (store.getState('solidgate', acc.account, 'subscription_fields_version') ?? 0) < SUBSCRIPTION_FIELDS_VERSION) {
+    const from = store.getState('solidgate', acc.account, 'subscription_fields_day') ?? cfg.historyFrom;
+    await inWindows(from, (f, t) => saveSubscriptions(f, t, 'created_at'), progress('subscription_fields_day'));
+    store.setState('solidgate', acc.account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION);
   }
   if ((store.getState('solidgate', acc.account, 'orders_version') ?? 0) < ORDERS_VERSION) {
     const progressKey = `orders_v${ORDERS_VERSION}_day`;

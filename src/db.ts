@@ -19,6 +19,10 @@ export interface TrialRow {
   bank: string | null; // банк-эмитент (есть только у Solidgate)
   mid: string | null; // Stripe — аккаунт; Solidgate — MID, на котором оформлен триал (через него идут и все списания)
   customer_id?: string | null; // Stripe — клиент (cus_…), Solidgate — customer_account_id (id аккаунта у нас) — для выгрузки
+  // Отмена подписки: когда попросили отменить (в том числе «в конце периода») и почему —
+  // Stripe: cancellation_requested | payment_failed | payment_disputed, Solidgate: код отмены (8.06 и т. п.)
+  canceled_at?: number | null;
+  cancel_reason?: string | null;
 }
 
 // Одна попытка списания первого платного периода (Stripe charge / Solidgate order)
@@ -129,10 +133,11 @@ export function openStore(file: string) {
   `);
   // Колонки, появившиеся позже, — добавляем в уже существующую базу
   const columns = new Set((db.prepare('PRAGMA table_info(trials)').all() as { name: string }[]).map((c) => c.name));
-  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid', 'customer_id']) {
+  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid', 'customer_id', 'cancel_reason']) {
     if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} TEXT`);
   }
   if (!columns.has('mid')) db.exec(`UPDATE trials SET mid = account WHERE provider = 'stripe'`);
+  if (!columns.has('canceled_at')) db.exec('ALTER TABLE trials ADD COLUMN canceled_at INTEGER');
   // Итоги попыток прямо в строке триала: метрики считаются одним проходом по trials, без соединения с attempts
   const withoutAttemptTotals = !columns.has('attempts');
   for (const column of ['attempts', 'approved', 'refunded']) {
@@ -210,9 +215,11 @@ export function openStore(file: string) {
   // после отказа выглядит как успешный инвойс с attempt_count = 1.
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
-                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, mid, customer_id, synced_at)
+                        first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, mid, customer_id,
+                        canceled_at, cancel_reason, synced_at)
     VALUES (@provider, @account, @subscription_id, @trial_started_at, @trial_ended_at,
-            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @mid, @customer_id, @synced_at)
+            @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @mid, @customer_id,
+            @canceled_at, @cancel_reason, @synced_at)
     ON CONFLICT (provider, subscription_id) DO UPDATE SET
       account = excluded.account,
       trial_started_at = excluded.trial_started_at,
@@ -227,6 +234,9 @@ export function openStore(file: string) {
       bank = COALESCE(excluded.bank, trials.bank),
       mid = COALESCE(excluded.mid, trials.mid),
       customer_id = COALESCE(excluded.customer_id, trials.customer_id),
+      -- отмену подписка знает сама и может её снять (пользователь передумал) — берём как есть
+      canceled_at = excluded.canceled_at,
+      cancel_reason = excluded.cancel_reason,
       synced_at = excluded.synced_at
   `);
   // Данные карты из отдельного источника (заказы Solidgate) — заполняют только пустые поля
@@ -286,6 +296,7 @@ export function openStore(file: string) {
       package = excluded.package,
       order_type = excluded.order_type
   `);
+  const setCancellationStmt = db.prepare('UPDATE trials SET canceled_at = ?, cancel_reason = ? WHERE provider = ? AND subscription_id = ?');
   const setCustomerIdStmt = db.prepare('UPDATE trials SET customer_id = ? WHERE provider = ? AND subscription_id = ? AND customer_id IS NULL');
   const selectByInvoice = db.prepare('SELECT subscription_id FROM trials WHERE provider = ? AND first_invoice_id = ?');
   const selectTrial = db.prepare('SELECT * FROM trials WHERE provider = ? AND subscription_id = ?');
@@ -320,6 +331,8 @@ export function openStore(file: string) {
         bank: row.bank,
         mid: row.mid ?? null,
         customer_id: row.customer_id ?? null,
+        canceled_at: row.canceled_at ?? null,
+        cancel_reason: row.cancel_reason ?? null,
         synced_at: now,
       });
     },
@@ -327,6 +340,11 @@ export function openStore(file: string) {
     // ID клиента для старых триалов (разовая догрузка): только пустые — сохранённый раньше не трогаем
     setCustomerId(provider: Provider, subscriptionId: string, customerId: string): void {
       setCustomerIdStmt.run(customerId, provider, subscriptionId);
+    },
+
+    // Отмена по свежему состоянию подписки (события Stripe, разовая догрузка) — только у уже известных триалов
+    setCancellation(provider: Provider, subscriptionId: string, canceledAt: number | null, reason: string | null): void {
+      setCancellationStmt.run(canceledAt, canceledAt === null ? null : reason, provider, subscriptionId);
     },
 
     setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails & { mid: string | null }): void {
@@ -410,6 +428,8 @@ export function openStore(file: string) {
         bank: r.bank,
         mid: r.mid,
         customer_id: r.customer_id ?? null,
+        canceled_at: r.canceled_at ?? null,
+        cancel_reason: r.cancel_reason ?? null,
       };
     },
 

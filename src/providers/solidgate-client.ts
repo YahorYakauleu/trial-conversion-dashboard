@@ -35,6 +35,8 @@ export interface SgSubscription {
   trial?: boolean; // «сейчас в триале», после окончания триала — false
   product: { id: string; trial?: boolean; trial_period?: number; amount?: number };
   customer?: { customer_account_id?: string | null }; // id аккаунта у нас (email не берём)
+  cancelled_at?: string | null; // когда отменили (у активной — отмена в конце периода)
+  cancel_code?: string | null; // 8.06 — отмена через API (поддержка/бэкенд), 8.11 — клиент отвязал карту и т. д.
   invoices?: Record<string, SgInvoice>;
 }
 

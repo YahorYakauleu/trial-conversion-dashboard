@@ -116,7 +116,12 @@ describe('trialFromSolidgate', () => {
       bank: null,
       mid: null, // MID — из заказов
       customer_id: null,
+      canceled_at: null,
+      cancel_reason: null,
     });
+    // отмена — дата и код причины (у активной подписки — отмена в конце периода)
+    const cancelled = sub({}, {}, { status: 'active', cancelled_at: '2026-10-02 08:00:00', cancel_code: '8.06' } as never);
+    expect(trialFromSolidgate(cancelled, 'sgH2H')).toMatchObject({ canceled_at: Date.parse('2026-10-02T08:00:00Z') / 1000, cancel_reason: '8.06' });
     // клиент — id аккаунта у нас (customer_account_id); email не берём
     const withCustomer = sub({}, {}, { customer: { customer_account_id: 'acc-42', customer_email: 'a@b.c' } } as never);
     expect(trialFromSolidgate(withCustomer, 'sgH2H')?.customer_id).toBe('acc-42');
