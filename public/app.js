@@ -2,38 +2,49 @@
 // данные — /api/metrics (конверсия), /api/turnover (оборот), значения фильтров — /api/values.
 
 const DAY_MS = 86_400_000;
-const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
-const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
 const PRESETS = [
-  ['last7', 'Последние 7 дней'],
-  ['last30', 'Последние 30 дней'],
-  ['thisMonth', 'Этот месяц'],
-  ['prevMonth', 'Прошлый месяц'],
-  ['all', 'Всё время'],
+  ['last7', 'Last 7 days'],
+  ['last30', 'Last 30 days'],
+  ['thisMonth', 'This month'],
+  ['prevMonth', 'Last month'],
+  ['all', 'All time'],
 ];
 // Два экрана: конверсия триалов (когорты по дню оформления) и оборот (все успешные платежи по дню платежа)
 const MODES = {
   conversion: {
-    title: 'Конверсия триалов',
+    title: 'Trial conversion',
     api: '/api/metrics',
     dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Динамика'], ['account', 'Аккаунты'], ['mid', 'MID'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы'], ['decline_reason', 'Причины отказа']],
+    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['decline_reason', 'Decline reasons']],
   },
   turnover: {
-    title: 'Оборот',
+    title: 'Gross volume',
     api: '/api/turnover',
     dimensions: ['mid', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Динамика'], ['mid', 'MID'], ['country', 'Страны'], ['payment_method', 'Способы оплаты'], ['bank', 'Банки'], ['card_brand', 'Платёжные системы']],
+    tabs: [['time', 'Trend'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands']],
   },
 };
-const DIMENSION_TITLES = { account: 'Аккаунт', mid: 'MID', country: 'Страна', payment_method: 'Способ оплаты', bank: 'Банк', card_brand: 'Платёжная система' };
+const DIMENSION_TITLES = { account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand' };
+// Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
+const TAB_TIPS = {
+  time: 'Динамика по дням, неделям или месяцам',
+  account: 'Аккаунт провайдера: у Stripe — юрлицо, у Solidgate — канал',
+  mid: 'Мерчант-аккаунт, через который прошёл платёж',
+  country: 'Страна выпуска карты',
+  payment_method: 'Карта, Apple Pay, Google Pay и т. д.',
+  bank: 'Банк-эмитент карты — пока только у Solidgate',
+  card_brand: 'Платёжная система карты: Visa, Mastercard…',
+  decline_reason: 'Почему отклонили попытки списания первого платежа',
+};
 const ACCOUNT_NAMES = {
   'stripe:corp': 'Stripe · Toggle Corp',
   'stripe:org': 'Stripe · Toggle Org',
   'stripe:inc': 'Stripe · Toggle Inc',
   'stripe:incorp': 'Stripe · Toggle Incorp',
   'stripe:eu': 'Stripe · Toggle EU',
-  'solidgate:sg': 'Solidgate · платёжная форма',
+  'solidgate:sg': 'Solidgate · Payment form',
   'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
 };
 // MID Solidgate: по API известны только UUID и дескриптор — подписываем дескриптором, UUID показываем целиком.
@@ -41,10 +52,10 @@ const ACCOUNT_NAMES = {
 const MID_DESCRIPTORS = {
   '237b93d9-0bac-43c4-8844-938d6f354c66': 'VPN TOGGLE.ORG',
   'fb1f49fb-1fb7-4c21-b300-17334b737a47': 'VPN TOGGLE.ORG',
-  '5e6da293-9dd7-4709-9502-97ac9f128471': 'ORG (через Stripe)',
+  '5e6da293-9dd7-4709-9502-97ac9f128471': 'ORG (via Stripe)',
   '4980d35c-f792-4ebb-895d-c161ba9b4fd5': 'toggle.org', // один тестовый заказ 23.09
 };
-const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Карта', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
+const METHOD_NAMES = { apple_pay: 'Apple Pay', google_pay: 'Google Pay', card: 'Card', paypal: 'PayPal', link: 'Link', samsung_pay: 'Samsung Pay' };
 const BRAND_NAMES = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', discover: 'Discover', jcb: 'JCB', unionpay: 'UnionPay', diners: 'Diners Club', maestro: 'Maestro' };
 const ROW_LIMIT = 50;
 const svg = (path, width = 2) =>
@@ -95,24 +106,24 @@ const api = (path, init) => fetch(new URL(path, location.origin), init);
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const num = (n) => n.toLocaleString('ru-RU');
+const num = (n) => n.toLocaleString('en-US');
 const decimal = (x) => (x === null || x === undefined ? '—' : x.toFixed(1));
 const pct = (r) => (r === null || r === undefined ? '—' : `${(r * 100).toFixed(1)}%`);
 // суммы оборота приходят в центах USD
-const usdWhole = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
-const usdExact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
-const usdCompact = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 });
+const usdWhole = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+const usdExact = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+const usdCompact = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 });
 const usd = (cents) => usdWhole.format(cents / 100);
 const usdAverage = (cents) => (cents === null ? '—' : usdExact.format(cents / 100));
-const ddmm = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
-const ddmmyyyy = (d) => `${ddmm(d)}.${d.slice(0, 4)}`;
+const shortDay = (d) => `${MONTHS[+d.slice(5, 7) - 1].slice(0, 3)} ${+d.slice(8, 10)}`; // Sep 1
+const fullDay = (d) => `${shortDay(d)}, ${d.slice(0, 4)}`; // Sep 1, 2026
 const monthName = (d) => `${MONTHS[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
 const isMonthEnd = (d) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).getUTCDate() === 1;
 const addMonths = (month, n) => {
   const [y, m] = month.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
 };
-const regionNames = new Intl.DisplayNames(['ru'], { type: 'region' });
+const regionNames = new Intl.DisplayNames(['en'], { type: 'region' });
 
 // Подпись значения в одну строку: в чипах, в поле фильтра, для поиска и сортировки
 const valueLabel = (dimension, value) => valueParts(dimension, value).filter(Boolean).join(' · ');
@@ -127,7 +138,7 @@ function valueParts(dimension, value) {
 }
 
 function valueName(dimension, value) {
-  if (value === null || value === 'none') return dimension === 'country' || dimension === 'card_brand' ? 'Не определена' : 'Не определён';
+  if (value === null || value === 'none') return 'Unknown';
   if (dimension === 'country') {
     try { return `${regionNames.of(value)} (${value})`; } catch { return value; }
   }
@@ -181,7 +192,7 @@ async function load(kind = 'data') {
     void loadValues(lastData.data_version); // в фоне: значения нужны, только когда откроют фильтр
     if (lastData.sync_running) pollTimer = setTimeout(() => load('silent'), 10_000);
   } catch (error) {
-    if (seq === loadSeq) $('status').textContent = `Не удалось загрузить данные: ${error.message}`;
+    if (seq === loadSeq) $('status').textContent = `Failed to load data: ${error.message}`;
   } finally {
     clearTimeout(loader);
     if (seq === loadSeq) {
@@ -246,19 +257,19 @@ function render(data) {
 // --- панель выборки
 function renderSidebar(data) {
   markControls();
-  const presetName = PRESETS.find(([v]) => v === state.preset)?.[1] ?? 'Свой период';
-  $('period').innerHTML = `<span class="text"><span class="label">${presetName}</span><span class="value">${ddmmyyyy(data.range.from)} — ${ddmmyyyy(data.range.to)}</span></span>${ICONS.calendar}`;
+  const presetName = PRESETS.find(([v]) => v === state.preset)?.[1] ?? 'Custom';
+  $('period').innerHTML = `<span class="text"><span class="label">${presetName}</span><span class="value">${fullDay(data.range.from)} — ${fullDay(data.range.to)}</span></span>${ICONS.calendar}`;
   $('filters').innerHTML = dimensions()
     .map((d) => {
       const labels = (state.filters[d] ?? []).map((v) => valueLabel(d, v));
       // первое значение названием, остальные — счётчиком «+N»: он не обрезается, даже если название длинное
       const more = labels.length > 1 ? `<span class="more-count">+${labels.length - 1}</span>` : '';
       return `<button class="picker${labels.length ? ' active' : ''}" data-dimension="${d}" aria-haspopup="listbox" title="${esc(labels.join('\n'))}">
-        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value">${esc(labels[0] ?? 'Все')}</span></span>${more}${ICONS.chevron}</button>`;
+        <span class="text"><span class="label">${DIMENSION_TITLES[d]}</span><span class="value">${esc(labels[0] ?? 'All')}</span></span>${more}${ICONS.chevron}</button>`;
     })
     .join('');
   $('reset-filters').hidden = Object.keys(state.filters).length === 0;
-  $('role').textContent = data.role === 'admin' ? 'Админ' : 'Гость';
+  $('role').textContent = data.role === 'admin' ? 'Admin' : 'Guest';
 }
 
 function renderHeader(data) {
@@ -266,77 +277,82 @@ function renderHeader(data) {
   document.title = `${MODES[state.mode].title} · Billing Dashboard`;
   // сутки у провайдеров свои — как в их кабинетах
   const zone = (tz) => tz.split('/').pop().replace('_', ' ');
-  $('subtitle').textContent = `Сутки: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
+  $('subtitle').textContent = `Day boundaries: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
   const errors = data.sync
     .filter((s) => s.last_status === 'error')
-    .map((s) => `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}: синк упал — ${s.last_error ?? ''}`);
+    .map((s) => `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}: sync failed — ${s.last_error ?? ''}`);
   $('status').textContent = errors.join(' · ');
   // синк запускает только админ; пока он идёт, кнопка неактивна
   const button = $('refresh');
   button.hidden = data.role !== 'admin';
   button.disabled = data.sync_running;
   button.classList.toggle('spinning', data.sync_running);
-  button.querySelector('span').textContent = data.sync_running ? 'Идёт синк…' : 'Обновить';
+  button.querySelector('span').textContent = data.sync_running ? 'Syncing…' : 'Refresh';
   $('chips').innerHTML = Object.entries(state.filters)
     .flatMap(([d, values]) =>
       values.map(
         (v) =>
-          `<span class="chip" title="${esc(valueLabel(d, v))}">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" data-value="${esc(v)}" aria-label="Убрать фильтр">${ICONS.close}</button></span>`,
+          `<span class="chip" title="${esc(valueLabel(d, v))}">${DIMENSION_TITLES[d]}: <b>${esc(valueLabel(d, v))}</b><button data-remove="${d}" data-value="${esc(v)}" aria-label="Remove filter">${ICONS.close}</button></span>`,
       ),
     )
     .join('');
 }
 
+// Карточка: название, значение, подпись и пояснение по-русски для подсказки
 function kpiCards(cards) {
   $('kpis').innerHTML = cards
-    .map(([label, value, sub]) => `<div class="kpi"><div class="label" title="${label}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
+    .map(([label, value, sub, tip]) => `<div class="kpi"><div class="label" data-tip="${esc(tip)}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
     .join('');
 }
 
 function renderKpis(t, range) {
   kpiCards([
-    ['Оформлено триалов', num(t.started), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
-    ['Сконвертилось', pct(t.rate_retry), `${num(t.paid_retry)} из ${num(t.started)}`],
-    ['С первой попытки', pct(t.rate_first), `${num(t.paid_first)} из ${num(t.started)}`],
-    ['Проходимость', pct(t.approval_rate), `${num(t.approved)} из ${num(t.attempts)} попыток`],
-    ['Decline rate', pct(t.decline_rate), `${num(t.attempts - t.approved)} отказов`],
-    ['Рефанды', pct(t.refund_rate), `${num(t.refunded)} из ${num(t.paid_retry)} оплат`],
+    ['Trials started', num(t.started), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Сколько триалов оформлено за период'],
+    ['Trial-to-paid rate', pct(t.rate_retry), `${num(t.paid_retry)} of ${num(t.started)}`, 'Доля триалов, оплативших первый платный период в течение 30 дней после конца триала'],
+    ['First-attempt rate', pct(t.rate_first), `${num(t.paid_first)} of ${num(t.started)}`, 'Доля триалов, оплативших с первой попытки списания'],
+    ['Approval rate', pct(t.approval_rate), `${num(t.approved)} of ${num(t.attempts)} attempts`, 'Доля успешных попыток списания первого платежа'],
+    ['Decline rate', pct(t.decline_rate), `${num(t.attempts - t.approved)} declines`, 'Доля отклонённых попыток списания первого платежа'],
+    ['Refund rate', pct(t.refund_rate), `${num(t.refunded)} of ${num(t.paid_retry)} paid`, 'Доля оплативших, кому вернули деньги'],
   ]);
 }
 
 function renderTurnoverKpis(t, range) {
   kpiCards([
-    ['Оборот', usd(t.gross), `${ddmmyyyy(range.from)} — ${ddmmyyyy(range.to)}`],
-    ['Оборот без рефандов', usd(t.net), 'оборот − рефанды'],
-    ['Рефанды', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} оборота` : '—'],
-    ['Платежей', num(t.payments), 'успешных списаний'],
-    ['Средний чек', usdAverage(t.average), 'оборот ÷ платежи'],
+    ['Gross volume', usd(t.gross), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Сумма всех успешных списаний, в долларах'],
+    ['Net volume', usd(t.net), 'gross − refunds', 'Оборот за вычетом рефандов'],
+    ['Refunds', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} of gross` : '—', 'Сколько денег вернули клиентам'],
+    ['Successful payments', num(t.payments), 'successful charges', 'Число успешных списаний'],
+    ['Avg. transaction value', usdAverage(t.average), 'gross ÷ payments', 'Средний чек: оборот ÷ число платежей'],
   ]);
 }
 
 function renderTabs() {
   $('view').innerHTML = MODES[state.mode].tabs
-    .map(([v, title]) => `<button data-v="${v}" class="${v === state.view ? 'on' : ''}">${title}</button>`)
+    .map(([v, title]) => `<button data-v="${v}" class="${v === state.view ? 'on' : ''}" data-tip="${TAB_TIPS[v]}">${title}</button>`)
     .join('');
   $('granularity').hidden = state.view !== 'time';
   const hints = isTurnover()
-    ? { time: 'Оборот — все успешные списания по дню платежа, в долларах' }
+    ? { time: 'Gross volume — all successful charges by payment date, in USD' }
     : {
-        time: 'Сконвертилось — оплатили первый платный период в течение 30 дней после конца триала',
-        decline_reason: 'Отказов — все отклонённые попытки первого платежа. Recovery rate — из триалов, где первая попытка отклонена по этой причине, доля оплативших в течение 30 дней после конца триала',
+        time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
+        decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
       };
-  $('hint').textContent = hints[state.view] ?? 'Нажмите на строку, чтобы посмотреть её динамику; на заголовок — чтобы отсортировать';
+  $('hint').textContent = hints[state.view] ?? 'Click a row to see its trend, or a column header to sort';
 }
 
 // --- таблицы: колонки описываются один раз, сортировка — по клику на заголовок
 function periodLabel(p) {
-  if (state.granularity === 'day') return ddmmyyyy(p.period);
-  if (state.granularity === 'week') return `${ddmm(p.period)} — ${ddmm(p.period_end)}`;
+  if (state.granularity === 'day') return fullDay(p.period);
+  if (state.granularity === 'week') return `${shortDay(p.period)} — ${shortDay(p.period_end)}`;
   const name = monthName(p.period);
-  return p.period.endsWith('-01') && isMonthEnd(p.period_end) ? name : `${name} (${ddmm(p.period)} — ${ddmm(p.period_end)})`;
+  return p.period.endsWith('-01') && isMonthEnd(p.period_end) ? name : `${name} (${shortDay(p.period)} — ${shortDay(p.period_end)})`;
 }
 
-const pendingCell = (html, final, title = '') => `<td class="${final ? '' : 'pending'}" title="${title}">${final ? '' : '≈ '}${html}</td>`;
+// «≈» — у неокончательных цифр; у пустых (—) его не ставим
+const pendingCell = (html, final, title = '') => {
+  const approx = !final && !html.startsWith('—');
+  return `<td class="${approx ? 'pending' : ''}" title="${title}">${approx ? '≈ ' : ''}${html}</td>`;
+};
 const shareCell = (share) =>
   `<td><span class="bar-cell"><span class="bar"><span style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span>${pct(share)}</span></td>`;
 
@@ -344,6 +360,7 @@ const periodColumn = (title) => ({ key: 'period', title, text: true, sort: (p) =
 const valueColumn = () => ({
   key: 'value',
   title: DIMENSION_TITLES[state.view],
+  tip: TAB_TIPS[state.view],
   text: true,
   sort: (r) => (r.value === null ? null : valueLabel(state.view, r.value)),
   cell: (r) => {
@@ -352,37 +369,75 @@ const valueColumn = () => ({
   },
 });
 const CONVERSION_COLUMNS = [
-  { key: 'started', title: 'Оформлено', sort: (p) => p.started, cell: (p) => `<td>${num(p.started)}</td>` },
-  { key: 'rate_retry', title: 'Сконвертилось', sort: (p) => p.rate_retry, cell: (p) => pendingCell(`${pct(p.rate_retry)}<span class="n">${num(p.paid_retry)}</span>`, p.final_retry) },
-  { key: 'rate_first', title: 'С 1-й попытки', sort: (p) => p.rate_first, cell: (p) => pendingCell(`${pct(p.rate_first)}<span class="n">${num(p.paid_first)}</span>`, p.final_first) },
-  { key: 'approval_rate', title: 'Проходимость', sort: (p) => p.approval_rate, cell: (p) => pendingCell(pct(p.approval_rate), p.final_retry, `${num(p.approved)} из ${num(p.attempts)} попыток`) },
-  { key: 'decline_rate', title: 'Decline', sort: (p) => p.decline_rate, cell: (p) => pendingCell(pct(p.decline_rate), p.final_retry, `${num(p.attempts - p.approved)} отказов`) },
-  { key: 'refund_rate', title: 'Рефанды', sort: (p) => p.refund_rate, cell: (p) => pendingCell(pct(p.refund_rate), p.final_retry, `${num(p.refunded)} из ${num(p.paid_retry)} оплат`) },
+  { key: 'started', title: 'Trials', tip: 'Оформлено триалов', sort: (p) => p.started, cell: (p) => `<td>${num(p.started)}</td>` },
+  {
+    key: 'rate_retry',
+    title: 'Trial-to-paid',
+    tip: 'Оплатили первый платный период в течение 30 дней после конца триала',
+    sort: (p) => p.rate_retry,
+    cell: (p) => pendingCell(`${pct(p.rate_retry)}<span class="n">${num(p.paid_retry)}</span>`, p.final_retry),
+  },
+  {
+    key: 'rate_first',
+    title: 'First attempt',
+    tip: 'Оплатили с первой попытки списания',
+    sort: (p) => p.rate_first,
+    cell: (p) => pendingCell(`${pct(p.rate_first)}<span class="n">${num(p.paid_first)}</span>`, p.final_first),
+  },
+  {
+    key: 'approval_rate',
+    title: 'Approval rate',
+    tip: 'Доля успешных попыток списания',
+    sort: (p) => p.approval_rate,
+    cell: (p) => pendingCell(pct(p.approval_rate), p.final_retry, `${num(p.approved)} of ${num(p.attempts)} attempts`),
+  },
+  {
+    key: 'decline_rate',
+    title: 'Decline rate',
+    tip: 'Доля отклонённых попыток списания',
+    sort: (p) => p.decline_rate,
+    cell: (p) => pendingCell(pct(p.decline_rate), p.final_retry, `${num(p.attempts - p.approved)} declines`),
+  },
+  {
+    key: 'refund_rate',
+    title: 'Refund rate',
+    tip: 'Доля оплативших, кому вернули деньги',
+    sort: (p) => p.refund_rate,
+    cell: (p) => pendingCell(pct(p.refund_rate), p.final_retry, `${num(p.refunded)} of ${num(p.paid_retry)} paid`),
+  },
 ];
 const TURNOVER_COLUMNS = [
-  { key: 'gross', title: 'Оборот', sort: (p) => p.gross, cell: (p) => `<td>${usd(p.gross)}</td>` },
-  { key: 'payments', title: 'Платежей', sort: (p) => p.payments, cell: (p) => `<td>${num(p.payments)}</td>` },
-  { key: 'average', title: 'Средний чек', sort: (p) => p.average, cell: (p) => `<td>${usdAverage(p.average)}</td>` },
-  { key: 'refunded', title: 'Рефанды', sort: (p) => p.refunded, cell: (p) => `<td>${usd(p.refunded)}</td>` },
-  { key: 'net', title: 'Без рефандов', sort: (p) => p.net, cell: (p) => `<td>${usd(p.net)}</td>` },
+  { key: 'gross', title: 'Gross volume', tip: 'Сумма успешных списаний', sort: (p) => p.gross, cell: (p) => `<td>${usd(p.gross)}</td>` },
+  { key: 'payments', title: 'Payments', tip: 'Число успешных списаний', sort: (p) => p.payments, cell: (p) => `<td>${num(p.payments)}</td>` },
+  { key: 'average', title: 'Avg. transaction', tip: 'Средний чек: оборот ÷ число платежей', sort: (p) => p.average, cell: (p) => `<td>${usdAverage(p.average)}</td>` },
+  { key: 'refunded', title: 'Refunds', tip: 'Сколько денег вернули клиентам', sort: (p) => p.refunded, cell: (p) => `<td>${usd(p.refunded)}</td>` },
+  { key: 'net', title: 'Net volume', tip: 'Оборот за вычетом рефандов', sort: (p) => p.net, cell: (p) => `<td>${usd(p.net)}</td>` },
 ];
-const SHARE_COLUMN = { key: 'share', title: 'Доля в обороте', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
+const SHARE_COLUMN = { key: 'share', title: 'Share of gross', tip: 'Доля в обороте за период', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
 const REASON_COLUMNS = [
-  { key: 'reason', title: 'Причина отказа', text: true, sort: (r) => r.reason, cell: (r) => `<td>${esc(r.reason)}</td>` },
-  { key: 'count', title: 'Отказов', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
-  { key: 'share', title: 'Доля от всех отказов', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
-  { key: 'first_declines', title: 'Первый отказ', sort: (r) => r.first_declines, cell: (r) => `<td title="Триалов, у которых первая попытка отклонена по этой причине">${num(r.first_declines)}</td>` },
+  {
+    key: 'reason',
+    title: 'Decline reason',
+    tip: 'Коды отказа Stripe и Solidgate, сведённые в общие группы',
+    text: true,
+    sort: (r) => r.reason,
+    cell: (r) => `<td data-tip="${esc(r.hint)}">${esc(r.reason)}</td>`,
+  },
+  { key: 'count', title: 'Declines', tip: 'Все отклонённые попытки с этой причиной', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
+  { key: 'share', title: 'Share of declines', tip: 'Доля от всех отказов', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
+  { key: 'first_declines', title: 'First declines', tip: 'Триалы, у которых первая попытка отклонена по этой причине', sort: (r) => r.first_declines, cell: (r) => `<td>${num(r.first_declines)}</td>` },
   {
     key: 'recovery_rate',
     title: 'Recovery rate',
+    tip: 'Доля триалов с первым отказом, оплативших в течение 30 дней после конца триала',
     sort: (r) => r.recovery_rate,
     cell: (r) =>
       r.recovery_rate === null
         ? '<td>—</td>' // причина встречается только на повторных попытках
-        : pendingCell(`${pct(r.recovery_rate)}<span class="n">${num(r.recovered)}</span>`, r.final, `оплатили ${num(r.recovered)} из ${num(r.first_declines)}`),
+        : pendingCell(`${pct(r.recovery_rate)}<span class="n">${num(r.recovered)}</span>`, r.final, `${num(r.recovered)} of ${num(r.first_declines)} recovered`),
   },
-  { key: 'avg_attempts', title: 'Попыток', sort: (r) => r.avg_attempts, cell: (r) => `<td title="Попыток на такой триал в среднем">${decimal(r.avg_attempts)}</td>` },
-  { key: 'avg_days_to_pay', title: 'Дней до оплаты', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td title="От первого отказа до оплаты — у восстановленных">${decimal(r.avg_days_to_pay)}</td>` },
+  { key: 'avg_attempts', title: 'Avg. attempts', tip: 'Попыток на такой триал в среднем', sort: (r) => r.avg_attempts, cell: (r) => `<td>${decimal(r.avg_attempts)}</td>` },
+  { key: 'avg_days_to_pay', title: 'Days to recover', tip: 'Дней от первого отказа до оплаты — у восстановленных', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td>${decimal(r.avg_days_to_pay)}</td>` },
 ];
 
 // Без выбранной сортировки: динамика — свежие дни сверху, разбивки — как отдал сервер (по главной метрике)
@@ -397,13 +452,13 @@ function sortRows(rows, columns) {
     const x = column.sort(a);
     const y = column.sort(b);
     if (x === null || y === null) return Number(x === null) - Number(y === null); // пустые — всегда внизу
-    return (typeof x === 'string' ? x.localeCompare(y, 'ru') : x - y) * dir;
+    return (typeof x === 'string' ? x.localeCompare(y, 'en') : x - y) * dir;
   });
 }
 
 let table = null; // текущие колонки и строки — для пересортировки без запроса
 
-function renderTable(columns, rows, { link = false, limit = false, empty = 'Нет данных за этот период' } = {}) {
+function renderTable(columns, rows, { link = false, limit = false, empty = 'No data for this period' } = {}) {
   table = { columns, rows, link, limit, empty };
   const sort = state.sort ?? defaultSort();
   const sorted = sortRows(rows, columns);
@@ -412,7 +467,7 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'Не
     .map((c) => {
       const on = sort?.key === c.key;
       const arrow = on && sort.dir === 'asc' ? '↑' : '↓';
-      return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sort" data-sort="${c.key}">${c.title}<span class="arrow">${arrow}</span></button></th>`;
+      return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sort" data-sort="${c.key}"${c.tip ? ` data-tip="${esc(c.tip)}"` : ''}>${c.title}<span class="arrow">${arrow}</span></button></th>`;
     })
     .join('')}</tr>`;
   $('rows').innerHTML =
@@ -420,21 +475,21 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'Не
       .map((r) => `<tr${link ? ` class="link" data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}</tr>`)
       .join('') || `<tr><td colspan="${columns.length}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
-  $('show-all').textContent = `Показать все (${num(rows.length)})`;
+  $('show-all').textContent = `Show all (${num(rows.length)})`;
 }
 
 function renderView(data) {
   const isTime = state.view === 'time';
   $('charts').hidden = !isTime || isTurnover();
   $('turnover-charts').hidden = !isTime || !isTurnover();
-  const timeHead = (payment) => ({ day: payment ? 'Дата платежа' : 'Дата оформления', week: 'Неделя', month: 'Месяц' })[state.granularity];
+  const timeHead = (payment) => ({ day: payment ? 'Payment date' : 'Trial start date', week: 'Week', month: 'Month' })[state.granularity];
 
   if (isTurnover()) {
     if (isTime) {
       renderTable([periodColumn(timeHead(true)), ...TURNOVER_COLUMNS], data.series);
       renderTurnoverChart(data.series);
     } else {
-      renderTable([valueColumn(), SHARE_COLUMN, ...TURNOVER_COLUMNS], data.breakdown, { link: true, limit: true, empty: 'Нет платежей за этот период' });
+      renderTable([valueColumn(), SHARE_COLUMN, ...TURNOVER_COLUMNS], data.breakdown, { link: true, limit: true, empty: 'No payments for this period' });
     }
     return;
   }
@@ -442,12 +497,12 @@ function renderView(data) {
     renderTable([periodColumn(timeHead(false)), ...CONVERSION_COLUMNS], data.series);
     renderCharts(data.series);
   } else if (state.view === 'decline_reason') {
-    renderTable(REASON_COLUMNS, data.reasons, { empty: 'Отказов за этот период нет' });
+    renderTable(REASON_COLUMNS, data.reasons, { empty: 'No declines for this period' });
     // итог по всем причинам — в подсказке над таблицей
     const first = data.reasons.reduce((s, r) => s + r.first_declines, 0);
     const recovered = data.reasons.reduce((s, r) => s + r.recovered, 0);
     const approx = data.reasons.every((r) => r.final) ? '' : '≈ ';
-    if (first) $('hint').textContent += `. Всего: ${approx}${pct(recovered / first)} — оплатили ${num(recovered)} из ${num(first)}`;
+    if (first) $('hint').textContent += `. Overall: ${approx}${pct(recovered / first)} — ${num(recovered)} of ${num(first)} recovered`;
   } else {
     renderTable([valueColumn(), ...CONVERSION_COLUMNS], data.breakdown, { link: true, limit: true });
   }
@@ -466,7 +521,7 @@ function chartBase() {
     common: { animation: false, responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false } },
   };
 }
-const chartLabels = (series) => series.map((p) => (state.granularity === 'month' ? monthName(p.period) : ddmm(p.period)));
+const chartLabels = (series) => series.map((p) => (state.granularity === 'month' ? monthName(p.period) : shortDay(p.period)));
 const chartTooltip = (series, label) => ({ padding: 10, cornerRadius: 8, callbacks: { title: (items) => periodLabel(series[items[0].dataIndex]), label } });
 
 function renderCharts(series) {
@@ -482,7 +537,7 @@ function renderCharts(series) {
     type: 'line',
     data: {
       labels: chartLabels(series),
-      datasets: [line('Сконвертилось', 'rate_retry', 'final_retry', css('--s-converted')), line('С первой попытки', 'rate_first', 'final_first', css('--s-first'))],
+      datasets: [line('Trial-to-paid', 'rate_retry', 'final_retry', css('--s-converted')), line('First attempt', 'rate_first', 'final_first', css('--s-first'))],
     },
     options: {
       ...common,
@@ -494,11 +549,11 @@ function renderCharts(series) {
     type: 'bar',
     data: {
       labels: chartLabels(series),
-      datasets: [{ label: 'Оформлено триалов', data: series.map((p) => p.started), backgroundColor: css('--s-started'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+      datasets: [{ label: 'Trials started', data: series.map((p) => p.started), backgroundColor: css('--s-started'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
     },
     options: {
       ...common,
-      plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` Оформлено: ${num(c.raw)}`) },
+      plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` Trials started: ${num(c.raw)}`) },
       scales: { x, y: { grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => num(v) } } },
     },
   });
@@ -510,13 +565,13 @@ function renderTurnoverChart(series) {
     type: 'bar',
     data: {
       labels: chartLabels(series),
-      datasets: [{ label: 'Оборот', data: series.map((p) => p.gross / 100), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+      datasets: [{ label: 'Gross volume', data: series.map((p) => p.gross / 100), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
     },
     options: {
       ...common,
       plugins: {
         legend: { display: false },
-        tooltip: chartTooltip(series, (c) => ` Оборот: ${usd(series[c.dataIndex].gross)} · платежей: ${num(series[c.dataIndex].payments)}`),
+        tooltip: chartTooltip(series, (c) => ` Gross volume: ${usd(series[c.dataIndex].gross)} · payments: ${num(series[c.dataIndex].payments)}`),
       },
       scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdCompact.format(v) } } },
     },
@@ -588,9 +643,9 @@ async function openFilter(anchor, dimension) {
       el.style.width = `${Math.max(anchor.offsetWidth, options.some((o) => o.sub) ? 360 : 280)}px`; // UUID — целиком
       const withSearch = options.length > 8;
       el.innerHTML = `
-        ${withSearch ? `<input class="search" placeholder="Поиск: ${DIMENSION_TITLES[dimension].toLowerCase()}" aria-label="Поиск" />` : ''}
+        ${withSearch ? `<input class="search" placeholder="Search ${DIMENSION_TITLES[dimension].toLowerCase()}" aria-label="Search" />` : ''}
         <div class="options" role="listbox" aria-multiselectable="true"></div>
-        <div class="pop-foot"><button class="link-btn" data-clear>Очистить</button><span class="muted" data-picked></span><button class="btn primary" data-done>Готово</button></div>`;
+        <div class="pop-foot"><button class="link-btn" data-clear>Clear</button><span class="muted" data-picked></span><button class="btn primary" data-done>Done</button></div>`;
       const list = el.querySelector('.options');
       const search = el.querySelector('.search');
       const draw = () => {
@@ -602,8 +657,8 @@ async function openFilter(anchor, dimension) {
               const on = selected.has(o.value);
               return `<button class="option check${on ? ' on' : ''}" role="option" aria-selected="${on}" data-value="${esc(o.value)}"><span class="box">${ICONS.check}</span><span class="name">${esc(o.name)}${o.sub ? `<span class="value-id">${esc(o.sub)}</span>` : ''}</span>${o.count ? `<span class="count">${num(o.count)}</span>` : ''}</button>`;
             })
-            .join('') || '<div class="empty">Ничего не найдено</div>';
-        el.querySelector('[data-picked]').textContent = selected.size ? `Выбрано: ${selected.size}` : 'Все';
+            .join('') || '<div class="empty">Nothing found</div>';
+        el.querySelector('[data-picked]').textContent = selected.size ? `Selected: ${selected.size}` : 'All';
       };
       const toggle = (value) => {
         if (selected.has(value)) selected.delete(value);
@@ -666,12 +721,12 @@ function openPeriod(anchor) {
           <div class="presets">${PRESETS.map(([v, name]) => `<button class="option${state.preset === v ? ' on' : ''}" data-preset="${v}"><span class="name">${name}</span></button>`).join('')}</div>
           <div class="calendar">
             <div class="cal-head">
-              <button class="btn" data-month="${addMonths(month, -1)}" aria-label="Предыдущий месяц" ${month <= first.slice(0, 7) ? 'disabled' : ''}>${ICONS.left}</button>
-              <span>${MONTHS[m - 1][0].toUpperCase() + MONTHS[m - 1].slice(1)} ${y}</span>
-              <button class="btn" data-month="${addMonths(month, 1)}" aria-label="Следующий месяц" ${month >= today.slice(0, 7) ? 'disabled' : ''}>${ICONS.right}</button>
+              <button class="btn" data-month="${addMonths(month, -1)}" aria-label="Previous month" ${month <= first.slice(0, 7) ? 'disabled' : ''}>${ICONS.left}</button>
+              <span>${MONTHS[m - 1]} ${y}</span>
+              <button class="btn" data-month="${addMonths(month, 1)}" aria-label="Next month" ${month >= today.slice(0, 7) ? 'disabled' : ''}>${ICONS.right}</button>
             </div>
             <div class="cal-grid">${WEEKDAYS.map((d) => `<span class="dow">${d}</span>`).join('')}${'<span></span>'.repeat(offset)}${cells.join('')}</div>
-            <div class="cal-hint">${start ? `С ${ddmmyyyy(start)} — выберите вторую дату` : 'Выберите первую дату или период слева'}</div>
+            <div class="cal-hint">${start ? `From ${fullDay(start)} — pick the end date` : 'Pick a start date or a preset'}</div>
           </div>
         </div>`;
     };
@@ -791,7 +846,7 @@ $('refresh').addEventListener('click', async (event) => {
   if (button.disabled) return;
   button.disabled = true; // сразу, не дожидаясь ответа — без двойного запуска
   const res = await api('/api/sync', { method: 'POST' });
-  if (res.status === 403) $('status').textContent = 'Синк запускает только админ';
+  if (res.status === 403) $('status').textContent = 'Only admins can run a sync';
   load('silent');
 });
 
@@ -828,7 +883,7 @@ async function showHelpTab(tab) {
   const body = $('help-body');
   try {
     if (!helpCache[tab]) {
-      body.textContent = 'Загрузка…';
+      body.textContent = 'Loading…';
       const res = await api(`/${tab}.md`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       helpCache[tab] = marked.parse(await res.text());
@@ -836,7 +891,7 @@ async function showHelpTab(tab) {
     if (helpTab === tab) body.innerHTML = helpCache[tab];
     $('help').scrollTop = 0;
   } catch (error) {
-    body.textContent = `Не удалось загрузить описание: ${error.message}`;
+    body.textContent = `Failed to load the description: ${error.message}`;
   }
 }
 function openHelp() {
@@ -859,6 +914,32 @@ $('help-close').addEventListener('click', closeHelp);
 $('help-overlay').addEventListener('click', closeHelp);
 
 // Esc закрывает верхнее: выпадающее окно, «Как считается», панель выборки
+// Подсказки: у названий метрик, колонок, вкладок и причин отказа — data-tip с коротким пояснением по-русски.
+// Своя, а не title: появляется сразу при наведении и не обрезается таблицей
+const tip = document.createElement('div');
+tip.className = 'tip';
+tip.setAttribute('role', 'tooltip');
+tip.hidden = true;
+document.body.append(tip);
+function showTip(target) {
+  const el = target instanceof Element ? target.closest('[data-tip]') : null;
+  tip.hidden = !el?.dataset.tip;
+  if (tip.hidden) return;
+  tip.textContent = el.dataset.tip;
+  // над элементом, а если сверху не влезает — под ним; по горизонтали — в пределах окна
+  const r = el.getBoundingClientRect();
+  const above = r.top - tip.offsetHeight - 6;
+  tip.style.top = `${above < 8 ? r.bottom + 6 : above}px`;
+  tip.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 8 - tip.offsetWidth))}px`;
+}
+const hideTip = () => (tip.hidden = true);
+document.addEventListener('mouseover', (event) => showTip(event.target));
+document.addEventListener('mouseout', (event) => event.relatedTarget || hideTip()); // ушли за пределы окна
+document.addEventListener('focusin', (event) => showTip(event.target));
+document.addEventListener('focusout', hideTip);
+document.addEventListener('click', hideTip); // после клика элемент под курсором обычно перерисовывается
+addEventListener('scroll', hideTip, true);
+
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (popover) closePopover();
