@@ -263,21 +263,6 @@ export function getBreakdown(db: Db, o: RangeOptions, dimension: Dimension): Bre
     .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.started - a.started || String(a.value).localeCompare(String(b.value)));
 }
 
-// Значения измерений для фильтров (вся история провайдера) — по убыванию числа триалов; null — «не определено»
-export function getDimensionValues(db: Db, provider: ProviderFilter) {
-  return Object.fromEntries(
-    DIMENSIONS.map((d) => [
-      d,
-      db
-        .prepare(
-          `SELECT ${DIMENSION_SQL[d]} AS value, COUNT(*) AS count FROM trials t
-           WHERE @provider = 'all' OR t.provider = @provider GROUP BY value ORDER BY count DESC LIMIT 1000`,
-        )
-        .all({ provider }) as unknown as { value: string | null; count: number }[],
-    ]),
-  );
-}
-
 // Итоги периода из разбивки: каждый триал попадает ровно в одну строку (в том числе «не определено»),
 // поэтому сумма строк — это итоги, и второй проход по базе не нужен
 export function totalsOf(rows: BreakdownRow[]): Totals {

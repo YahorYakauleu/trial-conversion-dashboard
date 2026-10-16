@@ -164,7 +164,7 @@ let charts = {};
 let pollTimer;
 let loadSeq = 0; // номер последнего запроса: ответы на устаревшие выборы не рисуем
 let loading = false;
-const valuesCache = new Map(); // «экран:провайдер» → { version, values } — значения измерений для фильтров
+const valuesCache = new Map(); // запрос значений фильтра → { version, values }
 
 function parseSort(raw) {
   const [key, dir] = (raw ?? '').split(':');
@@ -260,7 +260,6 @@ async function load(kind = 'data') {
     lastData = await res.json();
     if (seq !== loadSeq) return;
     render(lastData);
-    void loadValues(lastData.data_version); // в фоне: значения нужны, только когда откроют фильтр
     if (lastData.sync_running) pollTimer = setTimeout(() => load('silent'), 10_000);
   } catch (error) {
     if (seq === loadSeq) $('status').textContent = `Failed to load data: ${error.message}`;
@@ -312,18 +311,23 @@ function markControls() {
   }
 }
 
-// Значения для фильтров — на экран и провайдера, заново после каждого синка: version — версия данных на сервере
-// (иначе, например, MID, которые синк заполнил после открытия страницы, в фильтр не попадут)
-function loadValues(version) {
-  const key = `${state.mode}:${state.provider}`;
+// Значения фильтра — для текущей выборки: период, провайдер и остальные фильтры (свой сервер не применяет).
+// Запрашиваются, когда фильтр открывают; запоминаются до следующего синка (version — версия данных на сервере)
+function loadValues(dimension) {
+  const q = query();
+  for (const key of ['view', 'granularity', dimension]) q.delete(key);
+  q.set('dimension', dimension);
+  const key = q.toString();
+  const version = lastData?.data_version;
   const hit = valuesCache.get(key);
   if (hit && hit.version === version) return hit.values;
-  const values = api(`/api/values?mode=${state.mode}&provider=${state.provider}`)
+  if (valuesCache.size > 200) valuesCache.clear();
+  const values = api(`/api/values?${key}`)
     .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
     .then((body) => body.values)
     .catch(() => {
       valuesCache.delete(key); // не получилось — спросим снова при следующем открытии
-      return {};
+      return [];
     });
   valuesCache.set(key, { version, values });
   return values;
@@ -881,7 +885,7 @@ function closePopover() {
 
 // Фильтр с несколькими значениями: галочки отмечаются сразу, а данные пересчитываются, когда окно закрыли
 async function openFilter(anchor, dimension) {
-  const values = (await loadValues(lastData?.data_version))[dimension] ?? [];
+  const values = await loadValues(dimension);
   const initial = state.filters[dimension] ?? [];
   const selected = new Set(initial);
   const options = [
