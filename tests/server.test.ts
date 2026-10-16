@@ -161,8 +161,10 @@ describe('server', () => {
     expect((await get('/api/esim/health')).totals).toMatchObject({ charges: 2, approved: 1, checkouts: 1, paid_checkouts: 1, recovery_rate: 1 });
     expect((await get('/api/esim/health?view=decline_reason')).reasons.map((r: { reason: string }) => r.reason)).toEqual(['Insufficient funds']);
     expect((await get('/api/esim/repeat')).totals).toMatchObject({ customers: 1, repeat_30: 0 });
-    const { values } = await (await fetch(`${url}/api/values?mode=esim_health`, { headers: auth })).json();
-    expect(values.destination).toEqual([{ value: 'Spain', count: 2 }]);
+    const values = async (q: string) => (await (await fetch(`${url}/api/values?${q}`, { headers: auth })).json()).values;
+    expect(await values('mode=esim_health&dimension=destination')).toEqual([{ value: 'Spain', count: 2 }]); // попытки
+    expect(await values('mode=esim_volume&dimension=package&destination=Spain')).toEqual([{ value: '5 GB · 7 days', count: 1 }]); // платежи
+    expect(await values('mode=esim_repeat&dimension=destination&destination=Japan')).toEqual([{ value: 'Spain', count: 1 }]); // клиенты
 
     // без ключа eSIM нет: эндпоинты — 404, оборот — всегда VPN
     server.close();
@@ -209,7 +211,7 @@ describe('server', () => {
     expect((await get('account=stripe:corp')).filters).toEqual({}); // у оборота нет разреза «аккаунт» — есть MID
   });
 
-  it('/api/values: значения измерений для фильтров по убыванию частоты, с учётом провайдера', async () => {
+  it('/api/values: значения одного фильтра для текущей выборки — период, провайдер и остальные фильтры, кроме своего', async () => {
     const store = openStore(':memory:');
     const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
     const trial = (id: string, provider: 'stripe' | 'solidgate', country: string | null) =>
@@ -221,15 +223,24 @@ describe('server', () => {
     trial('b', 'stripe', 'US');
     trial('c', 'solidgate', 'SA');
     trial('d', 'solidgate', null);
+    store.upsertTrial({ ...store.getTrial('stripe', 'a')!, subscription_id: 'e', trial_started_at: started - 5 * 86_400 }); // 05.09
     const server = createApp({ store, config, sources: [] }).listen(0);
     await new Promise((resolve) => server.once('listening', resolve));
     close = () => server.close();
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const values = async (q: string) => (await (await fetch(`${url}/api/values?${q}`, { headers: auth })).json()).values;
 
-    expect((await values('')).country).toEqual([{ value: 'US', count: 2 }, { value: 'SA', count: 1 }, { value: null, count: 1 }]);
-    expect((await values('provider=solidgate')).account).toEqual([{ value: 'solidgate:sgH2H', count: 2 }]);
-    expect(Object.keys(await values('mode=turnover'))).toEqual(['mid', 'country', 'payment_method', 'bank', 'card_brand']);
+    expect(await values('dimension=country')).toEqual([{ value: 'US', count: 3 }, { value: 'SA', count: 1 }, { value: null, count: 1 }]);
+    expect(await values('dimension=country&period=custom&from=2026-09-10&to=2026-09-10')).toEqual([
+      { value: 'US', count: 2 }, // 05.09 — вне периода
+      { value: 'SA', count: 1 },
+      { value: null, count: 1 },
+    ]);
+    expect(await values('dimension=account&provider=solidgate')).toEqual([{ value: 'solidgate:sgH2H', count: 2 }]);
+    expect(await values('dimension=account&country=US')).toEqual([{ value: 'stripe:corp', count: 3 }]); // другой фильтр сужает
+    expect(await values('dimension=country&country=US')).toHaveLength(3); // свой — нет: иначе осталось бы только выбранное
+    expect(await values('mode=turnover&dimension=mid')).toEqual([]); // платежей нет — значений нет
+    expect(await values('dimension=nope')).toEqual([]);
   });
 
   it('ответ кэшируется до следующего синка: новые данные видны после того, как синк закончился', async () => {

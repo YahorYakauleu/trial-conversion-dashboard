@@ -8,7 +8,6 @@ import {
   DIMENSIONS,
   getBreakdown,
   getDeclineReasons,
-  getDimensionValues,
   getMetrics,
   latestDay,
   resolveRange,
@@ -34,7 +33,6 @@ import { localDay } from './time.js';
 import {
   getTurnover,
   getTurnoverBreakdown,
-  getTurnoverDimensionValues,
   turnoverTotalsOf,
   turnoverDimensions,
   type TurnoverDimension,
@@ -207,15 +205,49 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
   });
 
-  // Значения измерений для фильтров в боковой панели: ?mode=conversion|turnover|esim_volume|esim_repeat|esim_health&provider=…
+  // Значения одного фильтра: ?mode=…&dimension=…&provider&period&from&to&<остальные фильтры>. Учитывают период и остальные
+  // фильтры — кроме своего, иначе в списке осталось бы только выбранное. Число у значения — то же, что во вкладке-разрезе
+  // экрана (триалы, платежи, попытки, новые клиенты); значений, которых при такой выборке нет, в списке нет
   app.get('/api/values', (req, res) => {
-    const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
     const mode = String(req.query.mode ?? 'conversion');
-    const esim = esimEnabled && mode.startsWith('esim_');
-    const values = cached({ api: 'values', mode: esim ? 'esim' : mode, provider }, () => {
-      if (esim) return getTurnoverDimensionValues(store.db, 'all', 'esim');
-      return mode === 'turnover' ? getTurnoverDimensionValues(store.db, provider) : getDimensionValues(store.db, provider);
-    });
+    const esim = mode.startsWith('esim_');
+    if (esim && !esimEnabled) return void res.json({ values: [] });
+    const { now, range, ...rest } = esim ? common(req.query, esimFirstDay()) : common(req.query);
+    const provider = esim ? 'all' : rest.provider;
+    const base = { now, ...range, timeZones: config.timeZones };
+    // свой фильтр не применяем: иначе в списке осталось бы только уже выбранное
+    const facet = <D extends Dimension | TurnoverDimension>(dimensions: readonly D[]) => {
+      const dimension = dimensions.find((d) => d === req.query.dimension);
+      const filters = parseFilters(req.query, dimensions);
+      if (dimension) delete filters[dimension];
+      return { dimension, filters };
+    };
+    const compute = (): { value: string | null; count: number }[] => {
+      if (mode === 'conversion') {
+        const { dimension, filters } = facet(DIMENSIONS);
+        const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
+        return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
+      }
+      if (mode === 'turnover' || mode === 'esim_volume') {
+        const product: Product = esim ? 'esim' : 'vpn';
+        const { dimension, filters } = facet(turnoverDimensions(product));
+        return dimension ? getTurnoverBreakdown(store.db, { ...base, product, provider, filters }, dimension).map((r) => ({ value: r.value, count: r.payments })) : [];
+      }
+      if (mode === 'esim_health') {
+        const { dimension, filters } = facet(HEALTH_DIMENSIONS);
+        return dimension ? getHealthBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.charges })) : [];
+      }
+      if (mode === 'esim_repeat') {
+        const { dimension, filters } = facet(REPEAT_DIMENSIONS);
+        return dimension ? getRepeatBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.customers })) : [];
+      }
+      return [];
+    };
+    const values = cached({ api: 'values', mode, provider, range, query: req.query }, () =>
+      compute()
+        .filter((v) => v.count > 0)
+        .sort((a, b) => b.count - a.count),
+    );
     res.json({ values });
   });
 

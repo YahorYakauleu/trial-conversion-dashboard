@@ -19,7 +19,7 @@ export const ESIM_TURNOVER_DIMENSIONS = ['destination', 'package', 'order_type',
 export type TurnoverDimension = (typeof TURNOVER_DIMENSIONS)[number] | (typeof ESIM_TURNOVER_DIMENSIONS)[number];
 export const turnoverDimensions = (product: Product): readonly TurnoverDimension[] =>
   product === 'esim' ? ESIM_TURNOVER_DIMENSIONS : TURNOVER_DIMENSIONS;
-export const DIMENSION_SQL: Record<TurnoverDimension, string> = {
+const DIMENSION_SQL: Record<TurnoverDimension, string> = {
   // провайдер вместе с MID, как у аккаунтов: stripe:corp, solidgate:<uuid>
   mid: "p.provider || ':' || p.mid",
   country: 'p.country',
@@ -112,22 +112,6 @@ export function getTurnover(db: Db, o: TurnoverOptions & { granularity: Granular
 
 // Итоги из разбивки: каждый платёж попадает ровно в одну строку — второй проход по базе не нужен
 export const turnoverTotalsOf = (rows: TurnoverRow[]): TurnoverTotals => withTotals(rows.reduce<Sums>(add, zero()));
-
-// Значения измерений для фильтров (вся история провайдера и продукта) — по убыванию числа списаний; null — «не определено».
-// У eSIM — и по отклонённым списаниям: те же значения нужны экрану платёжного здоровья
-export function getTurnoverDimensionValues(db: Db, provider: ProviderFilter, product: Product = 'vpn') {
-  return Object.fromEntries(
-    turnoverDimensions(product).map((d) => [
-      d,
-      db
-        .prepare(
-          `SELECT ${DIMENSION_SQL[d]} AS value, COUNT(*) AS count FROM payments p
-           WHERE p.product = @product AND (@provider = 'all' OR p.provider = @provider) GROUP BY value ORDER BY count DESC LIMIT 1000`,
-        )
-        .all({ provider, product }) as unknown as { value: string | null; count: number }[],
-    ]),
-  );
-}
 
 // Разбивка по измерению: по убыванию оборота, доля — от оборота периода; «не определено» — всегда в конце
 export function getTurnoverBreakdown(db: Db, o: TurnoverOptions, dimension: TurnoverDimension): TurnoverRow[] {
