@@ -62,8 +62,15 @@ export interface BreakdownRow extends Totals {
 
 export interface ReasonRow {
   reason: string; // общее название причины (коды Stripe и Solidgate сведены)
-  count: number;
+  count: number; // отклонённых попыток с этой причиной
   share: number; // доля от всех отказов
+  // Восстановление: триалы, у которых первая попытка первого платежа отклонена по этой причине, и сколько из них потом оплатили
+  first_declines: number;
+  recovered: number; // оплатили в окне ретраев
+  recovery_rate: number | null;
+  avg_attempts: number | null; // попыток на такой триал в среднем
+  avg_days_to_pay: number | null; // дней от первого отказа до оплаты — у восстановленных
+  final: boolean; // окно ретраев закрыто у всех таких триалов — recovery rate больше не изменится
 }
 
 export interface MetricsOptions {
@@ -269,21 +276,66 @@ export function totalsOf(rows: BreakdownRow[]): Totals {
   });
 }
 
-// Причины отказов за период: коды провайдеров сводятся к общим названиям, доля — от всех отказов
+interface ReasonSums {
+  count: number;
+  first_declines: number;
+  recovered: number;
+  attempts: number; // попыток у триалов с первым отказом
+  seconds_to_pay: number; // у восстановленных
+  last_trial_end: number | null;
+}
+
+// Причины отказов за период: коды провайдеров сводятся к общим названиям, доля — от всех отказов.
+// Recovery rate — по причине первого отказа: первая попытка первого платежа отклонена по причине X — какая доля
+// таких триалов всё же оплатила в окне ретраев (как «Сконвертилось»). Всё — за один проход по попыткам периода.
 export function getDeclineReasons(db: Db, o: RangeOptions): ReasonRow[] {
   const filter = trialFilter(o);
+  const paid = 'paid_at IS NOT NULL AND paid_at <= trial_ended_at + @window';
   const rows = db
     .prepare(
-      `SELECT a.reason AS reason, COUNT(*) AS count
-       FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
-       WHERE a.approved = 0 AND ${filter.sql} GROUP BY a.reason`,
+      `WITH ranked AS (
+         SELECT a.reason, a.approved, a.attempted_at, t.paid_at, t.trial_ended_at, t.attempts,
+                ROW_NUMBER() OVER (PARTITION BY a.provider, a.subscription_id ORDER BY a.attempted_at, a.attempt_id) AS n
+         FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
+         WHERE ${filter.sql}
+       )
+       SELECT reason,
+              COUNT(*) AS count,
+              SUM(n = 1) AS first_declines,
+              SUM(n = 1 AND ${paid}) AS recovered,
+              SUM(CASE WHEN n = 1 THEN attempts ELSE 0 END) AS attempts,
+              SUM(CASE WHEN n = 1 AND ${paid} THEN MAX(paid_at - attempted_at, 0) ELSE 0 END) AS seconds_to_pay, -- оплата бывает отмечена на секунды раньше попытки
+              MAX(CASE WHEN n = 1 THEN trial_ended_at END) AS last_trial_end
+       FROM ranked WHERE approved = 0 GROUP BY reason`,
     )
-    .all(filter.params) as unknown as { reason: string | null; count: number }[];
-  const byLabel = new Map<string, number>();
-  for (const r of rows) byLabel.set(declineLabel(r.reason), (byLabel.get(declineLabel(r.reason)) ?? 0) + r.count);
-  const total = [...byLabel.values()].reduce((s, n) => s + n, 0);
+    .all({ ...filter.params, window: o.retryWindowDays * DAY }) as unknown as (ReasonSums & { reason: string | null })[];
+
+  const byLabel = new Map<string, ReasonSums>();
+  for (const { reason, ...r } of rows) {
+    const label = declineLabel(reason);
+    const g = byLabel.get(label) ?? { count: 0, first_declines: 0, recovered: 0, attempts: 0, seconds_to_pay: 0, last_trial_end: null };
+    byLabel.set(label, {
+      count: g.count + r.count,
+      first_declines: g.first_declines + r.first_declines,
+      recovered: g.recovered + r.recovered,
+      attempts: g.attempts + r.attempts,
+      seconds_to_pay: g.seconds_to_pay + r.seconds_to_pay,
+      last_trial_end: Math.max(g.last_trial_end ?? 0, r.last_trial_end ?? 0) || null,
+    });
+  }
+  const total = [...byLabel.values()].reduce((s, g) => s + g.count, 0);
   return [...byLabel]
-    .map(([reason, count]) => ({ reason, count, share: count / total }))
+    .map(([reason, g]) => ({
+      reason,
+      count: g.count,
+      share: g.count / total,
+      first_declines: g.first_declines,
+      recovered: g.recovered,
+      recovery_rate: rate(g.recovered, g.first_declines),
+      avg_attempts: g.first_declines === 0 ? null : g.attempts / g.first_declines,
+      avg_days_to_pay: g.recovered === 0 ? null : g.seconds_to_pay / g.recovered / DAY,
+      final: g.last_trial_end === null || g.last_trial_end + o.retryWindowDays * DAY <= o.now,
+    }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, 'ru'));
 }
 
