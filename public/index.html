@@ -28,14 +28,18 @@
       <div class="brand-name">Billing Dashboard</div>
     </div>
 
-    <section class="side-group">
-      <div class="side-label">Report</div>
-      <div class="seg" id="mode" role="group" aria-label="Report">
-        <button data-v="conversion" data-tip="Конверсия триалов в платные и платёжные метрики первого платежа">Conversion</button><button data-v="turnover" data-tip="Оборот: все успешные списания по дню платежа">Volume</button>
-      </div>
+    <!-- Продукт виден, только если подключён второй (eSIM); экраны — свои у каждого продукта -->
+    <section class="side-group" id="product-group" hidden>
+      <div class="side-label">Product</div>
+      <div class="seg" id="product" role="group" aria-label="Product"></div>
     </section>
 
     <section class="side-group">
+      <div class="side-label">Report</div>
+      <div class="seg" id="mode" role="group" aria-label="Report"></div>
+    </section>
+
+    <section class="side-group" id="provider-group">
       <div class="side-label">Provider</div>
       <div class="seg" id="provider" role="group" aria-label="Provider">
         <button data-v="all">All</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
@@ -135,6 +139,33 @@
         <div class="panel">
           <div class="chart-head"><h2>Gross volume, $</h2></div>
           <div class="chart"><canvas id="turnover-chart" aria-label="Gross volume by payment date, USD"></canvas></div>
+        </div>
+      </section>
+
+      <section id="repeat-charts" hidden>
+        <div class="panel">
+          <div class="chart-head">
+            <h2>Repeat rate by first purchase date, %</h2>
+            <div class="legend">
+              <span data-tip="Купили снова в течение 30 дней после первой покупки"><i style="background: var(--s-converted)"></i>30 days</span>
+              <span data-tip="Купили снова в течение 90 дней после первой покупки"><i style="background: var(--s-first)"></i>90 days</span>
+              <span data-tip="Окно ещё не закрылось — цифра может вырасти"><i class="dashed"></i>≈ not final</span>
+            </div>
+          </div>
+          <div class="chart"><canvas id="repeat-chart" aria-label="Repeat purchase rate, percent"></canvas></div>
+        </div>
+      </section>
+
+      <section id="health-charts" hidden>
+        <div class="panel">
+          <div class="chart-head">
+            <h2>Approval rate and checkout success, %</h2>
+            <div class="legend">
+              <span data-tip="Доля успешных попыток списания"><i style="background: var(--s-first)"></i>Approval rate</span>
+              <span data-tip="Доля оплат, которые прошли — с любой карты и попытки"><i style="background: var(--s-converted)"></i>Checkout success</span>
+            </div>
+          </div>
+          <div class="chart"><canvas id="health-chart" aria-label="Approval rate and checkout success rate, percent"></canvas></div>
         </div>
       </section>
     </div>

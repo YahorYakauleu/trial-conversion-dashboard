@@ -11,22 +11,86 @@ const PRESETS = [
   ['prevMonth', 'Last month'],
   ['all', 'All time'],
 ];
-// Два экрана: конверсия триалов (когорты по дню оформления) и оборот (все успешные платежи по дню платежа)
+// Экраны по продуктам. VPN: конверсия триалов (когорты по дню оформления) и оборот (успешные платежи по дню платежа).
+// eSIM — если подключён его Stripe-аккаунт: оборот, повторные покупки (когорты по первой покупке) и платёжное здоровье.
+// kind — как рисуется экран; label и tip — кнопка в панели «Report»
 const MODES = {
   conversion: {
+    product: 'vpn',
+    kind: 'conversion',
+    label: 'Conversion',
+    tip: 'Конверсия триалов в платные и платёжные метрики первого платежа',
     title: 'Trial conversion',
     api: '/api/metrics',
+    charts: 'charts',
     dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
     tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['decline_reason', 'Decline reasons']],
+    hints: {
+      time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
+      decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
+    },
   },
   turnover: {
+    product: 'vpn',
+    kind: 'turnover',
+    label: 'Volume',
+    tip: 'Оборот: все успешные списания по дню платежа',
     title: 'Gross volume',
     api: '/api/turnover',
+    charts: 'turnover-charts',
     dimensions: ['mid', 'country', 'payment_method', 'bank', 'card_brand'],
     tabs: [['time', 'Trend'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands']],
+    hints: { time: 'Gross volume — all successful charges by payment date, in USD' },
+  },
+  esim_volume: {
+    product: 'esim',
+    kind: 'turnover',
+    label: 'Volume',
+    tip: 'Оборот eSIM: все успешные покупки и пополнения по дню платежа',
+    title: 'eSIM · Gross volume',
+    api: '/api/turnover',
+    charts: 'turnover-charts',
+    dimensions: ['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'],
+    tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['order_type', 'Order types'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
+    hints: { time: 'Gross volume — all successful eSIM purchases and top-ups by payment date, in USD' },
+  },
+  esim_repeat: {
+    product: 'esim',
+    kind: 'repeat',
+    label: 'Repeat',
+    tip: 'Повторные покупки: когорты клиентов по дню первой покупки',
+    title: 'eSIM · Repeat purchases',
+    api: '/api/esim/repeat',
+    charts: 'repeat-charts',
+    dimensions: ['destination', 'package', 'country', 'payment_method', 'card_brand'],
+    tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
+    hints: {
+      time: 'Cohorts by first purchase date. Repeat — bought again within 30 or 90 days after the first purchase',
+      _breakdown: 'Customers are split by their first purchase. Click a row to see its trend, or a column header to sort',
+    },
+  },
+  esim_health: {
+    product: 'esim',
+    kind: 'health',
+    label: 'Payments',
+    tip: 'Платёжное здоровье: проходимость попыток, оплаты и отказы',
+    title: 'eSIM · Payment health',
+    api: '/api/esim/health',
+    charts: 'health-charts',
+    dimensions: ['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'],
+    tabs: [['time', 'Trend'], ['decline_reason', 'Decline reasons'], ['destination', 'Destinations'], ['package', 'Packages'], ['order_type', 'Order types'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
+    hints: {
+      time: 'Approval rate — by attempts; checkout success — by checkouts (one checkout can have several attempts, e.g. another card)',
+      decline_reason: 'Declines — all declined attempts. Recovery rate — share of checkouts whose first attempt was declined for this reason that were paid in the end',
+    },
   },
 };
-const DIMENSION_TITLES = { account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand' };
+const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
+const DIMENSION_TITLES = {
+  account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
+  destination: 'Destination', package: 'Package', order_type: 'Order type',
+};
+const ORDER_TYPE_NAMES = { purchase: 'Purchase', topup: 'Top-up' };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
 const TAB_TIPS = {
   time: 'Динамика по дням, неделям или месяцам',
@@ -36,7 +100,10 @@ const TAB_TIPS = {
   payment_method: 'Карта, Apple Pay, Google Pay и т. д.',
   bank: 'Банк-эмитент карты — пока только у Solidgate',
   card_brand: 'Платёжная система карты: Visa, Mastercard…',
-  decline_reason: 'Почему отклонили попытки списания первого платежа',
+  decline_reason: 'Почему отклонили попытки списания',
+  destination: 'Страна или регион пакета eSIM',
+  package: 'Объём и срок пакета eSIM',
+  order_type: 'Покупка нового пакета или пополнение (top-up)',
 };
 const ACCOUNT_NAMES = {
   'stripe:corp': 'Stripe · Toggle Corp',
@@ -86,7 +153,10 @@ const state = {
   sort: parseSort(params.get('sort')),
   showAll: false,
 };
-const isTurnover = () => state.mode === 'turnover';
+const product = () => MODES[state.mode].product;
+const kind = () => MODES[state.mode].kind;
+const isTurnover = () => kind() === 'turnover';
+let products = ['vpn']; // из ответа сервера: eSIM — если подключён его Stripe-аккаунт
 const dimensions = () => MODES[state.mode].dimensions;
 
 let lastData = null;
@@ -149,11 +219,12 @@ function valueName(dimension, value) {
   if (dimension === 'mid') return ACCOUNT_NAMES[value] ?? `Stripe · ${value.split(':')[1]}`; // MID Stripe — аккаунт
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
+  if (dimension === 'order_type') return ORDER_TYPE_NAMES[value] ?? value;
   return value;
 }
 
 function query() {
-  const q = new URLSearchParams({ mode: state.mode, provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
+  const q = new URLSearchParams({ mode: state.mode, product: product(), provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
   if (state.preset === 'custom') {
     q.set('from', state.from);
     q.set('to', state.to);
@@ -218,12 +289,25 @@ function showLoading(kind) {
     (_, r) => `<tr>${Array.from({ length: cols }, (_, i) => `<td>${bar(i ? 36 + ((r * 7 + i * 11) % 28) : 100 + ((r * 23) % 70))}</td>`).join('')}</tr>`,
   ).join('');
   $('more').hidden = true;
-  $('charts').hidden = state.view !== 'time' || isTurnover();
-  $('turnover-charts').hidden = state.view !== 'time' || !isTurnover();
+  showCharts(state.view === 'time');
 }
 
+// Графики под таблицей — только на динамике и только своего экрана
+function showCharts(visible) {
+  for (const id of new Set(Object.values(MODES).map((m) => m.charts))) $(id).hidden = !visible || id !== MODES[state.mode].charts;
+}
+
+// Продукт и экраны продукта рисуются из MODES; провайдер есть только у VPN (у eSIM — один Stripe)
 function markControls() {
-  for (const id of ['mode', 'provider', 'granularity']) {
+  const list = products.includes(product()) ? products : [...products, product()];
+  $('product-group').hidden = list.length < 2;
+  $('product').innerHTML = list.map((p) => `<button data-v="${p}" class="${p === product() ? 'on' : ''}">${PRODUCT_NAMES[p]}</button>`).join('');
+  $('mode').innerHTML = Object.entries(MODES)
+    .filter(([, m]) => m.product === product())
+    .map(([v, m]) => `<button data-v="${v}" class="${v === state.mode ? 'on' : ''}" data-tip="${m.tip}">${m.label}</button>`)
+    .join('');
+  $('provider-group').hidden = product() !== 'vpn';
+  for (const id of ['provider', 'granularity']) {
     document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
   }
 }
@@ -246,9 +330,12 @@ function loadValues(version) {
 }
 
 function render(data) {
+  products = data.products ?? ['vpn'];
   renderSidebar(data);
   renderHeader(data);
-  if (isTurnover()) renderTurnoverKpis(data.totals, data.range);
+  if (kind() === 'turnover') renderTurnoverKpis(data.totals, data.range);
+  else if (kind() === 'repeat') renderRepeatKpis(data);
+  else if (kind() === 'health') renderHealthKpis(data);
   else renderKpis(data.totals, data.range);
   renderTabs();
   renderView(data);
@@ -277,7 +364,10 @@ function renderHeader(data) {
   document.title = `${MODES[state.mode].title} · Billing Dashboard`;
   // сутки у провайдеров свои — как в их кабинетах
   const zone = (tz) => tz.split('/').pop().replace('_', ' ');
-  $('subtitle').textContent = `Day boundaries: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
+  $('subtitle').textContent =
+    product() === 'esim'
+      ? `Day boundaries: ${zone(data.time_zones.stripe)} · Stripe account Toggle eSim`
+      : `Day boundaries: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
   const errors = data.sync
     .filter((s) => s.last_status === 'error')
     .map((s) => `${s.provider === 'stripe' ? 'Stripe' : 'Solidgate'} ${s.account}: sync failed — ${s.last_error ?? ''}`);
@@ -326,18 +416,38 @@ function renderTurnoverKpis(t, range) {
   ]);
 }
 
+// Окончательность у eSIM своя: у повторных покупок — окна 30 и 90 дней с первой покупки
+const approxPct = (r, final) => `${final || r === null ? '' : '≈ '}${pct(r)}`;
+
+function renderRepeatKpis({ totals: t, range }) {
+  kpiCards([
+    ['New customers', num(t.customers), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Клиенты, впервые купившие eSIM в эти дни'],
+    ['Repeat rate, 30d', approxPct(t.repeat_rate_30, t.final_30), `${num(t.repeat_30)} of ${num(t.customers)}`, 'Доля купивших снова в течение 30 дней после первой покупки'],
+    ['Repeat rate, 90d', approxPct(t.repeat_rate_90, t.final_90), `${num(t.repeat_90)} of ${num(t.customers)}`, 'Доля купивших снова в течение 90 дней после первой покупки'],
+    ['Top-up rate, 30d', approxPct(t.topup_rate_30, t.final_30), `${num(t.topup_30)} of ${num(t.customers)}`, 'Доля пополнивших пакет в течение 30 дней после первой покупки'],
+    ['Revenue per customer, 30d', usdAverage(t.revenue_per_customer_30), 'net of refunds', 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов'],
+    ['Revenue per customer, 90d', usdAverage(t.revenue_per_customer_90), 'net of refunds', 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов'],
+  ]);
+}
+
+function renderHealthKpis({ totals: t }) {
+  kpiCards([
+    ['Approval rate', pct(t.approval_rate), `${num(t.approved)} of ${num(t.charges)} attempts`, 'Доля успешных попыток списания'],
+    ['Decline rate', pct(t.decline_rate), `${num(t.charges - t.approved)} declines`, 'Доля отклонённых попыток списания'],
+    ['Checkout success rate', pct(t.checkout_success_rate), `${num(t.paid_checkouts)} of ${num(t.checkouts)} checkouts`, 'Доля оплат, которые прошли — с любой карты и попытки'],
+    ['Recovery rate', pct(t.recovery_rate), `${num(t.recovered)} of ${num(t.first_declined)} recovered`, 'Из оплат с отклонённой первой попыткой — доля, которая всё же прошла'],
+    ['Lost volume', usd(t.lost_usd_cents), `${num(t.checkouts - t.paid_checkouts)} checkouts never paid`, 'Сумма оплат, которые так и не прошли'],
+    ['Checkouts', num(t.checkouts), 'with at least one attempt', 'Оплаты (PaymentIntent), в которых была хотя бы одна попытка списания'],
+  ]);
+}
+
 function renderTabs() {
   $('view').innerHTML = MODES[state.mode].tabs
     .map(([v, title]) => `<button data-v="${v}" class="${v === state.view ? 'on' : ''}" data-tip="${TAB_TIPS[v]}">${title}</button>`)
     .join('');
   $('granularity').hidden = state.view !== 'time';
-  const hints = isTurnover()
-    ? { time: 'Gross volume — all successful charges by payment date, in USD' }
-    : {
-        time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
-        decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
-      };
-  $('hint').textContent = hints[state.view] ?? 'Click a row to see its trend, or a column header to sort';
+  const { hints } = MODES[state.mode];
+  $('hint').textContent = hints[state.view] ?? hints._breakdown ?? 'Click a row to see its trend, or a column header to sort';
 }
 
 // --- таблицы: колонки описываются один раз, сортировка — по клику на заголовок
@@ -353,6 +463,9 @@ const pendingCell = (html, final, title = '') => {
   const approx = !final && !html.startsWith('—');
   return `<td class="${approx ? 'pending' : ''}" title="${title}">${approx ? '≈ ' : ''}${html}</td>`;
 };
+// Доля и рядом количество; нет знаменателя (некого считать) — просто «—»
+const rateCell = (rate, count, final = true, title = '') =>
+  rate === null ? '<td>—</td>' : pendingCell(`${pct(rate)}<span class="n">${num(count)}</span>`, final, title);
 const shareCell = (share) =>
   `<td><span class="bar-cell"><span class="bar"><span style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span>${pct(share)}</span></td>`;
 
@@ -375,24 +488,21 @@ const CONVERSION_COLUMNS = [
     title: 'Trial-to-paid',
     tip: 'Оплатили первый платный период в течение 30 дней после конца триала',
     sort: (p) => p.rate_retry,
-    cell: (p) => pendingCell(`${pct(p.rate_retry)}<span class="n">${num(p.paid_retry)}</span>`, p.final_retry),
+    cell: (p) => rateCell(p.rate_retry, p.paid_retry, p.final_retry),
   },
   {
     key: 'rate_first',
     title: 'First attempt',
     tip: 'Оплатили с первой попытки списания',
     sort: (p) => p.rate_first,
-    cell: (p) => pendingCell(`${pct(p.rate_first)}<span class="n">${num(p.paid_first)}</span>`, p.final_first),
+    cell: (p) => rateCell(p.rate_first, p.paid_first, p.final_first),
   },
   {
     key: 'recovery_rate',
     title: 'Recovery rate',
     tip: 'Доля триалов с отклонённой первой попыткой, оплативших в течение 30 дней после конца триала',
     sort: (p) => p.recovery_rate,
-    cell: (p) =>
-      p.recovery_rate === null
-        ? '<td>—</td>' // отклонённых первых попыток нет (или списаний ещё не было)
-        : pendingCell(`${pct(p.recovery_rate)}<span class="n">${num(p.recovered)}</span>`, p.final_retry, `${num(p.recovered)} of ${num(p.first_declined)} recovered`),
+    cell: (p) => rateCell(p.recovery_rate, p.recovered, p.final_retry, `${num(p.recovered)} of ${num(p.first_declined)} recovered`),
   },
   {
     key: 'approval_rate',
@@ -441,13 +551,81 @@ const REASON_COLUMNS = [
     title: 'Recovery rate',
     tip: 'Доля триалов с первым отказом, оплативших в течение 30 дней после конца триала',
     sort: (r) => r.recovery_rate,
-    cell: (r) =>
-      r.recovery_rate === null
-        ? '<td>—</td>' // причина встречается только на повторных попытках
-        : pendingCell(`${pct(r.recovery_rate)}<span class="n">${num(r.recovered)}</span>`, r.final, `${num(r.recovered)} of ${num(r.first_declines)} recovered`),
+    cell: (r) => rateCell(r.recovery_rate, r.recovered, r.final, `${num(r.recovered)} of ${num(r.first_declines)} recovered`), // нет — причина только на повторных попытках
   },
   { key: 'avg_attempts', title: 'Avg. attempts', tip: 'Попыток на такой триал в среднем', sort: (r) => r.avg_attempts, cell: (r) => `<td>${decimal(r.avg_attempts)}</td>` },
   { key: 'avg_days_to_pay', title: 'Days to recover', tip: 'Дней от первого отказа до оплаты — у восстановленных', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td>${decimal(r.avg_days_to_pay)}</td>` },
+];
+// У eSIM отказ — на чекауте: «первый отказ» и recovery — по оплатам, повтор обычно другой картой через минуту, без «дней до оплаты»
+const ESIM_REASON_TIPS = {
+  first_declines: 'Оплаты, у которых первая попытка отклонена по этой причине',
+  recovery_rate: 'Из оплат с первым отказом по этой причине — доля, которая всё же прошла',
+  avg_attempts: 'Попыток на такую оплату в среднем',
+};
+const ESIM_REASON_COLUMNS = REASON_COLUMNS.filter((c) => c.key !== 'avg_days_to_pay').map((c) => ({ ...c, tip: ESIM_REASON_TIPS[c.key] ?? c.tip }));
+
+// eSIM, повторные покупки: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней
+const REPEAT_COLUMNS = [
+  { key: 'customers', title: 'New customers', tip: 'Клиенты, впервые купившие eSIM в эти дни', sort: (p) => p.customers, cell: (p) => `<td>${num(p.customers)}</td>` },
+  {
+    key: 'repeat_rate_30',
+    title: 'Repeat 30d',
+    tip: 'Купили снова в течение 30 дней после первой покупки',
+    sort: (p) => p.repeat_rate_30,
+    cell: (p) => rateCell(p.repeat_rate_30, p.repeat_30, p.final_30),
+  },
+  {
+    key: 'repeat_rate_90',
+    title: 'Repeat 90d',
+    tip: 'Купили снова в течение 90 дней после первой покупки',
+    sort: (p) => p.repeat_rate_90,
+    cell: (p) => rateCell(p.repeat_rate_90, p.repeat_90, p.final_90),
+  },
+  {
+    key: 'topup_rate_30',
+    title: 'Top-up 30d',
+    tip: 'Пополнили пакет в течение 30 дней после первой покупки',
+    sort: (p) => p.topup_rate_30,
+    cell: (p) => rateCell(p.topup_rate_30, p.topup_30, p.final_30),
+  },
+  {
+    key: 'revenue_per_customer_30',
+    title: 'Revenue / customer 30d',
+    tip: 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов',
+    sort: (p) => p.revenue_per_customer_30,
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_30), p.final_30),
+  },
+  {
+    key: 'revenue_per_customer_90',
+    title: 'Revenue / customer 90d',
+    tip: 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов',
+    sort: (p) => p.revenue_per_customer_90,
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_90), p.final_90),
+  },
+  { key: 'avg_days_to_second', title: 'Days to 2nd purchase', tip: 'Дней от первой покупки до второй — у тех, кто купил снова', sort: (p) => p.avg_days_to_second, cell: (p) => `<td>${decimal(p.avg_days_to_second)}</td>` },
+];
+
+// eSIM, платёжное здоровье: попытки (списания) и оплаты (PaymentIntent — в одной оплате может быть несколько попыток)
+const HEALTH_COLUMNS = [
+  { key: 'charges', title: 'Attempts', tip: 'Попытки списания', sort: (p) => p.charges, cell: (p) => `<td>${num(p.charges)}</td>` },
+  { key: 'approval_rate', title: 'Approval rate', tip: 'Доля успешных попыток списания', sort: (p) => p.approval_rate, cell: (p) => `<td title="${num(p.approved)} of ${num(p.charges)} attempts">${pct(p.approval_rate)}</td>` },
+  { key: 'decline_rate', title: 'Decline rate', tip: 'Доля отклонённых попыток списания', sort: (p) => p.decline_rate, cell: (p) => `<td>${pct(p.decline_rate)}</td>` },
+  { key: 'checkouts', title: 'Checkouts', tip: 'Оплаты, в которых была хотя бы одна попытка', sort: (p) => p.checkouts, cell: (p) => `<td>${num(p.checkouts)}</td>` },
+  {
+    key: 'checkout_success_rate',
+    title: 'Checkout success',
+    tip: 'Доля оплат, которые прошли — с любой карты и попытки',
+    sort: (p) => p.checkout_success_rate,
+    cell: (p) => rateCell(p.checkout_success_rate, p.paid_checkouts),
+  },
+  {
+    key: 'recovery_rate',
+    title: 'Recovery rate',
+    tip: 'Из оплат с отклонённой первой попыткой — доля, которая всё же прошла',
+    sort: (p) => p.recovery_rate,
+    cell: (p) => rateCell(p.recovery_rate, p.recovered),
+  },
+  { key: 'lost_usd_cents', title: 'Lost volume', tip: 'Сумма оплат, которые так и не прошли', sort: (p) => p.lost_usd_cents, cell: (p) => `<td>${usd(p.lost_usd_cents)}</td>` },
 ];
 
 // Без выбранной сортировки: динамика — свежие дни сверху, разбивки — как отдал сервер (по главной метрике)
@@ -490,13 +668,33 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'No d
 
 function renderView(data) {
   const isTime = state.view === 'time';
-  $('charts').hidden = !isTime || isTurnover();
-  $('turnover-charts').hidden = !isTime || !isTurnover();
-  const timeHead = (payment) => ({ day: payment ? 'Payment date' : 'Trial start date', week: 'Week', month: 'Month' })[state.granularity];
+  showCharts(isTime);
+  const timeHead = (day) => ({ day, week: 'Week', month: 'Month' })[state.granularity];
+  const breakdown = { link: true, limit: true };
 
+  if (kind() === 'repeat') {
+    if (isTime) {
+      renderTable([periodColumn(timeHead('First purchase date')), ...REPEAT_COLUMNS], data.series);
+      renderRepeatChart(data.series);
+    } else {
+      renderTable([valueColumn(), ...REPEAT_COLUMNS], data.breakdown, { ...breakdown, empty: 'No new customers for this period' });
+    }
+    return;
+  }
+  if (kind() === 'health') {
+    if (isTime) {
+      renderTable([periodColumn(timeHead('Date')), ...HEALTH_COLUMNS], data.series);
+      renderHealthChart(data.series);
+    } else if (state.view === 'decline_reason') {
+      renderReasons(ESIM_REASON_COLUMNS, data.reasons);
+    } else {
+      renderTable([valueColumn(), ...HEALTH_COLUMNS], data.breakdown, { ...breakdown, empty: 'No payment attempts for this period' });
+    }
+    return;
+  }
   if (isTurnover()) {
     if (isTime) {
-      renderTable([periodColumn(timeHead(true)), ...TURNOVER_COLUMNS], data.series);
+      renderTable([periodColumn(timeHead('Payment date')), ...TURNOVER_COLUMNS], data.series);
       renderTurnoverChart(data.series);
     } else {
       renderTable([valueColumn(), SHARE_COLUMN, ...TURNOVER_COLUMNS], data.breakdown, { link: true, limit: true, empty: 'No payments for this period' });
@@ -504,18 +702,22 @@ function renderView(data) {
     return;
   }
   if (isTime) {
-    renderTable([periodColumn(timeHead(false)), ...CONVERSION_COLUMNS], data.series);
+    renderTable([periodColumn(timeHead('Trial start date')), ...CONVERSION_COLUMNS], data.series);
     renderCharts(data.series);
   } else if (state.view === 'decline_reason') {
-    renderTable(REASON_COLUMNS, data.reasons, { empty: 'No declines for this period' });
-    // итог по всем причинам — в подсказке над таблицей
-    const first = data.reasons.reduce((s, r) => s + r.first_declines, 0);
-    const recovered = data.reasons.reduce((s, r) => s + r.recovered, 0);
-    const approx = data.reasons.every((r) => r.final) ? '' : '≈ ';
-    if (first) $('hint').textContent += `. Overall: ${approx}${pct(recovered / first)} — ${num(recovered)} of ${num(first)} recovered`;
+    renderReasons(REASON_COLUMNS, data.reasons);
   } else {
-    renderTable([valueColumn(), ...CONVERSION_COLUMNS], data.breakdown, { link: true, limit: true });
+    renderTable([valueColumn(), ...CONVERSION_COLUMNS], data.breakdown, breakdown);
   }
+}
+
+function renderReasons(columns, reasons) {
+  renderTable(columns, reasons, { empty: 'No declines for this period' });
+  // итог по всем причинам — в подсказке над таблицей
+  const first = reasons.reduce((s, r) => s + r.first_declines, 0);
+  const recovered = reasons.reduce((s, r) => s + r.recovered, 0);
+  const approx = reasons.every((r) => r.final) ? '' : '≈ ';
+  if (first) $('hint').textContent += `. Overall: ${approx}${pct(recovered / first)} — ${num(recovered)} of ${num(first)} recovered`;
 }
 
 // --- графики (под таблицей)
@@ -567,6 +769,42 @@ function renderCharts(series) {
       scales: { x, y: { grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => num(v) } } },
     },
   });
+}
+
+// Линия долей в процентах; finalKey — пунктир там, где цифра ещё неокончательная
+const percentLine = (series, label, key, finalKey, color) => ({
+  label, data: series.map((p) => (p[key] === null ? null : +(p[key] * 100).toFixed(1))), borderColor: color, backgroundColor: color,
+  borderWidth: 2, pointRadius: series.length > 31 ? 0 : 3, pointHoverRadius: 5, tension: 0.25, spanGaps: true,
+  segment: { borderDash: (ctx) => (!finalKey || series[ctx.p1DataIndex][finalKey] ? undefined : [5, 4]) },
+});
+
+function renderPercentChart(canvasId, series, datasets) {
+  const { muted, grid, x, common } = chartBase();
+  charts.main = new Chart($(canvasId), {
+    type: 'line',
+    data: { labels: chartLabels(series), datasets },
+    options: {
+      ...common,
+      plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` ${c.dataset.label}: ${c.raw ?? '—'}%`) },
+      scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => `${v}%` } } },
+    },
+  });
+}
+
+const renderRepeatChart = (series) =>
+  renderPercentChart('repeat-chart', series, [
+    percentLine(series, 'Repeat 30d', 'repeat_rate_30', 'final_30', css('--s-converted')),
+    percentLine(series, 'Repeat 90d', 'repeat_rate_90', 'final_90', css('--s-first')),
+  ]);
+const renderHealthChart = (series) =>
+  renderPercentChart('health-chart', series, [
+    percentLine(series, 'Approval rate', 'approval_rate', null, css('--s-first')),
+    percentLine(series, 'Checkout success', 'checkout_success_rate', null, css('--s-converted')),
+  ]);
+
+// Графики своего экрана — при смене темы перерисовываются: цвета берутся из неё
+function renderModeCharts(series) {
+  ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, health: renderHealthChart })[kind()](series);
 }
 
 function renderTurnoverChart(series) {
@@ -772,9 +1010,7 @@ const closeSidebar = () => {
 
 // --- обработчики
 // Смена экрана: фильтры, которых у него нет (аккаунт ↔ MID), снимаются; вкладка, которой нет, — на динамику
-$('mode').addEventListener('click', (event) => {
-  const value = event.target.closest('button')?.dataset.v;
-  if (!value || value === state.mode) return;
+function switchMode(value) {
   state.mode = value;
   state.filters = Object.fromEntries(Object.entries(state.filters).filter(([d]) => dimensions().includes(d)));
   if (!MODES[value].tabs.some(([v]) => v === state.view)) state.view = 'time';
@@ -782,6 +1018,17 @@ $('mode').addEventListener('click', (event) => {
   state.showAll = false;
   $('kpis').innerHTML = ''; // у другого экрана другие карточки — до ответа показываем скелетон
   load();
+}
+
+$('mode').addEventListener('click', (event) => {
+  const value = event.target.closest('button')?.dataset.v;
+  if (value && value !== state.mode) switchMode(value);
+});
+
+// Другой продукт — его первый экран
+$('product').addEventListener('click', (event) => {
+  const value = event.target.closest('button')?.dataset.v;
+  if (value && value !== product()) switchMode(Object.keys(MODES).find((m) => MODES[m].product === value));
 });
 
 for (const id of ['provider', 'granularity']) {
@@ -873,7 +1120,7 @@ $('theme').addEventListener('click', (event) => {
     localStorage.setItem('theme', value);
   } catch {}
   markTheme();
-  if (lastData && state.view === 'time') (isTurnover() ? renderTurnoverChart : renderCharts)(lastData.series); // цвета графиков берутся из темы
+  if (lastData && state.view === 'time') renderModeCharts(lastData.series);
 });
 
 document.addEventListener('mousedown', (event) => {

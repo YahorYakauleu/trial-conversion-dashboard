@@ -404,6 +404,12 @@ export function openStore(file: string) {
     },
 
     // Начало загруженной истории аккаунта (для старой базы, где оно не записано)
+    // Первый платёж продукта — у eSIM история начинается с него
+    firstPaymentAt(product: string): number | null {
+      const r = db.prepare('SELECT MIN(paid_at) AS v FROM payments WHERE product = ?').get(product) as { v: number | null };
+      return r.v;
+    },
+
     firstTrialStart(provider: Provider, account: string): number | null {
       const r = db.prepare('SELECT MIN(trial_started_at) AS v FROM trials WHERE provider = ? AND account = ?').get(provider, account) as { v: number | null };
       return r.v;
