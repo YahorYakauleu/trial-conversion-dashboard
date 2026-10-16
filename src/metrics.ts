@@ -91,7 +91,7 @@ export interface MetricsOptions {
   retryWindowDays: number;
 }
 
-type RangeOptions = Omit<MetricsOptions, 'granularity'>;
+export type RangeOptions = Omit<MetricsOptions, 'granularity'>;
 
 export const startOfUtcDay = (ts: number) => Math.floor(ts / DAY) * DAY;
 export const dayKey = (ts: number) => new Date(ts * 1000).toISOString().slice(0, 10);
@@ -176,7 +176,7 @@ export function dimensionFilterSql(sqlBy: Record<string, string>, filters: Parti
 }
 
 // Фильтр по триалам (алиас t): период оформления в местных сутках, провайдер, измерения
-function trialFilter(o: RangeOptions) {
+export function trialFilter(o: RangeOptions) {
   const period = periodSql('t', 't.trial_started_at', o);
   const dimensions = dimensionFilterSql(DIMENSION_SQL, o.filters);
   const params: Record<string, string | number> = { ...period.params, ...dimensions.params, provider: o.provider };

@@ -66,3 +66,9 @@ export const declineHint = (label: string): string => HINTS.get(label) ?? 'Ко�
 
 // Коды антифрода провайдера (Radar, Solidgate): заказ, отсечённый ими, — не потерянная продажа, а отсечённая атака
 export const FRAUD_RULE_CODES = GROUPS.find((g) => g.label === 'Blocked by fraud rules')!.codes;
+
+// Коды отказа группы — для выборки по строке причины: группа → её коды, Unknown → без кода, иначе — сам код
+export function declineCodes(label: string): { codes: string[]; withoutCode: boolean } {
+  if (label === UNKNOWN.label) return { codes: [], withoutCode: true };
+  return { codes: GROUPS.find((g) => g.label === label)?.codes ?? [label], withoutCode: false };
+}

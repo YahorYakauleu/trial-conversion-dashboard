@@ -1,0 +1,189 @@
+import type { Db } from './db.js';
+import { declineCodes, declineLabel } from './declines.js';
+import { cohortCte, ordersCte, type EsimOptions } from './esim.js';
+import { DAY, trialFilter, type RangeOptions } from './metrics.js';
+import { paymentFilter, type TurnoverOptions } from './turnover.js';
+
+// Выгрузка списком: записи, из которых посчитана цифра на экране, — с их ID в Stripe и Solidgate,
+// чтобы точечно посмотреть детали в кабинете провайдера. Для Stripe — ещё и ссылки на объект в дашборде Stripe.
+export const EXPORT_LIMIT = 100_000;
+
+export interface ExportTable {
+  columns: string[];
+  rows: (string | number)[][];
+  truncated: boolean; // строк больше EXPORT_LIMIT — выгружены первые
+}
+
+// ID аккаунтов Stripe — для ссылок вида dashboard.stripe.com/<аккаунт>/payments/ch_…; для других аккаунтов ссылки нет
+const STRIPE_ACCOUNT_IDS: Record<string, string> = {
+  corp: 'acct_1TM4VlLTzrJvLtxV',
+  org: 'acct_1RZWzMIKBsaJbbXt',
+  incorp: 'acct_1TM3AfIV1MMFi0Ss',
+  esim: 'acct_1TGeCJLBLXzWKftL',
+};
+const stripeLink = (provider: string, account: string, path: string, id: string | null) =>
+  provider === 'stripe' && id && STRIPE_ACCOUNT_IDS[account] ? `https://dashboard.stripe.com/${STRIPE_ACCOUNT_IDS[account]}/${path}/${id}` : '';
+
+const utc = (ts: number | null) => (ts === null ? '' : new Date(ts * 1000).toISOString().slice(0, 19).replace('T', ' '));
+const dollars = (cents: number | null) => (cents === null ? '' : (cents / 100).toFixed(2));
+const yesNo = (value: unknown) => (value === null || value === undefined ? '' : value ? 'yes' : 'no');
+const text = (value: string | number | null | undefined) => value ?? '';
+
+// Строк на одну больше лимита — чтобы понять, что выгрузка обрезана
+const limited = <T>(rows: T[]) => ({ rows: rows.slice(0, EXPORT_LIMIT), truncated: rows.length > EXPORT_LIMIT });
+
+// Условие «причина отказа из группы» для строки вкладки Decline reasons
+function reasonSql(column: string, label: string | null) {
+  if (!label) return { sql: '1 = 1', params: {} };
+  const { codes, withoutCode } = declineCodes(label);
+  const params = Object.fromEntries(codes.map((code, i) => [`reason_${i}`, code]));
+  const parts = [codes.length ? `${column} IN (${codes.map((_, i) => `@reason_${i}`).join(', ')})` : '', withoutCode ? `${column} IS NULL` : ''];
+  return { sql: `(${parts.filter(Boolean).join(' OR ')})`, params };
+}
+
+// --- VPN
+
+// Триалы когорты (Conversion: динамика и разрезы)
+export function exportTrials(db: Db, o: RangeOptions): ExportTable {
+  const filter = trialFilter(o);
+  type Row = Record<string, string | number | null>;
+  const all = db
+    .prepare(`SELECT t.* FROM trials t WHERE ${filter.sql} ORDER BY t.trial_started_at, t.subscription_id LIMIT ${EXPORT_LIMIT + 1}`)
+    .all(filter.params) as Row[];
+  const { rows, truncated } = limited(all);
+  const window = o.retryWindowDays * DAY;
+  return {
+    columns: [
+      'provider', 'account', 'subscription_id', 'customer_id', 'first_invoice_id', 'trial_started_utc', 'trial_ended_utc',
+      'paid_within_30_days', 'paid_utc', 'paid_on_first_attempt', 'attempts', 'declines', 'refunded',
+      'mid', 'card_country', 'payment_method', 'card_brand', 'issuing_bank', 'subscription_link', 'customer_link',
+    ],
+    rows: rows.map((t) => {
+      const [provider, account] = [String(t.provider), String(t.account)];
+      const paid = t.paid_at !== null && Number(t.paid_at) <= Number(t.trial_ended_at) + window;
+      return [
+        provider, account, text(t.subscription_id), text(t.customer_id), text(t.first_invoice_id),
+        utc(t.trial_started_at as number), utc(t.trial_ended_at as number),
+        yesNo(paid), utc(t.paid_at as number | null), yesNo(t.first_attempt_succeeded), text(t.attempts), Number(t.attempts) - Number(t.approved), yesNo(t.refunded),
+        text(t.mid), text(t.country), text(t.payment_method), text(t.card_brand), text(t.bank),
+        stripeLink(provider, account, 'subscriptions', t.subscription_id as string), stripeLink(provider, account, 'customers', t.customer_id as string | null),
+      ];
+    }),
+    truncated,
+  };
+}
+
+// Отклонённые попытки первого платежа (Conversion: Decline reasons), по строке причины — только её группа
+export function exportDeclinedAttempts(db: Db, o: RangeOptions, reason: string | null): ExportTable {
+  const filter = trialFilter(o);
+  const byReason = reasonSql('x.reason', reason);
+  type Row = Record<string, string | number | null>;
+  const all = db
+    .prepare(
+      `SELECT * FROM (
+         SELECT a.*, t.account, t.customer_id,
+                ROW_NUMBER() OVER (PARTITION BY a.provider, a.subscription_id ORDER BY a.attempted_at, a.attempt_id) AS attempt_number
+         FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
+         WHERE ${filter.sql}
+       ) x WHERE x.approved = 0 AND ${byReason.sql} ORDER BY x.attempted_at, x.attempt_id LIMIT ${EXPORT_LIMIT + 1}`,
+    )
+    .all({ ...filter.params, ...byReason.params }) as Row[];
+  const { rows, truncated } = limited(all);
+  return {
+    columns: ['provider', 'account', 'attempt_id', 'subscription_id', 'customer_id', 'attempted_utc', 'attempt_number', 'decline_reason', 'decline_code', 'attempt_link', 'subscription_link'],
+    rows: rows.map((a) => {
+      const [provider, account] = [String(a.provider), String(a.account)];
+      return [
+        provider, account, text(a.attempt_id), text(a.subscription_id), text(a.customer_id), utc(a.attempted_at as number), text(a.attempt_number),
+        declineLabel(a.reason as string | null), text(a.reason),
+        stripeLink(provider, account, 'payments', a.attempt_id as string), stripeLink(provider, account, 'subscriptions', a.subscription_id as string),
+      ];
+    }),
+    truncated,
+  };
+}
+
+// Успешные платежи (Volume)
+export function exportPayments(db: Db, o: TurnoverOptions): ExportTable {
+  const filter = paymentFilter(o);
+  type Row = Record<string, string | number | null>;
+  const all = db
+    .prepare(`SELECT p.* FROM payments p WHERE ${filter.sql} ORDER BY p.paid_at, p.payment_id LIMIT ${EXPORT_LIMIT + 1}`)
+    .all(filter.params) as Row[];
+  const { rows, truncated } = limited(all);
+  return {
+    columns: ['provider', 'account', 'mid', 'payment_id', 'paid_utc', 'amount_usd', 'refunded_usd', 'card_country', 'payment_method', 'card_brand', 'issuing_bank', 'payment_link'],
+    rows: rows.map((p) => {
+      const [provider, account] = [String(p.provider), String(p.account)];
+      return [
+        provider, account, text(p.mid), text(p.payment_id), utc(p.paid_at as number), dollars(p.amount_usd_cents as number), dollars(p.refunded_usd_cents as number),
+        text(p.country), text(p.payment_method), text(p.card_brand), text(p.bank), stripeLink(provider, account, 'payments', p.payment_id as string),
+      ];
+    }),
+    truncated,
+  };
+}
+
+// --- eSIM (аккаунт Stripe esim)
+
+// Заказы (Overview); на вкладке Decline reasons — только неоплаченные, по строке причины — с этой причиной последней попытки
+export function exportOrders(db: Db, o: EsimOptions, unpaid: { reason: string | null } | null): ExportTable {
+  const cte = ordersCte(o, "''");
+  const byReason = reasonSql('last_reason', unpaid?.reason ?? null);
+  type Row = Record<string, string | number | null>;
+  const all = db
+    .prepare(`${cte.sql} SELECT * FROM orders WHERE ${unpaid ? `paid = 0 AND ${byReason.sql}` : '1 = 1'} ORDER BY started_at, order_id LIMIT ${EXPORT_LIMIT + 1}`)
+    .all({ ...cte.params, ...byReason.params }) as Row[];
+  const { rows, truncated } = limited(all);
+  return {
+    columns: [
+      'order_id', 'customer_id', 'started_utc', 'status', 'new_customer', 'order_type', 'destination', 'package', 'amount_usd', 'revenue_usd',
+      'attempts', 'decline_reason', 'decline_code', 'card_country', 'payment_method', 'card_brand', 'charge_ids', 'order_link', 'customer_link',
+    ],
+    rows: rows.map((r) => {
+      const status = r.paid ? 'paid' : r.fraud ? 'blocked as fraud' : 'not paid';
+      return [
+        text(r.order_id), text(r.customer_id), utc(r.started_at as number), status, r.paid ? yesNo(r.first_purchase) : '', text(r.order_type),
+        text(r.destination), text(r.package), dollars(r.amount as number), dollars(r.revenue as number), text(r.attempts),
+        r.paid ? '' : declineLabel(r.last_reason as string | null), r.paid ? '' : text(r.last_reason),
+        text(r.country), text(r.payment_method), text(r.card_brand), text(r.charge_ids),
+        stripeLink('stripe', 'esim', 'payments', r.order_id as string), stripeLink('stripe', 'esim', 'customers', r.customer_id as string | null),
+      ];
+    }),
+    truncated,
+  };
+}
+
+// Новые клиенты когорты (Retention)
+export function exportCustomers(db: Db, o: EsimOptions): ExportTable {
+  const cte = cohortCte(o);
+  type Row = Record<string, string | number | null>;
+  const all = db.prepare(`${cte.sql} SELECT * FROM cohort ORDER BY paid_at, customer_id LIMIT ${EXPORT_LIMIT + 1}`).all(cte.params) as Row[];
+  const { rows, truncated } = limited(all);
+  return {
+    columns: [
+      'customer_id', 'first_purchase_utc', 'first_order_id', 'destination', 'package', 'card_country', 'payment_method', 'card_brand',
+      'returned_within_30_days', 'second_purchase_utc', 'revenue_90_days_usd', 'customer_link',
+    ],
+    rows: rows.map((c) => {
+      const first = Number(c.paid_at);
+      const second = c.second_at === null ? null : Number(c.second_at);
+      // ещё не прошло 30 дней и снова не покупал — пока неизвестно
+      const returned = second !== null && second < first + 30 * DAY ? 'yes' : o.now < first + 30 * DAY ? 'not yet' : 'no';
+      return [
+        text(c.customer_id), utc(first), text(c.intent_id ?? c.payment_id), text(c.destination), text(c.package), text(c.country), text(c.payment_method), text(c.card_brand),
+        returned, utc(second), dollars(c.revenue_90 as number), stripeLink('stripe', 'esim', 'customers', c.customer_id as string),
+      ];
+    }),
+    truncated,
+  };
+}
+
+// CSV с BOM — чтобы Numbers и Excel сразу открыли UTF-8
+export function toCsv(table: ExportTable): string {
+  const cell = (v: string | number) => {
+    const s = String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return '﻿' + [table.columns, ...table.rows].map((row) => row.map(cell).join(',')).join('\r\n') + '\r\n';
+}

@@ -172,6 +172,24 @@ describe('server', () => {
     expect((await (await fetch(`${plain}/api/turnover`, { headers: auth })).json()).products).toEqual(['vpn']);
   });
 
+  it('/api/export: CSV текущей выборки — имя файла с экраном и периодом; строка причины; без eSIM — 404', async () => {
+    const url = await start();
+    const res = await fetch(`${url}/api/export?mode=conversion&period=custom&from=2026-09-10&to=2026-09-12`, { headers: auth });
+    expect([res.status, res.headers.get('content-type'), res.headers.get('content-disposition')]).toEqual([
+      200,
+      'text/csv; charset=utf-8',
+      'attachment; filename="vpn-trials_2026-09-10_2026-09-12.csv"',
+    ]);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]); // BOM — чтобы Numbers и Excel открыли UTF-8 (fetch при чтении текстом его срезает)
+    expect(new TextDecoder().decode(bytes).split('\r\n')[0]).toMatch(/^provider,account,subscription_id,customer_id,/);
+    const reasons = await fetch(`${url}/api/export?mode=conversion&view=decline_reason&reason=Fraudulent&period=custom&from=2026-09-10&to=2026-09-10`, { headers: auth });
+    expect(reasons.headers.get('content-disposition')).toContain('vpn-declined-attempts_');
+    expect((await fetch(`${url}/api/export?mode=turnover`, { headers: auth })).headers.get('content-disposition')).toContain('vpn-payments_');
+    expect((await fetch(`${url}/api/export?mode=esim_overview`, { headers: auth })).status).toBe(404);
+    expect((await fetch(`${url}/api/export`)).status).toBe(401);
+  });
+
   it('/api/sync: 202, а во время синка — 409', async () => {
     let release!: () => void;
     const url = await start([

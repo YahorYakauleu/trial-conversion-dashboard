@@ -67,8 +67,9 @@ const withOverviewRates = <T extends OverviewCounts>(c: T): T & OverviewTotals =
 });
 
 // Заказы периода: попытки → заказ (день и разрезы — по первой попытке, причина отказа — по последней).
-// Новый клиент — если оплата заказа стала первой успешной покупкой клиента за всю историю
-function ordersCte(o: EsimOptions, key: string) {
+// Новый клиент — если оплата заказа стала первой успешной покупкой клиента за всю историю.
+// Общая основа для цифр экрана и выгрузки списком (src/export.ts)
+export function ordersCte(o: EsimOptions, key: string) {
   const period = periodSql('p', 'p.paid_at', o);
   const dims = dimensionFilterSql(column('p'), o.filters);
   const fraud = FRAUD_RULE_CODES.map((code) => `'${code}'`).join(', ');
@@ -81,18 +82,21 @@ function ordersCte(o: EsimOptions, key: string) {
     c AS (
       SELECT p.*, COALESCE(p.intent_id, p.payment_id) AS order_id,
              ROW_NUMBER() OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id) ORDER BY p.paid_at, p.payment_id) AS n,
-             COUNT(*) OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id)) AS attempts,
+             COUNT(*) OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id)) AS n_attempts,
              p.payment_id IN (SELECT payment_id FROM first_paid) AS first_purchase
       FROM payments p WHERE p.product = 'esim' AND ${[period.sql, ...dims.clauses].join(' AND ')}
     ),
     orders AS (
-      SELECT MAX(CASE WHEN c.n = 1 THEN ${key} END) AS key,
+      SELECT c.order_id, MAX(CASE WHEN c.n = 1 THEN ${key} END) AS key,
              MAX(c.approved) AS paid,
              MAX(c.first_purchase) AS first_purchase,
              MAX(c.approved = 0 AND c.reason IN (${fraud})) AS fraud,
-             MAX(CASE WHEN c.n = c.attempts THEN c.reason END) AS last_reason,
+             MAX(CASE WHEN c.n = c.n_attempts THEN c.reason END) AS last_reason,
              SUM(CASE WHEN c.approved = 1 THEN c.amount_usd_cents - c.refunded_usd_cents ELSE 0 END) AS revenue,
-             SUM(CASE WHEN c.n = 1 THEN c.amount_usd_cents ELSE 0 END) AS amount
+             SUM(CASE WHEN c.n = 1 THEN c.amount_usd_cents ELSE 0 END) AS amount,
+             -- для выгрузки: кто, когда и что покупал (разрезы — по первой попытке), сколько попыток, какие списания
+             MAX(c.customer_id) AS customer_id, MIN(c.paid_at) AS started_at, COUNT(*) AS attempts, GROUP_CONCAT(c.payment_id, ' ') AS charge_ids,
+             ${['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'].map((d) => `MAX(CASE WHEN c.n = 1 THEN c.${d} END) AS ${d}`).join(', ')}
       FROM c GROUP BY c.order_id
     )`;
   return { sql, params: { ...period.params, ...dims.params } };
@@ -200,37 +204,47 @@ const withRepeatRates = <T extends RepeatCounts>(c: T, now: number): T & RepeatT
   final_90: c.last_first_at + D90 <= now,
 });
 
-// Один проход: успешные покупки клиента по порядку → итоги по клиенту → когорты по первой покупке (её же разрезы)
-function repeatSums(db: Db, o: EsimOptions, key: string) {
+// Когорта: клиенты, впервые купившие в периоде, — строка первой покупки (её разрезы) и итоги клиента:
+// когда купил второй раз, выручка за 30 и 90 дней, пополнял ли. Общая основа для цифр экрана и выгрузки (src/export.ts)
+export function cohortCte(o: EsimOptions) {
   const period = periodSql('f', 'f.paid_at', o);
   const dims = dimensionFilterSql(column('f'), o.filters);
-  return db
-    .prepare(
-      `WITH ranked AS (
-         SELECT p.*, p.amount_usd_cents - p.refunded_usd_cents AS net,
-                ROW_NUMBER() OVER (PARTITION BY p.customer_id ORDER BY p.paid_at, p.payment_id) AS n,
-                MIN(p.paid_at) OVER (PARTITION BY p.customer_id) AS first_at
-         FROM payments p WHERE p.product = 'esim' AND p.approved = 1 AND p.customer_id IS NOT NULL
-       ),
-       per_customer AS (
-         SELECT customer_id,
-                MIN(CASE WHEN n = 2 THEN paid_at END) AS second_at,
-                SUM(CASE WHEN paid_at < first_at + @d30 THEN net ELSE 0 END) AS revenue_30,
-                SUM(CASE WHEN paid_at < first_at + @d90 THEN net ELSE 0 END) AS revenue_90,
-                MAX(n > 1 AND COALESCE(order_type, '') = 'topup' AND paid_at < first_at + @d30) AS topup_30
-         FROM ranked GROUP BY customer_id
-       )
-       SELECT ${key} AS key, COUNT(*) AS customers,
-              -- у клиента без второй покупки second_at пуст — сравнение даёт NULL, поэтому COALESCE
-              COALESCE(SUM(c.second_at < f.paid_at + @d30), 0) AS repeat_30, COALESCE(SUM(c.second_at < f.paid_at + @d90), 0) AS repeat_90,
-              COALESCE(SUM(c.topup_30), 0) AS topup_30, SUM(c.revenue_30) AS revenue_30, SUM(c.revenue_90) AS revenue_90,
-              SUM(c.second_at IS NOT NULL) AS repeaters,
-              COALESCE(SUM(c.second_at - f.paid_at), 0) AS seconds_to_second, MIN(f.paid_at) AS first_first_at, MAX(f.paid_at) AS last_first_at
+  const sql = `WITH ranked AS (
+       SELECT p.*, p.amount_usd_cents - p.refunded_usd_cents AS net,
+              ROW_NUMBER() OVER (PARTITION BY p.customer_id ORDER BY p.paid_at, p.payment_id) AS n,
+              MIN(p.paid_at) OVER (PARTITION BY p.customer_id) AS first_at
+       FROM payments p WHERE p.product = 'esim' AND p.approved = 1 AND p.customer_id IS NOT NULL
+     ),
+     per_customer AS (
+       SELECT customer_id,
+              MIN(CASE WHEN n = 2 THEN paid_at END) AS second_at,
+              SUM(CASE WHEN paid_at < first_at + @d30 THEN net ELSE 0 END) AS revenue_30,
+              SUM(CASE WHEN paid_at < first_at + @d90 THEN net ELSE 0 END) AS revenue_90,
+              MAX(n > 1 AND COALESCE(order_type, '') = 'topup' AND paid_at < first_at + @d30) AS topup_30
+       FROM ranked GROUP BY customer_id
+     ),
+     cohort AS (
+       SELECT f.*, c.second_at, c.revenue_30, c.revenue_90, c.topup_30
        FROM ranked f JOIN per_customer c ON c.customer_id = f.customer_id
        WHERE f.n = 1 AND ${[period.sql, ...dims.clauses].join(' AND ')}
-       GROUP BY key`,
+     )`;
+  return { sql, params: { ...period.params, ...dims.params, d30: D30, d90: D90 } };
+}
+
+function repeatSums(db: Db, o: EsimOptions, key: string) {
+  const cte = cohortCte(o);
+  return db
+    .prepare(
+      `${cte.sql}
+       SELECT ${key} AS key, COUNT(*) AS customers,
+              -- у клиента без второй покупки second_at пуст — сравнение даёт NULL, поэтому COALESCE
+              COALESCE(SUM(f.second_at < f.paid_at + @d30), 0) AS repeat_30, COALESCE(SUM(f.second_at < f.paid_at + @d90), 0) AS repeat_90,
+              COALESCE(SUM(f.topup_30), 0) AS topup_30, SUM(f.revenue_30) AS revenue_30, SUM(f.revenue_90) AS revenue_90,
+              SUM(f.second_at IS NOT NULL) AS repeaters,
+              COALESCE(SUM(f.second_at - f.paid_at), 0) AS seconds_to_second, MIN(f.paid_at) AS first_first_at, MAX(f.paid_at) AS last_first_at
+       FROM cohort f GROUP BY key`,
     )
-    .all({ ...period.params, ...dims.params, d30: D30, d90: D90 }) as unknown as (RepeatCounts & { key: string | number | null })[];
+    .all(cte.params) as unknown as (RepeatCounts & { key: string | number | null })[];
 }
 
 export function getRepeat(db: Db, o: EsimOptions & { granularity: Granularity }) {

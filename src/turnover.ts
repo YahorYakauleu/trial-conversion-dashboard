@@ -63,7 +63,7 @@ const withTotals = <T extends Sums>(s: T): T & TurnoverTotals => ({
   average: s.payments === 0 ? null : Math.round(s.gross / s.payments),
 });
 
-function paymentFilter(o: TurnoverOptions) {
+export function paymentFilter(o: TurnoverOptions) {
   const period = periodSql('p', 'p.paid_at', o);
   const dimensions = dimensionFilterSql(DIMENSION_SQL, o.filters);
   const params: Record<string, string | number> = { ...period.params, ...dimensions.params, provider: o.provider };

@@ -28,6 +28,7 @@ import {
   REPEAT_DIMENSIONS,
   type EsimFilters,
 } from './esim.js';
+import { EXPORT_LIMIT, exportCustomers, exportDeclinedAttempts, exportOrders, exportPayments, exportTrials, toCsv, type ExportTable } from './export.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
 import { localDay } from './time.js';
 import {
@@ -244,6 +245,37 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         .sort((a, b) => b.count - a.count),
     );
     res.json({ values });
+  });
+
+  // Выгрузка списком (CSV): записи, из которых посчитана цифра, — для текущей выборки, с теми же параметрами, что у экрана.
+  // Строка таблицы сужает выборку: период строки (динамика), значение разреза или &reason=<группа> (причины отказа)
+  app.get('/api/export', (req, res) => {
+    const mode = String(req.query.mode ?? 'conversion');
+    const view = String(req.query.view ?? 'time');
+    const reason = typeof req.query.reason === 'string' && req.query.reason ? req.query.reason : null;
+    const esim = mode.startsWith('esim_');
+    if (esim && !esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
+    const { now, range, ...rest } = esim ? common(req.query, esimFirstDay()) : common(req.query);
+    const base = { now, ...range, timeZones: config.timeZones };
+    const exported = ((): [string, ExportTable] | null => {
+      if (mode === 'conversion') {
+        const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
+        return view === 'decline_reason' ? ['vpn-declined-attempts', exportDeclinedAttempts(store.db, o, reason)] : ['vpn-trials', exportTrials(store.db, o)];
+      }
+      if (mode === 'turnover') return ['vpn-payments', exportPayments(store.db, { ...base, provider: rest.provider, filters: parseFilters(req.query, TURNOVER_DIMENSIONS) })];
+      if (mode === 'esim_overview') {
+        const o = { ...base, filters: parseFilters(req.query, OVERVIEW_DIMENSIONS) };
+        return view === 'decline_reason' ? ['esim-unpaid-orders', exportOrders(store.db, o, { reason })] : ['esim-orders', exportOrders(store.db, o, null)];
+      }
+      if (mode === 'esim_repeat') return ['esim-new-customers', exportCustomers(store.db, { ...base, filters: parseFilters(req.query, REPEAT_DIMENSIONS) })];
+      return null;
+    })();
+    if (!exported) return void res.status(404).json({ error: `Unknown report: ${mode}` });
+    const [name, table] = exported;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}_${range.from}_${range.to}.csv"`);
+    if (table.truncated) res.setHeader('X-Export-Truncated', String(EXPORT_LIMIT)); // выгружены первые EXPORT_LIMIT строк
+    res.send(toCsv(table));
   });
 
   app.post('/api/sync', auth.requireAdmin, (_req, res) => {
