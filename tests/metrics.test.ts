@@ -253,6 +253,8 @@ describe('платёжные метрики: проходимость, decline, 
   it('проходимость и decline — по попыткам; рефанды — от сконвертившихся', () => {
     const { totals } = getMetrics(paymentsStore().db, opts);
     expect(totals).toMatchObject({ started: 4, paid_retry: 2, attempts: 6, approved: 2, refunded: 1 });
+    // первая попытка отклонена у b (оплатил на ретрае) и c (не оплатил)
+    expect(totals).toMatchObject({ first_declined: 2, recovered: 1, recovery_rate: 0.5 });
     expect(totals.approval_rate).toBeCloseTo(2 / 6);
     expect(totals.decline_rate).toBeCloseTo(4 / 6);
     expect(totals.refund_rate).toBe(0.5);
@@ -260,14 +262,18 @@ describe('платёжные метрики: проходимость, decline, 
 
   it('без попыток — проходимость и decline пустые, а не ноль', () => {
     const { totals } = getMetrics(storeWith([trial(s)]).db, opts);
-    expect(totals).toMatchObject({ attempts: 0, approval_rate: null, decline_rate: null, refund_rate: null });
+    expect(totals).toMatchObject({ attempts: 0, approval_rate: null, decline_rate: null, refund_rate: null, recovery_rate: null });
   });
 
   it('метрики попыток учитывают фильтры и разбивки', () => {
     const store = paymentsStore();
     expect(getMetrics(store.db, { ...opts, provider: 'solidgate' }).totals).toMatchObject({ attempts: 2, approved: 0, decline_rate: 1 });
     const byProviderMethod = getBreakdown(store.db, opts, 'payment_method');
-    expect(byProviderMethod[0]).toMatchObject({ value: 'apple_pay', attempts: 6, approved: 2 });
+    expect(byProviderMethod[0]).toMatchObject({ value: 'apple_pay', attempts: 6, approved: 2, first_declined: 2, recovered: 1 });
+    expect(getBreakdown(store.db, opts, 'account').map((r) => [r.value, r.recovery_rate])).toEqual([
+      ['stripe:corp', 1], // b — единственный с отказом первой попытки, оплатил
+      ['solidgate:sgH2H', 0],
+    ]);
   });
 
   it('причины отказа: коды Stripe и Solidgate сведены к общим названиям (как в Stripe) с пояснением, доля от всех отказов', () => {

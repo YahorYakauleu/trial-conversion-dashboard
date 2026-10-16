@@ -385,6 +385,16 @@ const CONVERSION_COLUMNS = [
     cell: (p) => pendingCell(`${pct(p.rate_first)}<span class="n">${num(p.paid_first)}</span>`, p.final_first),
   },
   {
+    key: 'recovery_rate',
+    title: 'Recovery rate',
+    tip: 'Доля триалов с отклонённой первой попыткой, оплативших в течение 30 дней после конца триала',
+    sort: (p) => p.recovery_rate,
+    cell: (p) =>
+      p.recovery_rate === null
+        ? '<td>—</td>' // отклонённых первых попыток нет (или списаний ещё не было)
+        : pendingCell(`${pct(p.recovery_rate)}<span class="n">${num(p.recovered)}</span>`, p.final_retry, `${num(p.recovered)} of ${num(p.first_declined)} recovered`),
+  },
+  {
     key: 'approval_rate',
     title: 'Approval rate',
     tip: 'Доля успешных попыток списания',

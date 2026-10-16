@@ -39,6 +39,8 @@ export interface Counts {
   attempts: number; // попыток списания первого платного периода
   approved: number; // из них успешных
   refunded: number; // сконвертившихся, кому вернули первый платёж
+  first_declined: number; // первая попытка списания отклонена
+  recovered: number; // из них всё же оплатили в окне ретраев
 }
 
 export interface Totals extends Counts {
@@ -47,8 +49,9 @@ export interface Totals extends Counts {
   approval_rate: number | null; // проходимость: успешные попытки / все попытки
   decline_rate: number | null; // отклонённые попытки / все попытки
   refund_rate: number | null; // рефанды / сконвертившиеся
+  recovery_rate: number | null; // восстановленные / триалы с отклонённой первой попыткой
   final_first: boolean;
-  final_retry: boolean; // для конверсии, проходимости, decline и рефандов
+  final_retry: boolean; // для конверсии, проходимости, decline, рефандов и recovery
 }
 
 export interface Point extends Totals {
@@ -92,7 +95,7 @@ export const dayKey = (ts: number) => new Date(ts * 1000).toISOString().slice(0,
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
 const isDay = (value: unknown): value is string =>
   typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
-const zero = (): Counts => ({ started: 0, paid_first: 0, paid_retry: 0, attempts: 0, approved: 0, refunded: 0 });
+const zero = (): Counts => ({ started: 0, paid_first: 0, paid_retry: 0, attempts: 0, approved: 0, refunded: 0, first_declined: 0, recovered: 0 });
 
 // Условие «момент column попал в местные сутки периода» — в часовом поясе провайдера строки (alias — алиас таблицы).
 // node:sqlite не принимает лишние именованные параметры — условия есть для всех провайдеров, параметры используются все.
@@ -183,6 +186,8 @@ function trialFilter(o: RangeOptions) {
 function aggregate(db: Db, o: RangeOptions, key: string): Map<string | number | null, Counts & { max_len: number }> {
   const filter = trialFilter(o);
   const paid = 't.paid_at IS NOT NULL AND t.paid_at <= t.trial_ended_at + @window';
+  // первая попытка отклонена — по флагу в строке триала (совпадает с первой попыткой в attempts, без прохода по ним)
+  const firstDeclined = 't.attempts > 0 AND t.first_attempt_succeeded = 0';
   const rows = db
     .prepare(
       `SELECT ${key} AS key,
@@ -192,6 +197,8 @@ function aggregate(db: Db, o: RangeOptions, key: string): Map<string | number | 
               SUM(CASE WHEN ${paid} AND t.refunded = 1 THEN 1 ELSE 0 END) AS refunded,
               SUM(t.attempts) AS attempts,
               SUM(t.approved) AS approved,
+              SUM(CASE WHEN ${firstDeclined} THEN 1 ELSE 0 END) AS first_declined,
+              SUM(CASE WHEN ${firstDeclined} AND ${paid} THEN 1 ELSE 0 END) AS recovered,
               MAX(t.trial_ended_at - t.trial_started_at) AS max_len
        FROM trials t WHERE ${filter.sql} GROUP BY key`,
     )
@@ -218,6 +225,7 @@ function withRates<T extends Counts & { final_first: boolean; final_retry: boole
     approval_rate: rate(c.approved, c.attempts),
     decline_rate: rate(c.attempts - c.approved, c.attempts),
     refund_rate: rate(c.refunded, c.paid_retry),
+    recovery_rate: rate(c.recovered, c.first_declined),
   };
 }
 
@@ -348,6 +356,8 @@ const add = (a: Counts, b: Counts): Counts => ({
   attempts: a.attempts + b.attempts,
   approved: a.approved + b.approved,
   refunded: a.refunded + b.refunded,
+  first_declined: a.first_declined + b.first_declined,
+  recovered: a.recovered + b.recovered,
 });
 
 // Неделя — ISO (с понедельника), месяц — календарный; края, обрезанные периодом, подписаны его днями
