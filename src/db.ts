@@ -399,7 +399,7 @@ export function openStore(file: string) {
 
     failStaleRuns(now = nowSec()): void {
       db.prepare(
-        `UPDATE sync_runs SET status = 'error', error = 'процесс остановился во время синка', finished_at = ?
+        `UPDATE sync_runs SET status = 'error', error = 'process stopped during sync', finished_at = ?
          WHERE status = 'running'`,
       ).run(now);
     },

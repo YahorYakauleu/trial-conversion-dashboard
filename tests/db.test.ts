@@ -157,7 +157,7 @@ describe('Store', () => {
     store.failStaleRuns(500);
     expect(store.latestRuns()[0]).toMatchObject({
       last_status: 'error',
-      last_error: 'процесс остановился во время синка',
+      last_error: 'process stopped during sync',
     });
   });
 

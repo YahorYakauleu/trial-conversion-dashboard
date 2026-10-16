@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -22,43 +22,43 @@
 <body>
 <div class="layout">
   <!-- Панель выборки: экран, провайдер, период и фильтры по измерениям -->
-  <aside class="sidebar" id="sidebar" aria-label="Выборка">
+  <aside class="sidebar" id="sidebar" aria-label="Filters">
     <div class="brand">
       <img class="brand-mark" src="/assets/favicon.svg" alt="" />
       <div class="brand-name">Billing Dashboard</div>
     </div>
 
     <section class="side-group">
-      <div class="side-label">Экран</div>
-      <div class="seg" id="mode" role="group" aria-label="Экран">
-        <button data-v="conversion">Конверсия</button><button data-v="turnover">Оборот</button>
+      <div class="side-label">Report</div>
+      <div class="seg" id="mode" role="group" aria-label="Report">
+        <button data-v="conversion" data-tip="Конверсия триалов в платные и платёжные метрики первого платежа">Conversion</button><button data-v="turnover" data-tip="Оборот: все успешные списания по дню платежа">Volume</button>
       </div>
     </section>
 
     <section class="side-group">
-      <div class="side-label">Провайдер</div>
-      <div class="seg" id="provider" role="group" aria-label="Провайдер">
-        <button data-v="all">Все</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
+      <div class="side-label">Provider</div>
+      <div class="seg" id="provider" role="group" aria-label="Provider">
+        <button data-v="all">All</button><button data-v="stripe">Stripe</button><button data-v="solidgate">Solidgate</button>
       </div>
     </section>
 
     <section class="side-group">
-      <div class="side-label">Период</div>
+      <div class="side-label">Period</div>
       <button class="picker" id="period" aria-haspopup="dialog"></button>
     </section>
 
     <section class="side-group">
-      <div class="side-label">Фильтры <button class="link-btn" id="reset-filters" hidden>Сбросить</button></div>
+      <div class="side-label">Filters <button class="link-btn" id="reset-filters" hidden>Reset</button></div>
       <div class="filters" id="filters"></div>
     </section>
 
     <div class="side-foot">
       <div class="who"><b id="role"></b>
-        <form method="post" action="/logout"><button class="link-btn" type="submit">Выйти</button></form>
+        <form method="post" action="/logout"><button class="link-btn" type="submit">Sign out</button></form>
       </div>
-      <div class="seg icons" id="theme" role="group" aria-label="Тема">
-        <button data-v="light" title="Светлая"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
-        <button data-v="dark" title="Тёмная"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+      <div class="seg icons" id="theme" role="group" aria-label="Theme">
+        <button data-v="light" title="Light"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+        <button data-v="dark" title="Dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
       </div>
     </div>
   </aside>
@@ -69,20 +69,20 @@
     <header class="topbar">
       <button class="btn menu-btn" id="menu-open" aria-controls="sidebar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
-        <span>Выборка</span>
+        <span>Filters</span>
       </button>
       <div class="page-title">
-        <h1 id="title">Конверсия триалов</h1>
+        <h1 id="title">Trial conversion</h1>
         <div class="muted" id="subtitle"></div>
       </div>
       <div class="actions">
-        <button class="btn" id="help-open" title="Как считаются метрики">
+        <button class="btn" id="help-open" title="How the metrics are calculated">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>
-          <span>Как считается</span>
+          <span>Methodology</span>
         </button>
-        <button class="btn" id="refresh" title="Запустить синк" hidden>
+        <button class="btn" id="refresh" title="Run sync" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
-          <span>Обновить</span>
+          <span>Refresh</span>
         </button>
       </div>
     </header>
@@ -93,11 +93,11 @@
     <div id="content">
       <section class="kpis" id="kpis"></section>
 
-      <nav class="tabs" id="view" aria-label="Разрез"></nav>
+      <nav class="tabs" id="view" aria-label="Breakdown"></nav>
 
       <div class="view-head">
-        <div class="seg" id="granularity" role="group" aria-label="Шаг">
-          <button data-v="day">День</button><button data-v="week">Неделя</button><button data-v="month">Месяц</button>
+        <div class="seg" id="granularity" role="group" aria-label="Granularity">
+          <button data-v="day">Day</button><button data-v="week">Week</button><button data-v="month">Month</button>
         </div>
         <span class="hint" id="hint"></span>
       </div>
@@ -116,25 +116,25 @@
       <section id="charts">
         <div class="panel">
           <div class="chart-head">
-            <h2>Конверсия по дню оформления, %</h2>
+            <h2>Trial-to-paid rate by trial start date, %</h2>
             <div class="legend">
-              <span><i style="background: var(--s-converted)"></i>Сконвертилось</span>
-              <span><i style="background: var(--s-first)"></i>С первой попытки</span>
-              <span><i class="dashed"></i>≈ неокончательно</span>
+              <span data-tip="Оплатили первый платный период в течение 30 дней после конца триала"><i style="background: var(--s-converted)"></i>Trial-to-paid</span>
+              <span data-tip="Оплатили с первой попытки списания"><i style="background: var(--s-first)"></i>First-attempt</span>
+              <span data-tip="Окно ожидания оплаты ещё не закрылось — цифра может вырасти"><i class="dashed"></i>≈ not final</span>
             </div>
           </div>
-          <div class="chart"><canvas id="rate-chart" aria-label="Конверсия триалов в платные, проценты"></canvas></div>
+          <div class="chart"><canvas id="rate-chart" aria-label="Trial-to-paid rate, percent"></canvas></div>
         </div>
         <div class="panel">
-          <div class="chart-head"><h2>Оформлено триалов</h2></div>
-          <div class="chart small"><canvas id="count-chart" aria-label="Число оформленных триалов"></canvas></div>
+          <div class="chart-head"><h2>Trials started</h2></div>
+          <div class="chart small"><canvas id="count-chart" aria-label="Trials started"></canvas></div>
         </div>
       </section>
 
       <section id="turnover-charts" hidden>
         <div class="panel">
-          <div class="chart-head"><h2>Оборот, $</h2></div>
-          <div class="chart"><canvas id="turnover-chart" aria-label="Оборот по дате платежа, доллары"></canvas></div>
+          <div class="chart-head"><h2>Gross volume, $</h2></div>
+          <div class="chart"><canvas id="turnover-chart" aria-label="Gross volume by payment date, USD"></canvas></div>
         </div>
       </section>
     </div>
@@ -142,14 +142,14 @@
 </div>
 
 <div class="overlay" id="help-overlay" hidden></div>
-<aside class="drawer" id="help" role="dialog" aria-modal="true" aria-label="Как считаются метрики" hidden>
+<aside class="drawer" id="help" role="dialog" aria-modal="true" aria-label="How the metrics are calculated" hidden>
   <div class="drawer-head">
-    <div class="seg" id="help-tabs" role="tablist" aria-label="Раздел">
-      <button data-v="metrics" role="tab">Метрики</button><button data-v="data-sources" role="tab">Откуда данные</button>
+    <div class="seg" id="help-tabs" role="tablist" aria-label="Section">
+      <button data-v="metrics" role="tab">Metrics</button><button data-v="data-sources" role="tab">Data sources</button>
     </div>
-    <button class="btn" id="help-close" aria-label="Закрыть">✕</button>
+    <button class="btn" id="help-close" aria-label="Close">✕</button>
   </div>
-  <article class="doc" id="help-body">Загрузка…</article>
+  <article class="doc" id="help-body">Loading…</article>
 </aside>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>

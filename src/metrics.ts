@@ -1,5 +1,5 @@
 import type { Db, Provider } from './db.js';
-import { declineLabel } from './declines.js';
+import { declineHint, declineLabel } from './declines.js';
 import { addDays, localDay, localMidnight } from './time.js';
 
 export const DAY = 86_400;
@@ -62,6 +62,7 @@ export interface BreakdownRow extends Totals {
 
 export interface ReasonRow {
   reason: string; // общее название причины (коды Stripe и Solidgate сведены)
+  hint: string; // короткое пояснение по-русски — для подсказки
   count: number; // отклонённых попыток с этой причиной
   share: number; // доля от всех отказов
   // Восстановление: триалы, у которых первая попытка первого платежа отклонена по этой причине, и сколько из них потом оплатили
@@ -327,6 +328,7 @@ export function getDeclineReasons(db: Db, o: RangeOptions): ReasonRow[] {
   return [...byLabel]
     .map(([reason, g]) => ({
       reason,
+      hint: declineHint(reason),
       count: g.count,
       share: g.count / total,
       first_declines: g.first_declines,
@@ -336,7 +338,7 @@ export function getDeclineReasons(db: Db, o: RangeOptions): ReasonRow[] {
       avg_days_to_pay: g.recovered === 0 ? null : g.seconds_to_pay / g.recovered / DAY,
       final: g.last_trial_end === null || g.last_trial_end + o.retryWindowDays * DAY <= o.now,
     }))
-    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, 'ru'));
+    .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, 'en'));
 }
 
 const add = (a: Counts, b: Counts): Counts => ({

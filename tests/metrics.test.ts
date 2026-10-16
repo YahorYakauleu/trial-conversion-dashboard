@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type AttemptRow, type PaymentRow, type TrialRow } from '../src/db.js';
+import { declineHint, declineLabel } from '../src/declines.js';
 import { DAY, getBreakdown, getDeclineReasons, getMetrics, latestDay, resolveRange, totalsOf } from '../src/metrics.js';
 import { getTurnover, getTurnoverBreakdown } from '../src/turnover.js';
 
@@ -269,19 +270,30 @@ describe('платёжные метрики: проходимость, decline, 
     expect(byProviderMethod[0]).toMatchObject({ value: 'apple_pay', attempts: 6, approved: 2 });
   });
 
-  it('причины отказа: коды Stripe и Solidgate сведены к общим названиям, доля от всех отказов', () => {
+  it('причины отказа: коды Stripe и Solidgate сведены к общим названиям (как в Stripe) с пояснением, доля от всех отказов', () => {
     const noRecovery = { first_declines: 0, recovered: 0, recovery_rate: null, avg_attempts: null, avg_days_to_pay: null, final: true };
     expect(getDeclineReasons(paymentsStore().db, opts)).toEqual([
       // первая попытка отклонена у b (оплатил через 2 дня, 3 попытки) и у c (не оплатил, 2 попытки); окно ретраев ещё открыто
-      { reason: 'Недостаточно средств', count: 2, share: 0.5, first_declines: 2, recovered: 1, recovery_rate: 0.5, avg_attempts: 2.5, avg_days_to_pay: 2, final: false },
-      { reason: 'Отказ банка без причины', count: 1, share: 0.25, ...noRecovery }, // только на повторных попытках
-      { reason: 'Подозрение на фрод (банк)', count: 1, share: 0.25, ...noRecovery },
+      { reason: 'Insufficient funds', hint: 'Недостаточно средств на карте', count: 2, share: 0.5, first_declines: 2, recovered: 1, recovery_rate: 0.5, avg_attempts: 2.5, avg_days_to_pay: 2, final: false },
+      { reason: 'Do not honor / Generic decline', hint: 'Банк отклонил без объяснения причины', count: 1, share: 0.25, ...noRecovery }, // только на повторных попытках
+      { reason: 'Fraudulent', hint: 'Банк заподозрил мошенничество', count: 1, share: 0.25, ...noRecovery },
     ]);
     expect(getDeclineReasons(paymentsStore().db, { ...opts, now: NOW + 30 * DAY })[0].final).toBe(true); // окно закрылось
     expect(getDeclineReasons(paymentsStore().db, { ...opts, provider: 'solidgate' }).map((r) => r.reason)).toEqual([
-      'Недостаточно средств',
-      'Подозрение на фрод (банк)',
+      'Fraudulent', // поровну — по алфавиту
+      'Insufficient funds',
     ]);
+  });
+});
+
+describe('названия причин отказа', () => {
+  it('код без группы — как есть, без кода — Unknown; у каждой группы есть пояснение', () => {
+    expect(declineLabel('3.02')).toBe('Insufficient funds');
+    expect(declineLabel('previously_declined_do_not_retry')).toBe('Do not retry');
+    expect(declineLabel('weird_code')).toBe('weird_code');
+    expect(declineLabel(null)).toBe('Unknown');
+    expect(declineHint('Unknown')).toBe('Провайдер не передал причину отказа');
+    expect(declineHint('weird_code')).toMatch(/без общей группы/);
   });
 });
 

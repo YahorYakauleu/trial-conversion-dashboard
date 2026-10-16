@@ -84,7 +84,7 @@ export function createAuth(users: Config['users']) {
       res.locals.role = role;
       next();
     } else if (req.path.startsWith('/api/')) {
-      res.status(401).json({ error: 'Нужен вход' });
+      res.status(401).json({ error: 'Sign-in required' });
     } else {
       res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);
     }
@@ -92,7 +92,7 @@ export function createAuth(users: Config['users']) {
 
   const requireAdmin: RequestHandler = (_req, res, next) => {
     if (res.locals.role === 'admin') next();
-    else res.status(403).json({ error: 'Только для админа' });
+    else res.status(403).json({ error: 'Admins only' });
   };
 
   return { roleOf, loginPage, login, logout, requireLogin, requireAdmin };

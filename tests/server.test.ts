@@ -133,7 +133,7 @@ describe('server', () => {
     ]);
     expect(byMethod.series).toEqual([]);
     expect((await get('view=decline_reason')).reasons).toEqual([
-      { reason: 'Отказ банка без причины', count: 1, share: 1, first_declines: 1, recovered: 0, recovery_rate: 0, avg_attempts: 1, avg_days_to_pay: null, final: expect.any(Boolean) }, // окончательность — от текущей даты
+      { reason: 'Do not honor / Generic decline', hint: 'Банк отклонил без объяснения причины', count: 1, share: 1, first_declines: 1, recovered: 0, recovery_rate: 0, avg_attempts: 1, avg_days_to_pay: null, final: expect.any(Boolean) }, // окончательность — от текущей даты
     ]);
     expect((await get('view=bank')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['SUTTON BANK', null]);
   });
