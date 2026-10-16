@@ -145,27 +145,20 @@
       <section id="repeat-charts" hidden>
         <div class="panel">
           <div class="chart-head">
-            <h2>Repeat rate by first purchase date, %</h2>
+            <h2>Returned within 30 days, by first purchase date, %</h2>
             <div class="legend">
-              <span data-tip="Купили снова в течение 30 дней после первой покупки"><i style="background: var(--s-converted)"></i>30 days</span>
-              <span data-tip="Купили снова в течение 90 дней после первой покупки"><i style="background: var(--s-first)"></i>90 days</span>
+              <span data-tip="Купили снова в течение 30 дней после первой покупки"><i style="background: var(--s-converted)"></i>Returned within 30 days</span>
               <span data-tip="Окно ещё не закрылось — цифра может вырасти"><i class="dashed"></i>≈ not final</span>
             </div>
           </div>
-          <div class="chart"><canvas id="repeat-chart" aria-label="Repeat purchase rate, percent"></canvas></div>
+          <div class="chart"><canvas id="repeat-chart" aria-label="Customers who returned within 30 days, percent"></canvas></div>
         </div>
       </section>
 
-      <section id="health-charts" hidden>
+      <section id="overview-charts" hidden>
         <div class="panel">
-          <div class="chart-head">
-            <h2>Approval rate and checkout success, %</h2>
-            <div class="legend">
-              <span data-tip="Доля успешных попыток списания"><i style="background: var(--s-first)"></i>Approval rate</span>
-              <span data-tip="Доля оплат, которые прошли — с любой карты и попытки"><i style="background: var(--s-converted)"></i>Checkout success</span>
-            </div>
-          </div>
-          <div class="chart"><canvas id="health-chart" aria-label="Approval rate and checkout success rate, percent"></canvas></div>
+          <div class="chart-head"><h2 data-tip="Оплаченные заказы за вычетом рефандов">Revenue, $</h2></div>
+          <div class="chart"><canvas id="overview-chart" aria-label="eSIM revenue by day, USD"></canvas></div>
         </div>
       </section>
     </div>

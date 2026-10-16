@@ -1,16 +1,17 @@
 import type { Db } from './db.js';
-import { declineHint, declineLabel } from './declines.js';
+import { declineHint, declineLabel, FRAUD_RULE_CODES } from './declines.js';
 import { bucketDay, bucketSql, DAY, dimensionFilterSql, mondayOf, periodSql, type Granularity, type TimeZones } from './metrics.js';
 import { addDays } from './time.js';
 
-// Метрики eSIM: у продукта нет подписок — каждая покупка пакета или пополнение отдельная оплата (PaymentIntent),
-// в которой может быть несколько попыток (списаний). Списания лежат в payments с product = 'esim', и отклонённые тоже.
-export const HEALTH_DIMENSIONS = ['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'] as const;
-export type HealthDimension = (typeof HEALTH_DIMENSIONS)[number];
-// Повторные покупки — когорты клиентов по первой покупке; разрезы — по ней же
-export const REPEAT_DIMENSIONS = ['destination', 'package', 'country', 'payment_method', 'card_brand'] as const;
-export type RepeatDimension = (typeof REPEAT_DIMENSIONS)[number];
-export type EsimFilters = Partial<Record<HealthDimension, string[]>>;
+// Метрики eSIM: у продукта нет подписок — каждая покупка пакета или пополнение отдельный заказ (PaymentIntent),
+// в котором может быть несколько попыток списания (повторное нажатие, другая карта). Наружу — только заказы:
+// попытки путают. Списания лежат в payments с product = 'esim', отклонённые тоже.
+export const OVERVIEW_DIMENSIONS = ['destination', 'package', 'country', 'payment_method', 'card_brand'] as const;
+export type OverviewDimension = (typeof OVERVIEW_DIMENSIONS)[number];
+// Удержание — когорты клиентов по первой покупке; разрезы — по ней же
+export const REPEAT_DIMENSIONS = OVERVIEW_DIMENSIONS;
+export type RepeatDimension = OverviewDimension;
+export type EsimFilters = Partial<Record<OverviewDimension, string[]>>;
 
 export interface EsimOptions {
   filters: EsimFilters;
@@ -21,7 +22,7 @@ export interface EsimOptions {
 }
 
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
-const column = (alias: string) => Object.fromEntries(HEALTH_DIMENSIONS.map((d) => [d, `${alias}.${d}`]));
+const column = (alias: string) => Object.fromEntries(OVERVIEW_DIMENSIONS.map((d) => [d, `${alias}.${d}`]));
 
 // Ряд по дням периода (пустые дни — нулями), сгруппированный по неделям (ISO) или месяцам; края подписаны днями периода
 function series<T extends object>(byDay: Map<string, T>, o: { from: string; to: string; granularity: Granularity }, zero: () => T, add: (a: T, b: T) => T) {
@@ -34,126 +35,112 @@ function series<T extends object>(byDay: Map<string, T>, o: { from: string; to: 
   return [...groups.values()];
 }
 
-// --- платёжное здоровье: попытки (списания) и оплаты (PaymentIntent)
+// --- обзор: что случилось в этот день — заказы, деньги, новые клиенты, неоплаченные заказы
 
-interface HealthCounts {
-  charges: number; // все попытки списания
-  approved: number; // успешные
-  checkouts: number; // оплаты, в которых была хотя бы одна попытка
-  paid_checkouts: number; // из них прошли — с любой попытки
-  first_declined: number; // первая попытка оплаты отклонена
-  recovered: number; // из них всё же оплачено — другой картой или повтором
-  lost_usd_cents: number; // сумма оплат, которые так и не прошли
+interface OverviewCounts {
+  orders: number; // заказы, в которых была хотя бы одна попытка оплаты
+  paid_orders: number; // из них оплачены
+  new_customers: number; // оплаченные заказы, ставшие первой покупкой клиента
+  repeat_orders: number; // оплаченные заказы клиентов, уже покупавших раньше
+  fraud_blocked: number; // неоплаченные заказы, которые отсёк антифрод, — в долю оплаченных не входят
+  revenue: number; // оплаченные заказы за вычетом рефандов, центы USD
+  lost_revenue: number; // сумма неоплаченных заказов настоящих покупателей (без отсечённых антифродом)
 }
 
-export interface HealthTotals extends HealthCounts {
-  approval_rate: number | null;
-  decline_rate: number | null;
-  checkout_success_rate: number | null;
-  recovery_rate: number | null;
+export interface OverviewTotals extends OverviewCounts {
+  payment_success_rate: number | null; // оплачено ÷ заказы без отсечённых антифродом
 }
 
-const zeroHealth = (): HealthCounts => ({ charges: 0, approved: 0, checkouts: 0, paid_checkouts: 0, first_declined: 0, recovered: 0, lost_usd_cents: 0 });
-const addHealth = (a: HealthCounts, b: HealthCounts): HealthCounts => ({
-  charges: a.charges + b.charges,
-  approved: a.approved + b.approved,
-  checkouts: a.checkouts + b.checkouts,
-  paid_checkouts: a.paid_checkouts + b.paid_checkouts,
-  first_declined: a.first_declined + b.first_declined,
-  recovered: a.recovered + b.recovered,
-  lost_usd_cents: a.lost_usd_cents + b.lost_usd_cents,
+const zeroOverview = (): OverviewCounts => ({ orders: 0, paid_orders: 0, new_customers: 0, repeat_orders: 0, fraud_blocked: 0, revenue: 0, lost_revenue: 0 });
+const addOverview = (a: OverviewCounts, b: OverviewCounts): OverviewCounts => ({
+  orders: a.orders + b.orders,
+  paid_orders: a.paid_orders + b.paid_orders,
+  new_customers: a.new_customers + b.new_customers,
+  repeat_orders: a.repeat_orders + b.repeat_orders,
+  fraud_blocked: a.fraud_blocked + b.fraud_blocked,
+  revenue: a.revenue + b.revenue,
+  lost_revenue: a.lost_revenue + b.lost_revenue,
 });
-const withHealthRates = <T extends HealthCounts>(c: T): T & HealthTotals => ({
+const withOverviewRates = <T extends OverviewCounts>(c: T): T & OverviewTotals => ({
   ...c,
-  approval_rate: rate(c.approved, c.charges),
-  decline_rate: rate(c.charges - c.approved, c.charges),
-  checkout_success_rate: rate(c.paid_checkouts, c.checkouts),
-  recovery_rate: rate(c.recovered, c.first_declined),
+  payment_success_rate: rate(c.paid_orders, c.orders - c.fraud_blocked),
 });
 
-// Списания периода с номером попытки внутри своей оплаты и итогом оплаты — общая основа запросов здоровья
-function chargesCte(o: EsimOptions) {
+// Заказы периода: попытки → заказ (день и разрезы — по первой попытке, причина отказа — по последней).
+// Новый клиент — если оплата заказа стала первой успешной покупкой клиента за всю историю
+function ordersCte(o: EsimOptions, key: string) {
   const period = periodSql('p', 'p.paid_at', o);
   const dims = dimensionFilterSql(column('p'), o.filters);
-  const sql = `WITH c AS (
-      SELECT p.*,
+  const fraud = FRAUD_RULE_CODES.map((code) => `'${code}'`).join(', ');
+  const sql = `WITH first_paid AS (
+      SELECT payment_id FROM (
+        SELECT payment_id, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY paid_at, payment_id) AS k
+        FROM payments WHERE product = 'esim' AND approved = 1 AND customer_id IS NOT NULL
+      ) WHERE k = 1
+    ),
+    c AS (
+      SELECT p.*, COALESCE(p.intent_id, p.payment_id) AS order_id,
              ROW_NUMBER() OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id) ORDER BY p.paid_at, p.payment_id) AS n,
-             COUNT(*) OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id)) AS intent_charges,
-             MAX(p.approved) OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id)) AS intent_paid
+             COUNT(*) OVER (PARTITION BY COALESCE(p.intent_id, p.payment_id)) AS attempts,
+             p.payment_id IN (SELECT payment_id FROM first_paid) AS first_purchase
       FROM payments p WHERE p.product = 'esim' AND ${[period.sql, ...dims.clauses].join(' AND ')}
+    ),
+    orders AS (
+      SELECT MAX(CASE WHEN c.n = 1 THEN ${key} END) AS key,
+             MAX(c.approved) AS paid,
+             MAX(c.first_purchase) AS first_purchase,
+             MAX(c.approved = 0 AND c.reason IN (${fraud})) AS fraud,
+             MAX(CASE WHEN c.n = c.attempts THEN c.reason END) AS last_reason,
+             SUM(CASE WHEN c.approved = 1 THEN c.amount_usd_cents - c.refunded_usd_cents ELSE 0 END) AS revenue,
+             SUM(CASE WHEN c.n = 1 THEN c.amount_usd_cents ELSE 0 END) AS amount
+      FROM c GROUP BY c.order_id
     )`;
   return { sql, params: { ...period.params, ...dims.params } };
 }
 
-function healthSums(db: Db, o: EsimOptions, key: string) {
-  const cte = chargesCte(o);
+function overviewSums(db: Db, o: EsimOptions, key: string) {
+  const cte = ordersCte(o, key);
   return db
     .prepare(
       `${cte.sql}
-       SELECT ${key} AS key, COUNT(*) AS charges, SUM(c.approved) AS approved,
-              SUM(c.n = 1) AS checkouts, SUM(c.n = 1 AND c.intent_paid = 1) AS paid_checkouts,
-              SUM(c.n = 1 AND c.approved = 0) AS first_declined, SUM(c.n = 1 AND c.approved = 0 AND c.intent_paid = 1) AS recovered,
-              SUM(CASE WHEN c.n = 1 AND c.intent_paid = 0 THEN c.amount_usd_cents ELSE 0 END) AS lost_usd_cents
-       FROM c GROUP BY key`,
+       SELECT key, COUNT(*) AS orders, SUM(paid) AS paid_orders,
+              SUM(paid = 1 AND first_purchase = 1) AS new_customers, SUM(paid = 1 AND first_purchase = 0) AS repeat_orders,
+              SUM(paid = 0 AND fraud = 1) AS fraud_blocked, SUM(revenue) AS revenue,
+              SUM(CASE WHEN paid = 0 AND fraud = 0 THEN amount ELSE 0 END) AS lost_revenue
+       FROM orders GROUP BY key`,
     )
-    .all(cte.params) as unknown as (HealthCounts & { key: string | number | null })[];
+    .all(cte.params) as unknown as (OverviewCounts & { key: string | number | null })[];
 }
 
-export function getHealth(db: Db, o: EsimOptions & { granularity: Granularity }) {
-  const byDay = new Map<string, HealthCounts>();
-  for (const { key, ...c } of healthSums(db, o, bucketSql('c', 'c.paid_at'))) {
+export function getOverview(db: Db, o: EsimOptions & { granularity: Granularity }) {
+  const byDay = new Map<string, OverviewCounts>();
+  for (const { key, ...c } of overviewSums(db, o, bucketSql('c', 'c.paid_at'))) {
     const day = bucketDay(key, o.timeZones);
-    byDay.set(day, addHealth(byDay.get(day) ?? zeroHealth(), c));
+    byDay.set(day, addOverview(byDay.get(day) ?? zeroOverview(), c));
   }
-  const points = series(byDay, o, zeroHealth, addHealth).map(withHealthRates);
-  return { totals: withHealthRates(points.reduce<HealthCounts>(addHealth, zeroHealth())), series: points };
+  const points = series(byDay, o, zeroOverview, addOverview).map(withOverviewRates);
+  return { totals: withOverviewRates(points.reduce<OverviewCounts>(addOverview, zeroOverview())), series: points };
 }
 
-// Разбивка: по убыванию попыток, «не определено» — в конце
-export function getHealthBreakdown(db: Db, o: EsimOptions, dimension: HealthDimension) {
-  const rows = healthSums(db, o, `c.${dimension}`)
-    .map(({ key, ...c }) => withHealthRates({ value: key === null ? null : String(key), ...c }))
-    .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.charges - a.charges || String(a.value).localeCompare(String(b.value)));
-  return { totals: withHealthRates(rows.reduce<HealthCounts>(addHealth, zeroHealth())), breakdown: rows };
+// Разбивка: по убыванию выручки, «не определено» — в конце
+export function getOverviewBreakdown(db: Db, o: EsimOptions, dimension: OverviewDimension) {
+  const rows = overviewSums(db, o, `c.${dimension}`)
+    .map(({ key, ...c }) => withOverviewRates({ value: key === null ? null : String(key), ...c }))
+    .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.revenue - a.revenue || b.orders - a.orders || String(a.value).localeCompare(String(b.value)));
+  return { totals: withOverviewRates(rows.reduce<OverviewCounts>(addOverview, zeroOverview())), breakdown: rows };
 }
 
-// Причины отказа — те же группы, что у VPN. Recovery rate — по причине первого отказа оплаты: какая доля таких оплат
-// всё же прошла (обычно другой картой через минуту-две, поэтому «дней до оплаты» у eSIM нет)
-export function getHealthReasons(db: Db, o: EsimOptions) {
-  const cte = chargesCte(o);
+// Почему заказы не оплачены: причина последней попытки, те же группы, что у VPN (антифрод — отдельной строкой)
+export function getOverviewReasons(db: Db, o: EsimOptions) {
+  const cte = ordersCte(o, "''");
   const rows = db
-    .prepare(
-      `${cte.sql}
-       SELECT c.reason AS reason, COUNT(*) AS count, SUM(c.n = 1) AS first_declines,
-              SUM(c.n = 1 AND c.intent_paid = 1) AS recovered, SUM(CASE WHEN c.n = 1 THEN c.intent_charges ELSE 0 END) AS attempts
-       FROM c WHERE c.approved = 0 GROUP BY c.reason`,
-    )
-    .all(cte.params) as unknown as { reason: string | null; count: number; first_declines: number; recovered: number; attempts: number }[];
-  const byLabel = new Map<string, { count: number; first_declines: number; recovered: number; attempts: number }>();
-  for (const { reason, ...r } of rows) {
-    const label = declineLabel(reason);
-    const g = byLabel.get(label) ?? { count: 0, first_declines: 0, recovered: 0, attempts: 0 };
-    byLabel.set(label, {
-      count: g.count + r.count,
-      first_declines: g.first_declines + r.first_declines,
-      recovered: g.recovered + r.recovered,
-      attempts: g.attempts + r.attempts,
-    });
-  }
-  const total = [...byLabel.values()].reduce((s, g) => s + g.count, 0);
+    .prepare(`${cte.sql} SELECT last_reason AS reason, COUNT(*) AS count FROM orders WHERE paid = 0 GROUP BY last_reason`)
+    .all(cte.params) as unknown as { reason: string | null; count: number }[];
+  const byLabel = new Map<string, number>();
+  for (const r of rows) byLabel.set(declineLabel(r.reason), (byLabel.get(declineLabel(r.reason)) ?? 0) + r.count);
+  const total = [...byLabel.values()].reduce((s, n) => s + n, 0);
   return [...byLabel]
-    .map(([reason, g]) => ({
-      reason,
-      hint: declineHint(reason),
-      count: g.count,
-      share: g.count / total,
-      first_declines: g.first_declines,
-      recovered: g.recovered,
-      recovery_rate: rate(g.recovered, g.first_declines),
-      avg_attempts: g.first_declines === 0 ? null : g.attempts / g.first_declines,
-      avg_days_to_pay: null,
-      final: true,
-    }))
+    .map(([reason, count]) => ({ reason, hint: declineHint(reason), count, share: count / total }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, 'en'));
 }
 

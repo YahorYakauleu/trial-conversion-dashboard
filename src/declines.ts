@@ -63,3 +63,6 @@ export function declineLabel(code: string | null): string {
 
 // Пояснение к причине для подсказки; код без группы — как есть
 export const declineHint = (label: string): string => HINTS.get(label) ?? 'Код отказа провайдера — без общей группы';
+
+// Коды антифрода провайдера (Radar, Solidgate): заказ, отсечённый ими, — не потерянная продажа, а отсечённая атака
+export const FRAUD_RULE_CODES = GROUPS.find((g) => g.label === 'Blocked by fraud rules')!.codes;

@@ -15,16 +15,16 @@ import {
   type Dimension,
   type Filters,
   type Granularity,
-  type Product,
   type ProviderFilter,
 } from './metrics.js';
 import {
-  getHealth,
-  getHealthBreakdown,
-  getHealthReasons,
+  getOverview,
+  getOverviewBreakdown,
+  getOverviewReasons,
   getRepeat,
   getRepeatBreakdown,
-  HEALTH_DIMENSIONS,
+  OVERVIEW_DIMENSIONS,
+  type OverviewDimension,
   REPEAT_DIMENSIONS,
   type EsimFilters,
 } from './esim.js';
@@ -34,7 +34,7 @@ import {
   getTurnover,
   getTurnoverBreakdown,
   turnoverTotalsOf,
-  turnoverDimensions,
+  TURNOVER_DIMENSIONS,
   type TurnoverDimension,
 } from './turnover.js';
 
@@ -46,7 +46,8 @@ const MAX_FILTER_VALUES = 100;
 // «Сегодня» и окончательность цифр зависят от текущего времени — кэш живёт не дольше этого
 const CACHE_TTL_MS = 5 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
-const FILTER_FORMAT: Record<Dimension | TurnoverDimension, RegExp> = {
+type AnyDimension = Dimension | TurnoverDimension | OverviewDimension;
+const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
   mid: /^(stripe|solidgate):[A-Za-z0-9_-]{1,64}$/, // у Solidgate MID — UUID
   country: /^[A-Z]{2}$/,
@@ -55,11 +56,10 @@ const FILTER_FORMAT: Record<Dimension | TurnoverDimension, RegExp> = {
   bank: /^.{1,120}$/,
   destination: /^.{1,80}$/, // eSIM: страна или регион пакета
   package: /^.{1,40}$/, // eSIM: «5 GB · 7 days»
-  order_type: /^[a-z_]{1,20}$/, // eSIM: purchase | topup
 };
 
 // Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA
-function parseFilters<D extends Dimension | TurnoverDimension>(query: Record<string, unknown>, dimensions: readonly D[]) {
+function parseFilters<D extends AnyDimension>(query: Record<string, unknown>, dimensions: readonly D[]) {
   const filters: Partial<Record<D, string[]>> = {};
   for (const dimension of dimensions) {
     const raw = query[dimension];
@@ -151,24 +151,20 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
-  // Оборот: те же параметры, что у /api/metrics, плюс &product=vpn|esim. Разрезы VPN — mid (stripe:corp, solidgate:<uuid>),
-  // страна, способ оплаты, банк, система; eSIM — направление, пакет, тип заказа, страна, способ оплаты, система
+  // Оборот VPN: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
   app.get('/api/turnover', (req, res) => {
-    const product: Product = esimEnabled && req.query.product === 'esim' ? 'esim' : 'vpn';
-    const { granularity, range, meta, ...rest } = product === 'esim' ? common(req.query, esimFirstDay()) : common(req.query);
-    const provider = product === 'esim' ? 'all' : rest.provider; // у eSIM только Stripe
-    const dimensions = turnoverDimensions(product);
-    const view = dimensions.find((v) => v === req.query.view) ?? 'time';
-    const filters = parseFilters(req.query, dimensions);
-    const options = { product, provider, filters, ...range, timeZones: config.timeZones };
-    const data = cached({ api: 'turnover', product, provider, granularity, range, view, filters }, () => {
+    const { provider, granularity, range, meta } = common(req.query);
+    const view = TURNOVER_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
+    const filters = parseFilters(req.query, TURNOVER_DIMENSIONS);
+    const options = { provider, filters, ...range, timeZones: config.timeZones };
+    const data = cached({ api: 'turnover', provider, granularity, range, view, filters }, () => {
       if (view !== 'time') {
         const breakdown = getTurnoverBreakdown(store.db, options, view);
         return { totals: turnoverTotalsOf(breakdown), series: [], breakdown };
       }
       return { ...getTurnover(store.db, { ...options, granularity }), breakdown: [] };
     });
-    res.json({ ...meta, role: res.locals.role, product, range, filters, view, ...data });
+    res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
   });
 
   // История eSIM — с его первого платежа: аккаунт небольшой, грузится целиком, иначе «новые клиенты» первых когорт были бы старыми
@@ -177,22 +173,22 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     return first === null ? config.historyFromDay : localDay(first, config.timeZones.stripe);
   };
 
-  // eSIM: платёжное здоровье — попытки и оплаты. ?granularity&period&view=time|decline_reason|destination|package|order_type|country|…
-  app.get('/api/esim/health', (req, res) => {
+  // eSIM, обзор: заказы, деньги, новые клиенты и неоплаченные заказы по дню. ?granularity&period&view=time|decline_reason|destination|…
+  app.get('/api/esim/overview', (req, res) => {
     if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
     const { now, granularity, range, meta } = common(req.query, esimFirstDay());
-    const view = [...HEALTH_DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
-    const filters: EsimFilters = parseFilters(req.query, HEALTH_DIMENSIONS);
+    const view = [...OVERVIEW_DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
+    const filters: EsimFilters = parseFilters(req.query, OVERVIEW_DIMENSIONS);
     const options = { filters, ...range, timeZones: config.timeZones, now };
-    const data = cached({ api: 'esim-health', granularity, range, view, filters }, () => {
-      if (view === 'decline_reason') return { ...getHealth(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getHealthReasons(store.db, options) };
-      if (view !== 'time') return { ...getHealthBreakdown(store.db, options, view as (typeof HEALTH_DIMENSIONS)[number]), series: [], reasons: [] };
-      return { ...getHealth(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
+    const data = cached({ api: 'esim-overview', granularity, range, view, filters }, () => {
+      if (view === 'decline_reason') return { ...getOverview(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getOverviewReasons(store.db, options) };
+      if (view !== 'time') return { ...getOverviewBreakdown(store.db, options, view as (typeof OVERVIEW_DIMENSIONS)[number]), series: [], reasons: [] };
+      return { ...getOverview(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
     });
     res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
   });
 
-  // eSIM: повторные покупки — когорты клиентов по дню первой покупки. ?granularity&period&view=time|destination|package|country|…
+  // eSIM, удержание: когорты клиентов по дню первой покупки. ?granularity&period&view=time|destination|package|country|…
   app.get('/api/esim/repeat', (req, res) => {
     if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
     const { now, granularity, range, meta } = common(req.query, esimFirstDay());
@@ -216,7 +212,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const provider = esim ? 'all' : rest.provider;
     const base = { now, ...range, timeZones: config.timeZones };
     // свой фильтр не применяем: иначе в списке осталось бы только уже выбранное
-    const facet = <D extends Dimension | TurnoverDimension>(dimensions: readonly D[]) => {
+    const facet = <D extends AnyDimension>(dimensions: readonly D[]) => {
       const dimension = dimensions.find((d) => d === req.query.dimension);
       const filters = parseFilters(req.query, dimensions);
       if (dimension) delete filters[dimension];
@@ -228,14 +224,13 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
         return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
       }
-      if (mode === 'turnover' || mode === 'esim_volume') {
-        const product: Product = esim ? 'esim' : 'vpn';
-        const { dimension, filters } = facet(turnoverDimensions(product));
-        return dimension ? getTurnoverBreakdown(store.db, { ...base, product, provider, filters }, dimension).map((r) => ({ value: r.value, count: r.payments })) : [];
+      if (mode === 'turnover') {
+        const { dimension, filters } = facet(TURNOVER_DIMENSIONS);
+        return dimension ? getTurnoverBreakdown(store.db, { ...base, provider, filters }, dimension).map((r) => ({ value: r.value, count: r.payments })) : [];
       }
-      if (mode === 'esim_health') {
-        const { dimension, filters } = facet(HEALTH_DIMENSIONS);
-        return dimension ? getHealthBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.charges })) : [];
+      if (mode === 'esim_overview') {
+        const { dimension, filters } = facet(OVERVIEW_DIMENSIONS);
+        return dimension ? getOverviewBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.orders })) : [];
       }
       if (mode === 'esim_repeat') {
         const { dimension, filters } = facet(REPEAT_DIMENSIONS);

@@ -42,55 +42,42 @@ const MODES = {
     tabs: [['time', 'Trend'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands']],
     hints: { time: 'Gross volume — all successful charges by payment date, in USD' },
   },
-  esim_volume: {
+  esim_overview: {
     product: 'esim',
-    kind: 'turnover',
-    label: 'Volume',
-    tip: 'Оборот eSIM: все успешные покупки и пополнения по дню платежа',
-    title: 'eSIM · Gross volume',
-    api: '/api/turnover',
-    charts: 'turnover-charts',
-    dimensions: ['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'],
-    tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['order_type', 'Order types'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
-    hints: { time: 'Gross volume — all successful eSIM purchases and top-ups by payment date, in USD' },
+    kind: 'overview',
+    label: 'Overview',
+    tip: 'Что случилось за день: заказы, деньги, новые клиенты и неоплаченные заказы',
+    title: 'eSIM · Overview',
+    api: '/api/esim/overview',
+    charts: 'overview-charts',
+    dimensions: ['destination', 'package', 'country', 'payment_method', 'card_brand'],
+    tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['decline_reason', 'Decline reasons']],
+    hints: {
+      time: 'Each row is a day: its orders, revenue and new customers. An order is one checkout — several payment attempts in it count once',
+      decline_reason: 'Why orders were not paid — the reason of the last attempt. Orders blocked as fraud are not counted in payment success',
+    },
   },
   esim_repeat: {
     product: 'esim',
     kind: 'repeat',
-    label: 'Repeat',
-    tip: 'Повторные покупки: когорты клиентов по дню первой покупки',
-    title: 'eSIM · Repeat purchases',
+    label: 'Retention',
+    tip: 'Возвращаются ли клиенты: когорты по дню первой покупки',
+    title: 'eSIM · Retention',
     api: '/api/esim/repeat',
     charts: 'repeat-charts',
     dimensions: ['destination', 'package', 'country', 'payment_method', 'card_brand'],
-    tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
+    tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['country', 'Countries'], ['payment_method', 'Payment methods']],
     hints: {
-      time: 'Cohorts by first purchase date. Repeat — bought again within 30 or 90 days after the first purchase',
+      time: "Each row is the day of the customer's first purchase. Numbers marked ≈ keep growing until 30 (90) days have passed",
       _breakdown: 'Customers are split by their first purchase. Click a row to see its trend, or a column header to sort',
-    },
-  },
-  esim_health: {
-    product: 'esim',
-    kind: 'health',
-    label: 'Payments',
-    tip: 'Платёжное здоровье: проходимость попыток, оплаты и отказы',
-    title: 'eSIM · Payment health',
-    api: '/api/esim/health',
-    charts: 'health-charts',
-    dimensions: ['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'],
-    tabs: [['time', 'Trend'], ['decline_reason', 'Decline reasons'], ['destination', 'Destinations'], ['package', 'Packages'], ['order_type', 'Order types'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
-    hints: {
-      time: 'Approval rate — by attempts; checkout success — by checkouts (one checkout can have several attempts, e.g. another card)',
-      decline_reason: 'Declines — all declined attempts. Recovery rate — share of checkouts whose first attempt was declined for this reason that were paid in the end',
     },
   },
 };
 const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
-  destination: 'Destination', package: 'Package', order_type: 'Order type',
+  destination: 'Destination', package: 'Package',
 };
-const ORDER_TYPE_NAMES = { purchase: 'Purchase', topup: 'Top-up' };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
 const TAB_TIPS = {
   time: 'Динамика по дням, неделям или месяцам',
@@ -103,7 +90,6 @@ const TAB_TIPS = {
   decline_reason: 'Почему отклонили попытки списания',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
-  order_type: 'Покупка нового пакета или пополнение (top-up)',
 };
 const ACCOUNT_NAMES = {
   'stripe:corp': 'Stripe · Toggle Corp',
@@ -139,7 +125,9 @@ const ICONS = {
 // --- состояние из адреса страницы
 const params = new URLSearchParams(location.search);
 const pick = (value, allowed, fallback) => (allowed.includes(value) ? value : fallback);
-const initialMode = pick(params.get('mode'), Object.keys(MODES), 'conversion');
+// старые ссылки на экраны eSIM ведут на обзор
+const MODE_ALIASES = { esim_volume: 'esim_overview', esim_health: 'esim_overview' };
+const initialMode = pick(MODE_ALIASES[params.get('mode')] ?? params.get('mode'), Object.keys(MODES), 'conversion');
 const state = {
   mode: initialMode,
   provider: pick(params.get('provider'), ['all', 'stripe', 'solidgate'], 'all'),
@@ -219,7 +207,6 @@ function valueName(dimension, value) {
   if (dimension === 'mid') return ACCOUNT_NAMES[value] ?? `Stripe · ${value.split(':')[1]}`; // MID Stripe — аккаунт
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
-  if (dimension === 'order_type') return ORDER_TYPE_NAMES[value] ?? value;
   return value;
 }
 
@@ -339,7 +326,7 @@ function render(data) {
   renderHeader(data);
   if (kind() === 'turnover') renderTurnoverKpis(data.totals, data.range);
   else if (kind() === 'repeat') renderRepeatKpis(data);
-  else if (kind() === 'health') renderHealthKpis(data);
+  else if (kind() === 'overview') renderOverviewKpis(data);
   else renderKpis(data.totals, data.range);
   renderTabs();
   renderView(data);
@@ -426,26 +413,21 @@ const approxPct = (r, final) => `${final || r === null ? '' : '≈ '}${pct(r)}`;
 function renderRepeatKpis({ totals: t, range }) {
   kpiCards([
     ['New customers', num(t.customers), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Клиенты, впервые купившие eSIM в эти дни'],
-    ['Repeat rate, 30d', approxPct(t.repeat_rate_30, t.final_30), `${num(t.repeat_30)} of ${num(t.customers)}`, 'Доля купивших снова в течение 30 дней после первой покупки'],
-    before30(t)
-      ? ['Repeat rate, 90d', '—', 'after 30 days', 'Ни у кого из клиентов периода ещё не прошло 30 дней — пока совпадает с 30-дневной цифрой']
-      : ['Repeat rate, 90d', approxPct(t.repeat_rate_90, t.final_90), `${num(t.repeat_90)} of ${num(t.customers)}`, 'Доля купивших снова в течение 90 дней после первой покупки'],
-    ['Top-up rate, 30d', approxPct(t.topup_rate_30, t.final_30), `${num(t.topup_30)} of ${num(t.customers)}`, 'Доля пополнивших пакет в течение 30 дней после первой покупки'],
-    ['Revenue per customer, 30d', `${t.final_30 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_30)}`, 'net of refunds', 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов'],
-    before30(t)
-      ? ['Revenue per customer, 90d', '—', 'after 30 days', 'Ни у кого из клиентов периода ещё не прошло 30 дней — пока совпадает с 30-дневной цифрой']
-      : ['Revenue per customer, 90d', `${t.final_90 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_90)}`, 'net of refunds', 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов'],
+    ['Returned within 30 days', approxPct(t.repeat_rate_30, t.final_30), `${num(t.repeat_30)} of ${num(t.customers)}`, 'Доля клиентов, купивших снова — пополнение или новый пакет — в течение 30 дней после первой покупки'],
+    ['Revenue per customer, 90 days', `${t.final_90 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_90)}`, 'net of refunds', 'Сколько клиент принёс за 90 дней с первой покупки — включая её, за вычетом рефандов'],
   ]);
 }
 
-function renderHealthKpis({ totals: t }) {
+// Заказ — одна оплата (PaymentIntent): несколько попыток в нём (повторное нажатие, другая карта) считаются один раз
+function renderOverviewKpis({ totals: t, range }) {
+  const unpaid = t.orders - t.paid_orders - t.fraud_blocked;
   kpiCards([
-    ['Approval rate', pct(t.approval_rate), `${num(t.approved)} of ${num(t.charges)} attempts`, 'Доля успешных попыток списания'],
-    ['Decline rate', pct(t.decline_rate), `${num(t.charges - t.approved)} declines`, 'Доля отклонённых попыток списания'],
-    ['Checkout success rate', pct(t.checkout_success_rate), `${num(t.paid_checkouts)} of ${num(t.checkouts)} checkouts`, 'Доля оплат, которые прошли — с любой карты и попытки'],
-    ['Recovery rate', pct(t.recovery_rate), `${num(t.recovered)} of ${num(t.first_declined)} recovered`, 'Из оплат с отклонённой первой попыткой — доля, которая всё же прошла'],
-    ['Lost volume', usd(t.lost_usd_cents), `${num(t.checkouts - t.paid_checkouts)} checkouts never paid`, 'Сумма оплат, которые так и не прошли'],
-    ['Checkouts', num(t.checkouts), 'with at least one attempt', 'Оплаты (PaymentIntent), в которых была хотя бы одна попытка списания'],
+    ['Revenue', usd(t.revenue), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Деньги за период: оплаченные заказы за вычетом рефандов'],
+    ['Orders', num(t.paid_orders), `${num(t.repeat_orders)} repeat`, 'Оплаченные заказы: первые покупки новых клиентов и повторные — пополнения или новый пакет'],
+    ['New customers', num(t.new_customers), 'first purchase', 'Клиенты, впервые купившие eSIM в эти дни'],
+    ['Payment success', pct(t.payment_success_rate), `${num(t.paid_orders)} of ${num(t.orders - t.fraud_blocked)} orders`, 'Доля заказов, которые удалось оплатить. Заказы, отсечённые антифродом, не учитываются'],
+    ['Lost revenue', usd(t.lost_revenue), `${num(unpaid)} orders not paid`, 'Сумма заказов настоящих покупателей, которые не удалось оплатить'],
+    ['Blocked as fraud', num(t.fraud_blocked), 'orders', 'Заказы, которые отсёк антифрод Stripe (Radar): перебор карт и подозрительные оплаты'],
   ]);
 }
 
@@ -564,15 +546,7 @@ const REASON_COLUMNS = [
   { key: 'avg_attempts', title: 'Avg. attempts', tip: 'Попыток на такой триал в среднем', sort: (r) => r.avg_attempts, cell: (r) => `<td>${decimal(r.avg_attempts)}</td>` },
   { key: 'avg_days_to_pay', title: 'Days to recover', tip: 'Дней от первого отказа до оплаты — у восстановленных', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td>${decimal(r.avg_days_to_pay)}</td>` },
 ];
-// У eSIM отказ — на чекауте: «первый отказ» и recovery — по оплатам, повтор обычно другой картой через минуту, без «дней до оплаты»
-const ESIM_REASON_TIPS = {
-  first_declines: 'Оплаты, у которых первая попытка отклонена по этой причине',
-  recovery_rate: 'Из оплат с первым отказом по этой причине — доля, которая всё же прошла',
-  avg_attempts: 'Попыток на такую оплату в среднем',
-};
-const ESIM_REASON_COLUMNS = REASON_COLUMNS.filter((c) => c.key !== 'avg_days_to_pay').map((c) => ({ ...c, tip: ESIM_REASON_TIPS[c.key] ?? c.tip }));
-
-// eSIM, повторные покупки: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
+// eSIM, удержание: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
 // В подсказке к «≈» — сколько дней окна прошло (у самых свежих клиентов группы) и когда цифра станет итоговой
 const DAY_SECONDS = 86_400;
 const ruDate = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'America/New_York' });
@@ -581,70 +555,45 @@ function windowTip(p, days) {
   const freshest = p.period && p.period === p.period_end ? '' : ' у самых свежих клиентов';
   return `Прошло ${passed} из ${days} дней${freshest} — итог ${ruDate.format(new Date((p.last_first_at + days * DAY_SECONDS) * 1000))}`;
 }
-// Ни у кого в группе ещё не прошло 30 дней — цифра за 90 дней пока совпадает с 30-дневной, показываем «—»
-const before30 = (p) => p.first_first_at > 0 && lastData.generated_at - p.first_first_at < 30 * DAY_SECONDS;
-const NOT_YET_90 = '<td class="muted" data-tip="Ни у кого в когорте ещё не прошло 30 дней — пока совпадает с 30-дневной цифрой">—</td>';
 const REPEAT_COLUMNS = [
   { key: 'customers', title: 'New customers', tip: 'Клиенты, впервые купившие eSIM в эти дни', sort: (p) => p.customers, cell: (p) => `<td>${num(p.customers)}</td>` },
   {
     key: 'repeat_rate_30',
-    title: 'Repeat 30d',
-    tip: 'Купили снова в течение 30 дней после первой покупки',
+    title: 'Returned within 30 days',
+    tip: 'Купили снова — пополнение или новый пакет — в течение 30 дней после первой покупки',
     sort: (p) => p.repeat_rate_30,
     cell: (p) => rateCell(p.repeat_rate_30, p.repeat_30, p.final_30, '', windowTip(p, 30)),
   },
   {
-    key: 'repeat_rate_90',
-    title: 'Repeat 90d',
-    tip: 'Купили снова в течение 90 дней после первой покупки',
-    sort: (p) => p.repeat_rate_90,
-    cell: (p) => (before30(p) ? NOT_YET_90 : rateCell(p.repeat_rate_90, p.repeat_90, p.final_90, '', windowTip(p, 90))),
-  },
-  {
-    key: 'topup_rate_30',
-    title: 'Top-up 30d',
-    tip: 'Пополнили пакет в течение 30 дней после первой покупки',
-    sort: (p) => p.topup_rate_30,
-    cell: (p) => rateCell(p.topup_rate_30, p.topup_30, p.final_30, '', windowTip(p, 30)),
-  },
-  {
-    key: 'revenue_per_customer_30',
-    title: 'Revenue / customer 30d',
-    tip: 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов',
-    sort: (p) => p.revenue_per_customer_30,
-    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_30), p.final_30, '', windowTip(p, 30)),
-  },
-  {
     key: 'revenue_per_customer_90',
-    title: 'Revenue / customer 90d',
-    tip: 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов',
+    title: 'Revenue per customer, 90 days',
+    tip: 'Сколько клиент принёс за 90 дней с первой покупки — включая её, за вычетом рефандов',
     sort: (p) => p.revenue_per_customer_90,
-    cell: (p) => (before30(p) ? NOT_YET_90 : pendingCell(usdAverage(p.revenue_per_customer_90), p.final_90, '', windowTip(p, 90))),
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_90), p.final_90, '', windowTip(p, 90)),
   },
-  { key: 'avg_days_to_second', title: 'Days to 2nd purchase', tip: 'Дней от первой покупки до второй — у тех, кто купил снова', sort: (p) => p.avg_days_to_second, cell: (p) => `<td>${decimal(p.avg_days_to_second)}</td>` },
 ];
 
-// eSIM, платёжное здоровье: попытки (списания) и оплаты (PaymentIntent — в одной оплате может быть несколько попыток)
-const HEALTH_COLUMNS = [
-  { key: 'charges', title: 'Attempts', tip: 'Попытки списания', sort: (p) => p.charges, cell: (p) => `<td>${num(p.charges)}</td>` },
-  { key: 'approval_rate', title: 'Approval rate', tip: 'Доля успешных попыток списания', sort: (p) => p.approval_rate, cell: (p) => `<td title="${num(p.approved)} of ${num(p.charges)} attempts">${pct(p.approval_rate)}</td>` },
-  { key: 'decline_rate', title: 'Decline rate', tip: 'Доля отклонённых попыток списания', sort: (p) => p.decline_rate, cell: (p) => `<td>${pct(p.decline_rate)}</td>` },
-  { key: 'checkouts', title: 'Checkouts', tip: 'Оплаты, в которых была хотя бы одна попытка', sort: (p) => p.checkouts, cell: (p) => `<td>${num(p.checkouts)}</td>` },
+// eSIM, обзор: что случилось в этот день. Заказ — одна оплата, сколько бы попыток в ней ни было
+const OVERVIEW_COLUMNS = [
+  // суммы eSIM маленькие (пакеты от $0,99) — в таблице с центами
+  { key: 'revenue', title: 'Revenue', tip: 'Оплаченные заказы за вычетом рефандов', sort: (p) => p.revenue, cell: (p) => `<td>${usdAverage(p.revenue)}</td>` },
+  { key: 'paid_orders', title: 'Orders', tip: 'Оплаченные заказы', sort: (p) => p.paid_orders, cell: (p) => `<td>${num(p.paid_orders)}</td>` },
+  { key: 'new_customers', title: 'New customers', tip: 'Первая покупка клиента', sort: (p) => p.new_customers, cell: (p) => `<td>${num(p.new_customers)}</td>` },
+  { key: 'repeat_orders', title: 'Repeat orders', tip: 'Пополнения и новые пакеты клиентов, уже покупавших раньше', sort: (p) => p.repeat_orders, cell: (p) => `<td>${num(p.repeat_orders)}</td>` },
   {
-    key: 'checkout_success_rate',
-    title: 'Checkout success',
-    tip: 'Доля оплат, которые прошли — с любой карты и попытки',
-    sort: (p) => p.checkout_success_rate,
-    cell: (p) => rateCell(p.checkout_success_rate, p.paid_checkouts),
+    key: 'payment_success_rate',
+    title: 'Payment success',
+    tip: 'Доля заказов, которые удалось оплатить (без отсечённых антифродом)',
+    sort: (p) => p.payment_success_rate,
+    cell: (p) => rateCell(p.payment_success_rate, p.paid_orders, true, `${num(p.paid_orders)} of ${num(p.orders - p.fraud_blocked)} orders`),
   },
-  {
-    key: 'recovery_rate',
-    title: 'Recovery rate',
-    tip: 'Из оплат с отклонённой первой попыткой — доля, которая всё же прошла',
-    sort: (p) => p.recovery_rate,
-    cell: (p) => rateCell(p.recovery_rate, p.recovered),
-  },
-  { key: 'lost_usd_cents', title: 'Lost volume', tip: 'Сумма оплат, которые так и не прошли', sort: (p) => p.lost_usd_cents, cell: (p) => `<td>${usd(p.lost_usd_cents)}</td>` },
+  { key: 'lost_revenue', title: 'Lost revenue', tip: 'Сумма заказов настоящих покупателей, которые не удалось оплатить', sort: (p) => p.lost_revenue, cell: (p) => `<td>${usdAverage(p.lost_revenue)}</td>` },
+  { key: 'fraud_blocked', title: 'Blocked as fraud', tip: 'Заказы, которые отсёк антифрод: перебор карт и подозрительные оплаты', sort: (p) => p.fraud_blocked, cell: (p) => `<td class="muted">${num(p.fraud_blocked)}</td>` },
+];
+const OVERVIEW_REASON_COLUMNS = [
+  { key: 'reason', title: 'Decline reason', tip: 'Почему заказ не оплачен — причина последней попытки', text: true, sort: (r) => r.reason, cell: (r) => `<td data-tip="${esc(r.hint)}">${esc(r.reason)}</td>` },
+  { key: 'count', title: 'Unpaid orders', tip: 'Заказы, которые так и не оплатили', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
+  { key: 'share', title: 'Share', tip: 'Доля от всех неоплаченных заказов', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
 ];
 
 // Без выбранной сортировки: динамика — свежие дни сверху, разбивки — как отдал сервер (по главной метрике)
@@ -700,14 +649,14 @@ function renderView(data) {
     }
     return;
   }
-  if (kind() === 'health') {
+  if (kind() === 'overview') {
     if (isTime) {
-      renderTable([periodColumn(timeHead('Date')), ...HEALTH_COLUMNS], data.series);
-      renderHealthChart(data.series);
+      renderTable([periodColumn(timeHead('Date')), ...OVERVIEW_COLUMNS], data.series);
+      renderOverviewChart(data.series);
     } else if (state.view === 'decline_reason') {
-      renderReasons(ESIM_REASON_COLUMNS, data.reasons);
+      renderTable(OVERVIEW_REASON_COLUMNS, data.reasons, { empty: 'No unpaid orders for this period' });
     } else {
-      renderTable([valueColumn(), ...HEALTH_COLUMNS], data.breakdown, { ...breakdown, empty: 'No payment attempts for this period' });
+      renderTable([valueColumn(), ...OVERVIEW_COLUMNS], data.breakdown, { ...breakdown, empty: 'No orders for this period' });
     }
     return;
   }
@@ -811,19 +760,30 @@ function renderPercentChart(canvasId, series, datasets) {
 }
 
 const renderRepeatChart = (series) =>
-  renderPercentChart('repeat-chart', series, [
-    percentLine(series, 'Repeat 30d', 'repeat_rate_30', 'final_30', css('--s-converted')),
-    percentLine(series, 'Repeat 90d', 'repeat_rate_90', 'final_90', css('--s-first')),
-  ]);
-const renderHealthChart = (series) =>
-  renderPercentChart('health-chart', series, [
-    percentLine(series, 'Approval rate', 'approval_rate', null, css('--s-first')),
-    percentLine(series, 'Checkout success', 'checkout_success_rate', null, css('--s-converted')),
-  ]);
+  renderPercentChart('repeat-chart', series, [percentLine(series, 'Returned within 30 days', 'repeat_rate_30', 'final_30', css('--s-converted'))]);
+
+function renderOverviewChart(series) {
+  const { muted, grid, x, common } = chartBase();
+  charts.main = new Chart($('overview-chart'), {
+    type: 'bar',
+    data: {
+      labels: chartLabels(series),
+      datasets: [{ label: 'Revenue', data: series.map((p) => p.revenue / 100), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+    },
+    options: {
+      ...common,
+      plugins: {
+        legend: { display: false },
+        tooltip: chartTooltip(series, (c) => ` Revenue: ${usd(series[c.dataIndex].revenue)} · orders: ${num(series[c.dataIndex].paid_orders)}`),
+      },
+      scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdCompact.format(v) } } },
+    },
+  });
+}
 
 // Графики своего экрана — при смене темы перерисовываются: цвета берутся из неё
 function renderModeCharts(series) {
-  ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, health: renderHealthChart })[kind()](series);
+  ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](series);
 }
 
 function renderTurnoverChart(series) {

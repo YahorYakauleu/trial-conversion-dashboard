@@ -139,7 +139,7 @@ describe('server', () => {
     expect((await get('view=bank')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['SUTTON BANK', null]);
   });
 
-  it('eSIM: продукт есть только с ключом; оборот по product=esim не смешивается с VPN; здоровье и повторные покупки', async () => {
+  it('eSIM: продукт есть только с ключом; оборот — только VPN; обзор и удержание eSIM', async () => {
     const store = openStore(':memory:');
     const at = Date.parse('2026-09-10T12:00:00Z') / 1000;
     const esim = { provider: 'stripe' as const, account: 'esim', mid: 'esim', refunded_usd_cents: 0, country: 'ES', payment_method: 'apple_pay', card_brand: 'visa', bank: null,
@@ -155,22 +155,21 @@ describe('server', () => {
     const get = async (path: string) => (await fetch(`${url}${path}${path.includes('?') ? '&' : '?'}period=custom&from=2026-09-10&to=2026-09-10`, { headers: auth })).json();
 
     const vpn = await get('/api/turnover');
-    expect([vpn.products, vpn.product, vpn.totals.gross]).toEqual([['vpn', 'esim'], 'vpn', 999]);
-    const volume = await get('/api/turnover?product=esim&view=destination');
-    expect([volume.product, volume.totals.gross, volume.breakdown.map((r: { value: string }) => r.value)]).toEqual(['esim', 800, ['Spain']]);
-    expect((await get('/api/esim/health')).totals).toMatchObject({ charges: 2, approved: 1, checkouts: 1, paid_checkouts: 1, recovery_rate: 1 });
-    expect((await get('/api/esim/health?view=decline_reason')).reasons.map((r: { reason: string }) => r.reason)).toEqual(['Insufficient funds']);
+    expect([vpn.products, vpn.totals.gross]).toEqual([['vpn', 'esim'], 999]); // оборот — только VPN
+    const overview = await get('/api/esim/overview');
+    expect(overview.totals).toMatchObject({ orders: 1, paid_orders: 1, new_customers: 1, revenue: 800, payment_success_rate: 1 });
+    expect((await get('/api/esim/overview?view=destination')).breakdown.map((r: { value: string }) => r.value)).toEqual(['Spain']);
+    expect((await get('/api/esim/overview?view=decline_reason')).reasons).toEqual([]); // единственный заказ оплачен
     expect((await get('/api/esim/repeat')).totals).toMatchObject({ customers: 1, repeat_30: 0 });
     const values = async (q: string) => (await (await fetch(`${url}/api/values?${q}`, { headers: auth })).json()).values;
-    expect(await values('mode=esim_health&dimension=destination')).toEqual([{ value: 'Spain', count: 2 }]); // попытки
-    expect(await values('mode=esim_volume&dimension=package&destination=Spain')).toEqual([{ value: '5 GB · 7 days', count: 1 }]); // платежи
+    expect(await values('mode=esim_overview&dimension=destination')).toEqual([{ value: 'Spain', count: 1 }]); // заказы
     expect(await values('mode=esim_repeat&dimension=destination&destination=Japan')).toEqual([{ value: 'Spain', count: 1 }]); // клиенты
 
     // без ключа eSIM нет: эндпоинты — 404, оборот — всегда VPN
     server.close();
     const plain = await start();
-    expect((await fetch(`${plain}/api/esim/health`, { headers: auth })).status).toBe(404);
-    expect((await (await fetch(`${plain}/api/turnover?product=esim`, { headers: auth })).json()).product).toBe('vpn');
+    expect((await fetch(`${plain}/api/esim/overview`, { headers: auth })).status).toBe(404);
+    expect((await (await fetch(`${plain}/api/turnover`, { headers: auth })).json()).products).toEqual(['vpn']);
   });
 
   it('/api/sync: 202, а во время синка — 409', async () => {

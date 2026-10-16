@@ -410,7 +410,7 @@ describe('оборот', () => {
     provider: 'stripe', payment_id: id, account: 'corp', mid: 'corp', paid_at: ts(paidIso), amount_usd_cents: 1_000, refunded_usd_cents: 0,
     country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, ...patch,
   });
-  const range = { product: 'vpn' as const, provider: 'all' as const, filters: {}, from: '2026-10-05', to: '2026-10-11', timeZones: { stripe: 'UTC', solidgate: 'UTC' } };
+  const range = { provider: 'all' as const, filters: {}, from: '2026-10-05', to: '2026-10-11', timeZones: { stripe: 'UTC', solidgate: 'UTC' } };
   function seeded() {
     const store = openStore(':memory:');
     store.upsertPayment(payment('a', '2026-10-05T10:00:00Z', { amount_usd_cents: 3_000, refunded_usd_cents: 1_000 }));
