@@ -6,10 +6,9 @@ import type { StripeLike } from '../src/providers/stripe.js';
 
 const NOW = Date.parse('2026-10-12T10:00:00Z') / 1000;
 const TODAY = NOW - (NOW % DAY);
-const HISTORY_FROM = Date.parse('2026-10-01T00:00:00Z') / 1000;
 // курс в тестах: EUR — 1,25 евро за доллар, USD — как есть
 const toUsd = async (amount: number, currency: string) => (currency === 'eur' ? Math.round(amount / 1.25) : amount);
-const cfg = { historyFrom: HISTORY_FROM, toUsd };
+const cfg = { toUsd };
 
 type Range = { gte?: number; lt?: number };
 const charge = (p: Record<string, unknown> = {}) => ({
@@ -74,7 +73,7 @@ describe('eSIM: списания', () => {
     expect(await esimChargeRow(charge({ status: 'pending' }) as never, toUsd)).toBeNull();
   });
 
-  it('синк: бэкфилл по дням с HISTORY_FROM, курсор; захват холда и рефанд — в инкременте; VPN-платежи не задеты', async () => {
+  it('синк: бэкфилл — вся история одним проходом, курсор; захват холда и рефанд — в инкременте; VPN-платежи не задеты', async () => {
     const store = openStore(':memory:');
     store.upsertPayment({
       provider: 'stripe', payment_id: 'ch_vpn', account: 'corp', mid: 'corp', paid_at: TODAY - DAY, amount_usd_cents: 999, refunded_usd_cents: 0,
@@ -82,7 +81,8 @@ describe('eSIM: списания', () => {
     });
     const intro = charge({ id: 'ch_intro', created: NOW - 600, captured: true, description: 'Japan - 1 GB - 3 days' });
     const { client, calls } = fakeStripe({
-      charges: [charge(), charge({ id: 'ch_2', created: TODAY - 2 * DAY, status: 'failed', outcome: { reason: 'do_not_honor' } }), intro],
+      // ch_old — задолго до HISTORY_FROM дашборда: история eSIM грузится целиком
+      charges: [charge(), charge({ id: 'ch_2', created: TODAY - 2 * DAY, status: 'failed', outcome: { reason: 'do_not_honor' } }), intro, charge({ id: 'ch_old', created: TODAY - 200 * DAY })],
       events: [{ created: NOW - 300, data: { object: { id: 'ch_intro' } } }],
       refunds: [{ created: NOW - 200, status: 'succeeded', charge: { id: 'ch_1', amount: 1000, amount_refunded: 1000 } }],
     });
@@ -93,11 +93,11 @@ describe('eSIM: списания', () => {
       { payment_id: 'ch_1', product: 'esim', approved: 1, amount_usd_cents: 800, refunded_usd_cents: 800, destination: 'Spain' },
       { payment_id: 'ch_2', product: 'esim', approved: 0, amount_usd_cents: 800, refunded_usd_cents: 0, destination: 'Spain' },
       { payment_id: 'ch_intro', product: 'esim', approved: 1, amount_usd_cents: 800, refunded_usd_cents: 0, destination: 'Japan' },
+      { payment_id: 'ch_old', product: 'esim', approved: 1, amount_usd_cents: 800, refunded_usd_cents: 0, destination: 'Spain' },
       { payment_id: 'ch_vpn', product: 'vpn', approved: 1, amount_usd_cents: 999, refunded_usd_cents: 0, destination: null },
     ]);
     expect(store.getState('stripe', 'esim', 'cursor')).toBe(NOW);
-    const days = calls.filter((c) => c.method === 'charges' && c.created.lt! - c.created.gte! === DAY);
-    expect(days).toHaveLength(11); // 01.10 — 11.10, сегодня — уже инкрементом
+    expect(calls.filter((c) => c.method === 'charges' && c.created.gte === undefined)).toEqual([{ method: 'charges', created: { lt: TODAY } }]); // сегодня — уже инкрементом
 
     // повторный синк — без бэкфилла, только последний час
     calls.length = 0;

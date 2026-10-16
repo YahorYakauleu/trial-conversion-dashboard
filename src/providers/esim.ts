@@ -3,7 +3,7 @@ import { toAlpha2 } from '../countries.js';
 import type { EsimChargeRow, Store } from '../db.js';
 import { forEachWindow } from '../days.js';
 import type { ToUsd } from '../fx.js';
-import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
+import { dayKey, startOfUtcDay } from '../metrics.js';
 import type { StripeLike } from './stripe.js';
 
 // eSIM — отдельный Stripe-аккаунт. Подписок нет: каждая покупка пакета или пополнение — свой PaymentIntent,
@@ -15,7 +15,6 @@ const HOUR = 3_600;
 const SYNC_OVERLAP = HOUR; // списание может появиться в списке с задержкой — инкремент берёт с запасом
 
 export interface EsimSyncConfig {
-  historyFrom: number;
   toUsd: ToUsd;
 }
 
@@ -59,7 +58,8 @@ export async function esimChargeRow(charge: Stripe.Charge, toUsd: ToUsd): Promis
   };
 }
 
-// Без курсора — бэкфилл списаний с HISTORY_FROM по дням (прогресс сохраняется); дальше — инкремент с (курсор − 1 час):
+// Без курсора — вся история аккаунта одним проходом: он небольшой (десятки списаний в сутки), а без начала истории
+// клиенты, купившие до HISTORY_FROM, считались бы новыми. Дальше — инкремент с (курсор − 1 час):
 // новые списания, холды intro-пакетов, захваченные позже, и рефанды
 export async function syncEsimAccount(store: Store, stripe: StripeLike, cfg: EsimSyncConfig, now: number): Promise<number> {
   const today = startOfUtcDay(now);
@@ -74,17 +74,8 @@ export async function syncEsimAccount(store: Store, stripe: StripeLike, cfg: Esi
   const listCharges = (created: Stripe.RangeQueryParam) => stripe.charges.list({ created, limit: 100, expand: ['data.balance_transaction'] });
 
   if (cursor === null) {
-    await forEachWindow(
-      store.getState('stripe', ESIM_ACCOUNT, 'charges_day') ?? cfg.historyFrom,
-      today,
-      DAY,
-      PARALLEL,
-      async (day) => {
-        for await (const charge of listCharges({ gte: day, lt: day + DAY })) await save(charge);
-        console.log(`[stripe:${ESIM_ACCOUNT}] списания ${dayKey(day)} готово`);
-      },
-      (next) => store.setState('stripe', ESIM_ACCOUNT, 'charges_day', next),
-    );
+    for await (const charge of listCharges({ lt: today })) await save(charge);
+    console.log(`[stripe:${ESIM_ACCOUNT}] вся история до ${dayKey(today)}: ${items} списаний`);
   }
 
   const since = (cursor ?? today) - SYNC_OVERLAP;

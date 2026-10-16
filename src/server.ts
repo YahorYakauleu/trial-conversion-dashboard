@@ -113,18 +113,19 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&account=stripe:corp&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
   //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки провайдера (config.timeZones).
   // Общее для обоих экранов: провайдер, шаг, период (в местных сутках) и статус синка
-  const common = (query: Record<string, unknown>) => {
+  // first — начало истории экрана: у VPN — HISTORY_FROM, у eSIM — его первый платёж (его история грузится целиком)
+  const common = (query: Record<string, unknown>, first = config.historyFromDay) => {
     const now = nowSec();
     const today = latestDay(now, config.timeZones);
     return {
       now,
       provider: PROVIDERS.find((p) => p === query.provider) ?? 'all',
       granularity: GRANULARITIES.find((g) => g === query.granularity) ?? 'day',
-      range: resolveRange(config.historyFromDay, today, { period: query.period, from: query.from, to: query.to }),
+      range: resolveRange(first, today, { period: query.period, from: query.from, to: query.to }),
       meta: {
         generated_at: now,
         time_zones: config.timeZones,
-        history_from: config.historyFromDay,
+        history_from: first,
         today,
         sync_running: isSyncRunning(),
         sync: store.latestRuns(),
@@ -155,9 +156,8 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   // Оборот: те же параметры, что у /api/metrics, плюс &product=vpn|esim. Разрезы VPN — mid (stripe:corp, solidgate:<uuid>),
   // страна, способ оплаты, банк, система; eSIM — направление, пакет, тип заказа, страна, способ оплаты, система
   app.get('/api/turnover', (req, res) => {
-    const { granularity, meta, ...rest } = common(req.query);
     const product: Product = esimEnabled && req.query.product === 'esim' ? 'esim' : 'vpn';
-    const range = product === 'esim' ? esimRange(rest.range) : rest.range;
+    const { granularity, range, meta, ...rest } = product === 'esim' ? common(req.query, esimFirstDay()) : common(req.query);
     const provider = product === 'esim' ? 'all' : rest.provider; // у eSIM только Stripe
     const dimensions = turnoverDimensions(product);
     const view = dimensions.find((v) => v === req.query.view) ?? 'time';
@@ -173,18 +173,16 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, product, range, filters, view, ...data });
   });
 
-  // У eSIM ряд начинается с его первого платежа: аккаунт моложе HISTORY_FROM — пустые дни до него только шум
-  const esimRange = (range: { from: string; to: string }) => {
+  // История eSIM — с его первого платежа: аккаунт небольшой, грузится целиком, иначе «новые клиенты» первых когорт были бы старыми
+  const esimFirstDay = () => {
     const first = store.firstPaymentAt('esim');
-    const day = first === null ? null : localDay(first, config.timeZones.stripe);
-    return day && day > range.from && day <= range.to ? { ...range, from: day } : range;
+    return first === null ? config.historyFromDay : localDay(first, config.timeZones.stripe);
   };
 
   // eSIM: платёжное здоровье — попытки и оплаты. ?granularity&period&view=time|decline_reason|destination|package|order_type|country|…
   app.get('/api/esim/health', (req, res) => {
     if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
-    const { now, granularity, meta, ...rest } = common(req.query);
-    const range = esimRange(rest.range);
+    const { now, granularity, range, meta } = common(req.query, esimFirstDay());
     const view = [...HEALTH_DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
     const filters: EsimFilters = parseFilters(req.query, HEALTH_DIMENSIONS);
     const options = { filters, ...range, timeZones: config.timeZones, now };
@@ -199,8 +197,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   // eSIM: повторные покупки — когорты клиентов по дню первой покупки. ?granularity&period&view=time|destination|package|country|…
   app.get('/api/esim/repeat', (req, res) => {
     if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
-    const { now, granularity, meta, ...rest } = common(req.query);
-    const range = esimRange(rest.range);
+    const { now, granularity, range, meta } = common(req.query, esimFirstDay());
     const view = REPEAT_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
     const filters: EsimFilters = parseFilters(req.query, REPEAT_DIMENSIONS);
     const options = { filters, ...range, timeZones: config.timeZones, now };
