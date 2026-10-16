@@ -49,6 +49,18 @@ export interface PaymentRow extends CardDetails {
   refunded_usd_cents: number;
 }
 
+// Списание eSIM: у продукта нет подписок — только разовые покупки (PaymentIntent), поэтому храним и отклонённые
+// списания (approved = false, для платёжного здоровья), и то, что купили: направление, пакет, тип заказа, клиента
+export interface EsimChargeRow extends PaymentRow {
+  approved: boolean;
+  reason: string | null; // код отказа
+  intent_id: string | null; // PaymentIntent — одна оплата, в ней может быть несколько попыток
+  customer_id: string | null;
+  destination: string | null; // страна или регион пакета: «Spain»
+  package: string | null; // «5 GB · 7 days»
+  order_type: string | null; // purchase | topup
+}
+
 export interface LatestRun {
   provider: Provider;
   account: string;
@@ -163,6 +175,18 @@ export function openStore(file: string) {
       rates TEXT NOT NULL
     );
   `);
+  // Платежи eSIM — в той же таблице (product = 'esim'), вместе с отклонёнными списаниями (approved = 0);
+  // у VPN в payments только успешные списания
+  const paymentColumns = new Set((db.prepare('PRAGMA table_info(payments)').all() as { name: string }[]).map((c) => c.name));
+  if (!paymentColumns.has('product')) db.exec(`ALTER TABLE payments ADD COLUMN product TEXT NOT NULL DEFAULT 'vpn'`);
+  if (!paymentColumns.has('approved')) db.exec('ALTER TABLE payments ADD COLUMN approved INTEGER NOT NULL DEFAULT 1');
+  for (const column of ['reason', 'intent_id', 'customer_id', 'destination', 'package', 'order_type']) {
+    if (!paymentColumns.has(column)) db.exec(`ALTER TABLE payments ADD COLUMN ${column} TEXT`);
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS payments_product_paid_idx ON payments (product, paid_at);
+    CREATE INDEX IF NOT EXISTS payments_customer_idx ON payments (customer_id) WHERE customer_id IS NOT NULL;
+  `);
   // Пересчёт итогов попыток одного триала (или всех — для базы, выгруженной до появления колонок)
   const attemptTotals = `(SELECT COUNT(*), COALESCE(SUM(a.approved), 0), COALESCE(MAX(a.refunded), 0)
      FROM attempts a WHERE a.provider = trials.provider AND a.subscription_id = trials.subscription_id)`;
@@ -237,6 +261,29 @@ export function openStore(file: string) {
       card_brand = excluded.card_brand,
       bank = excluded.bank
   `);
+  const upsertEsimChargeStmt = db.prepare(`
+    INSERT INTO payments (provider, payment_id, account, mid, paid_at, amount_usd_cents, refunded_usd_cents,
+                          country, payment_method, card_brand, bank,
+                          product, approved, reason, intent_id, customer_id, destination, package, order_type)
+    VALUES (@provider, @payment_id, @account, @mid, @paid_at, @amount_usd_cents, @refunded_usd_cents,
+            @country, @payment_method, @card_brand, @bank,
+            'esim', @approved, @reason, @intent_id, @customer_id, @destination, @package, @order_type)
+    ON CONFLICT (provider, payment_id) DO UPDATE SET
+      paid_at = excluded.paid_at,
+      amount_usd_cents = excluded.amount_usd_cents,
+      refunded_usd_cents = MAX(excluded.refunded_usd_cents, payments.refunded_usd_cents),
+      country = excluded.country,
+      payment_method = excluded.payment_method,
+      card_brand = excluded.card_brand,
+      bank = excluded.bank,
+      approved = excluded.approved,
+      reason = excluded.reason,
+      intent_id = excluded.intent_id,
+      customer_id = excluded.customer_id,
+      destination = excluded.destination,
+      package = excluded.package,
+      order_type = excluded.order_type
+  `);
   const selectByInvoice = db.prepare('SELECT subscription_id FROM trials WHERE provider = ? AND first_invoice_id = ?');
   const selectTrial = db.prepare('SELECT * FROM trials WHERE provider = ? AND subscription_id = ?');
   const selectState = db.prepare('SELECT value FROM sync_state WHERE provider = ? AND account = ? AND key = ?');
@@ -296,6 +343,10 @@ export function openStore(file: string) {
 
     upsertPayment(p: PaymentRow): void {
       upsertPaymentStmt.run({ ...p });
+    },
+
+    upsertEsimCharge(c: EsimChargeRow): void {
+      upsertEsimChargeStmt.run({ ...c, approved: Number(c.approved) });
     },
 
     // Рефанд, пришедший позже платежа: доля возвращённой суммы (Stripe refunds)

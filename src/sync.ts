@@ -2,6 +2,7 @@ import type { Config } from './config.js';
 import { nowSec, type Provider, type Store } from './db.js';
 import { createToUsd } from './fx.js';
 import { DAY } from './metrics.js';
+import { ESIM_ACCOUNT, syncEsimAccount } from './providers/esim.js';
 import { syncSolidgateAccount } from './providers/solidgate.js';
 import { createStripeClient, syncStripeAccount } from './providers/stripe.js';
 
@@ -61,5 +62,10 @@ export function buildSources(config: Config): Source[] {
       run: (store, now) => syncSolidgateAccount(store, acc, syncConfig(store), now),
     }),
   );
-  return [...stripe, ...solidgate];
+  // eSIM — свой Stripe-аккаунт со своей выгрузкой (разовые покупки вместо подписок)
+  const esimClient = config.esimStripeKey && createStripeClient(config.esimStripeKey);
+  const esim: Source[] = esimClient
+    ? [{ provider: 'stripe', account: ESIM_ACCOUNT, run: (store, now) => syncEsimAccount(store, esimClient, syncConfig(store), now) }]
+    : [];
+  return [...stripe, ...solidgate, ...esim];
 }

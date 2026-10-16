@@ -1,17 +1,34 @@
 import type { Db } from './db.js';
-import { bucketDay, bucketSql, dimensionFilterSql, mondayOf, periodSql, type Granularity, type ProviderFilter, type TimeZones } from './metrics.js';
+import {
+  bucketDay,
+  bucketSql,
+  dimensionFilterSql,
+  mondayOf,
+  periodSql,
+  type Granularity,
+  type Product,
+  type ProviderFilter,
+  type TimeZones,
+} from './metrics.js';
 import { addDays } from './time.js';
 
 // Оборот — все успешные платежи по дате платежа (не по когортам триалов). Суммы — в центах USD.
+// Разрезы у продуктов свои: у eSIM — что купили (направление, пакет, покупка или пополнение)
 export const TURNOVER_DIMENSIONS = ['mid', 'country', 'payment_method', 'bank', 'card_brand'] as const;
-export type TurnoverDimension = (typeof TURNOVER_DIMENSIONS)[number];
-const DIMENSION_SQL: Record<TurnoverDimension, string> = {
+export const ESIM_TURNOVER_DIMENSIONS = ['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'] as const;
+export type TurnoverDimension = (typeof TURNOVER_DIMENSIONS)[number] | (typeof ESIM_TURNOVER_DIMENSIONS)[number];
+export const turnoverDimensions = (product: Product): readonly TurnoverDimension[] =>
+  product === 'esim' ? ESIM_TURNOVER_DIMENSIONS : TURNOVER_DIMENSIONS;
+export const DIMENSION_SQL: Record<TurnoverDimension, string> = {
   // провайдер вместе с MID, как у аккаунтов: stripe:corp, solidgate:<uuid>
   mid: "p.provider || ':' || p.mid",
   country: 'p.country',
   payment_method: 'p.payment_method',
   bank: 'p.bank',
   card_brand: 'p.card_brand',
+  destination: 'p.destination',
+  package: 'p.package',
+  order_type: 'p.order_type',
 };
 // Фильтр по измерению — список значений, 'none' — «не определено» (как у триалов)
 export type TurnoverFilters = Partial<Record<TurnoverDimension, string[]>>;
@@ -38,6 +55,7 @@ export interface TurnoverRow extends TurnoverTotals {
 }
 
 export interface TurnoverOptions {
+  product: Product;
   provider: ProviderFilter;
   filters: TurnoverFilters;
   from: string; // первый день периода (местные сутки)
@@ -56,8 +74,9 @@ const withTotals = <T extends Sums>(s: T): T & TurnoverTotals => ({
 function paymentFilter(o: TurnoverOptions) {
   const period = periodSql('p', 'p.paid_at', o);
   const dimensions = dimensionFilterSql(DIMENSION_SQL, o.filters);
-  const params: Record<string, string | number> = { ...period.params, ...dimensions.params, provider: o.provider };
-  const clauses = [period.sql, "(@provider = 'all' OR p.provider = @provider)", ...dimensions.clauses];
+  const params: Record<string, string | number> = { ...period.params, ...dimensions.params, provider: o.provider, product: o.product };
+  // в payments у eSIM лежат и отклонённые списания — в оборот только успешные
+  const clauses = [period.sql, 'p.product = @product', 'p.approved = 1', "(@provider = 'all' OR p.provider = @provider)", ...dimensions.clauses];
   return { sql: clauses.join(' AND '), params };
 }
 
@@ -94,17 +113,18 @@ export function getTurnover(db: Db, o: TurnoverOptions & { granularity: Granular
 // Итоги из разбивки: каждый платёж попадает ровно в одну строку — второй проход по базе не нужен
 export const turnoverTotalsOf = (rows: TurnoverRow[]): TurnoverTotals => withTotals(rows.reduce<Sums>(add, zero()));
 
-// Значения измерений для фильтров (вся история провайдера) — по убыванию числа платежей; null — «не определено»
-export function getTurnoverDimensionValues(db: Db, provider: ProviderFilter) {
+// Значения измерений для фильтров (вся история провайдера и продукта) — по убыванию числа списаний; null — «не определено».
+// У eSIM — и по отклонённым списаниям: те же значения нужны экрану платёжного здоровья
+export function getTurnoverDimensionValues(db: Db, provider: ProviderFilter, product: Product = 'vpn') {
   return Object.fromEntries(
-    TURNOVER_DIMENSIONS.map((d) => [
+    turnoverDimensions(product).map((d) => [
       d,
       db
         .prepare(
           `SELECT ${DIMENSION_SQL[d]} AS value, COUNT(*) AS count FROM payments p
-           WHERE @provider = 'all' OR p.provider = @provider GROUP BY value ORDER BY count DESC LIMIT 1000`,
+           WHERE p.product = @product AND (@provider = 'all' OR p.provider = @provider) GROUP BY value ORDER BY count DESC LIMIT 1000`,
         )
-        .all({ provider }) as unknown as { value: string | null; count: number }[],
+        .all({ provider, product }) as unknown as { value: string | null; count: number }[],
     ]),
   );
 }
