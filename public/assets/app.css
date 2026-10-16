@@ -243,6 +243,13 @@ button, select, input { font: inherit; color: var(--text); }
 .tabs button:hover { color: var(--text); background: var(--surface-sunken); }
 .tabs button.on { color: var(--text); background: var(--surface); border-color: var(--border); box-shadow: var(--shadow); font-weight: 600; }
 .view-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; min-height: 36px; }
+.view-head .hint { flex: 1; }
+/* Выгрузка строки — иконка в конце строки, видна при наведении */
+.export-cell { width: 36px; padding-left: 0 !important; text-align: right; }
+.row-export { display: inline-flex; padding: 3px; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; opacity: 0; }
+.row-export svg { width: 15px; height: 15px; }
+tbody tr:hover .row-export, .row-export:focus-visible { opacity: 1; }
+.row-export:hover { color: var(--text); background: var(--surface-hover); }
 .hint { font-size: 12px; color: var(--muted); }
 
 /* панели, графики, таблица */

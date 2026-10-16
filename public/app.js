@@ -1,5 +1,5 @@
 // Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
-// данные — /api/metrics (конверсия), /api/turnover (оборот), значения фильтров — /api/values.
+// данные — /api/metrics (конверсия), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
 
 const DAY_MS = 86_400_000;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -120,6 +120,7 @@ const ICONS = {
   left: svg('<path d="m15 18-6-6 6-6"/>'),
   right: svg('<path d="m9 18 6-6-6-6"/>'),
   check: svg('<path d="M5 12.5 10 17.5 19 7"/>', 3),
+  download: svg('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
 };
 
 // --- состояние из адреса страницы
@@ -615,21 +616,23 @@ function sortRows(rows, columns) {
 let table = null; // текущие колонки и строки — для пересортировки без запроса
 
 function renderTable(columns, rows, { link = false, limit = false, empty = 'No data for this period' } = {}) {
-  table = { columns, rows, link, limit, empty };
   const sort = state.sort ?? defaultSort();
   const sorted = sortRows(rows, columns);
   const shown = limit && !state.showAll ? sorted.slice(0, ROW_LIMIT) : sorted;
+  table = { columns, rows, link, limit, empty, shown };
   $('thead').innerHTML = `<tr>${columns
     .map((c) => {
       const on = sort?.key === c.key;
       const arrow = on && sort.dir === 'asc' ? '↑' : '↓';
       return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sort" data-sort="${c.key}"${c.tip ? ` data-tip="${esc(c.tip)}"` : ''}>${c.title}<span class="arrow">${arrow}</span></button></th>`;
     })
-    .join('')}</tr>`;
+    .join('')}<th class="export-cell"></th></tr>`;
+  const exportCell = (i) =>
+    `<td class="export-cell"><button class="row-export" data-row="${i}" data-tip="Выгрузить записи этой строки списком (CSV)" aria-label="Export rows">${ICONS.download}</button></td>`;
   $('rows').innerHTML =
     shown
-      .map((r) => `<tr${link ? ` class="link" data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}</tr>`)
-      .join('') || `<tr><td colspan="${columns.length}" class="muted">${empty}</td></tr>`;
+      .map((r, i) => `<tr${link ? ` class="link" data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}${exportCell(i)}</tr>`)
+      .join('') || `<tr><td colspan="${columns.length + 1}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
   $('show-all').textContent = `Show all (${num(rows.length)})`;
 }
@@ -1064,6 +1067,8 @@ $('thead').addEventListener('click', (event) => {
 });
 
 $('rows').addEventListener('click', (event) => {
+  const exportButton = event.target.closest('.row-export');
+  if (exportButton) return void exportCsv(rowPatch(table.shown[+exportButton.dataset.row]), exportButton);
   const row = event.target.closest('tr.link');
   if (loading || !row || !dimensions().includes(state.view)) return; // строки старой вкладки, пока грузится новая
   state.filters[state.view] = [row.dataset.value];
@@ -1071,6 +1076,40 @@ $('rows').addEventListener('click', (event) => {
   state.sort = null;
   load();
 });
+
+// Выгрузка списком (CSV): записи, из которых посчитана цифра, — для текущей выборки или одной строки таблицы
+async function exportCsv(patch = {}, button = $('export')) {
+  const q = query();
+  for (const [key, value] of Object.entries(patch)) {
+    q.delete(key);
+    q.append(key, value);
+  }
+  button.disabled = true; // без двойной выгрузки
+  try {
+    const res = await api(`/api/export?${q}`);
+    if (res.status === 401) return location.assign('/login');
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`);
+    const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? 'export.csv';
+    const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(await res.blob()), download: name });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    const truncated = res.headers.get('x-export-truncated');
+    if (truncated) $('status').textContent = `Exported the first ${num(+truncated)} rows — narrow the period or filters to get all of them`;
+  } catch (error) {
+    $('status').textContent = `Export failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// Строка таблицы сужает выгрузку: период строки (динамика), причина отказа или значение разреза
+function rowPatch(r) {
+  if (state.view === 'time') return { period: 'custom', from: r.period, to: r.period_end };
+  if (state.view === 'decline_reason') return { reason: r.reason };
+  return { [state.view]: r.value ?? 'none' };
+}
+
+$('export').addEventListener('click', () => exportCsv());
 
 $('show-all').addEventListener('click', () => {
   state.showAll = true;

@@ -262,7 +262,7 @@ export async function syncStripeAccount(
   if (cursor !== null && (store.getState('stripe', account, 'customers_version') ?? 0) < CUSTOMERS_VERSION) {
     await forEachWindow(
       store.getState('stripe', account, 'customers_subs_day') ?? cfg.historyFrom,
-      today,
+      now, // включая сегодняшние подписки, загруженные до появления ID клиента
       DAY,
       PARALLEL,
       async (day) => {
