@@ -423,10 +423,14 @@ function renderRepeatKpis({ totals: t, range }) {
   kpiCards([
     ['New customers', num(t.customers), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Клиенты, впервые купившие eSIM в эти дни'],
     ['Repeat rate, 30d', approxPct(t.repeat_rate_30, t.final_30), `${num(t.repeat_30)} of ${num(t.customers)}`, 'Доля купивших снова в течение 30 дней после первой покупки'],
-    ['Repeat rate, 90d', approxPct(t.repeat_rate_90, t.final_90), `${num(t.repeat_90)} of ${num(t.customers)}`, 'Доля купивших снова в течение 90 дней после первой покупки'],
+    before30(t)
+      ? ['Repeat rate, 90d', '—', 'after 30 days', 'Ни у кого из клиентов периода ещё не прошло 30 дней — пока совпадает с 30-дневной цифрой']
+      : ['Repeat rate, 90d', approxPct(t.repeat_rate_90, t.final_90), `${num(t.repeat_90)} of ${num(t.customers)}`, 'Доля купивших снова в течение 90 дней после первой покупки'],
     ['Top-up rate, 30d', approxPct(t.topup_rate_30, t.final_30), `${num(t.topup_30)} of ${num(t.customers)}`, 'Доля пополнивших пакет в течение 30 дней после первой покупки'],
-    ['Revenue per customer, 30d', usdAverage(t.revenue_per_customer_30), 'net of refunds', 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов'],
-    ['Revenue per customer, 90d', usdAverage(t.revenue_per_customer_90), 'net of refunds', 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов'],
+    ['Revenue per customer, 30d', `${t.final_30 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_30)}`, 'net of refunds', 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов'],
+    before30(t)
+      ? ['Revenue per customer, 90d', '—', 'after 30 days', 'Ни у кого из клиентов периода ещё не прошло 30 дней — пока совпадает с 30-дневной цифрой']
+      : ['Revenue per customer, 90d', `${t.final_90 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_90)}`, 'net of refunds', 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов'],
   ]);
 }
 
@@ -458,14 +462,14 @@ function periodLabel(p) {
   return p.period.endsWith('-01') && isMonthEnd(p.period_end) ? name : `${name} (${shortDay(p.period)} — ${shortDay(p.period_end)})`;
 }
 
-// «≈» — у неокончательных цифр; у пустых (—) его не ставим
-const pendingCell = (html, final, title = '') => {
+// «≈» — у неокончательных цифр; у пустых (—) его не ставим. tip — подсказка к неокончательной цифре
+const pendingCell = (html, final, title = '', tip = '') => {
   const approx = !final && !html.startsWith('—');
-  return `<td class="${approx ? 'pending' : ''}" title="${title}">${approx ? '≈ ' : ''}${html}</td>`;
+  return `<td class="${approx ? 'pending' : ''}" title="${title}"${approx && tip ? ` data-tip="${esc(tip)}"` : ''}>${approx ? '≈ ' : ''}${html}</td>`;
 };
 // Доля и рядом количество; нет знаменателя (некого считать) — просто «—»
-const rateCell = (rate, count, final = true, title = '') =>
-  rate === null ? '<td>—</td>' : pendingCell(`${pct(rate)}<span class="n">${num(count)}</span>`, final, title);
+const rateCell = (rate, count, final = true, title = '', tip = '') =>
+  rate === null ? '<td>—</td>' : pendingCell(`${pct(rate)}<span class="n">${num(count)}</span>`, final, title, tip);
 const shareCell = (share) =>
   `<td><span class="bar-cell"><span class="bar"><span style="width:${((share ?? 0) * 100).toFixed(1)}%"></span></span>${pct(share)}</span></td>`;
 
@@ -564,7 +568,18 @@ const ESIM_REASON_TIPS = {
 };
 const ESIM_REASON_COLUMNS = REASON_COLUMNS.filter((c) => c.key !== 'avg_days_to_pay').map((c) => ({ ...c, tip: ESIM_REASON_TIPS[c.key] ?? c.tip }));
 
-// eSIM, повторные покупки: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней
+// eSIM, повторные покупки: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
+// В подсказке к «≈» — сколько дней окна прошло (у самых свежих клиентов группы) и когда цифра станет итоговой
+const DAY_SECONDS = 86_400;
+const ruDate = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'America/New_York' });
+function windowTip(p, days) {
+  const passed = Math.max(0, Math.floor((lastData.generated_at - p.last_first_at) / DAY_SECONDS));
+  const freshest = p.period && p.period === p.period_end ? '' : ' у самых свежих клиентов';
+  return `Прошло ${passed} из ${days} дней${freshest} — итог ${ruDate.format(new Date((p.last_first_at + days * DAY_SECONDS) * 1000))}`;
+}
+// Ни у кого в группе ещё не прошло 30 дней — цифра за 90 дней пока совпадает с 30-дневной, показываем «—»
+const before30 = (p) => p.first_first_at > 0 && lastData.generated_at - p.first_first_at < 30 * DAY_SECONDS;
+const NOT_YET_90 = '<td class="muted" data-tip="Ни у кого в когорте ещё не прошло 30 дней — пока совпадает с 30-дневной цифрой">—</td>';
 const REPEAT_COLUMNS = [
   { key: 'customers', title: 'New customers', tip: 'Клиенты, впервые купившие eSIM в эти дни', sort: (p) => p.customers, cell: (p) => `<td>${num(p.customers)}</td>` },
   {
@@ -572,35 +587,35 @@ const REPEAT_COLUMNS = [
     title: 'Repeat 30d',
     tip: 'Купили снова в течение 30 дней после первой покупки',
     sort: (p) => p.repeat_rate_30,
-    cell: (p) => rateCell(p.repeat_rate_30, p.repeat_30, p.final_30),
+    cell: (p) => rateCell(p.repeat_rate_30, p.repeat_30, p.final_30, '', windowTip(p, 30)),
   },
   {
     key: 'repeat_rate_90',
     title: 'Repeat 90d',
     tip: 'Купили снова в течение 90 дней после первой покупки',
     sort: (p) => p.repeat_rate_90,
-    cell: (p) => rateCell(p.repeat_rate_90, p.repeat_90, p.final_90),
+    cell: (p) => (before30(p) ? NOT_YET_90 : rateCell(p.repeat_rate_90, p.repeat_90, p.final_90, '', windowTip(p, 90))),
   },
   {
     key: 'topup_rate_30',
     title: 'Top-up 30d',
     tip: 'Пополнили пакет в течение 30 дней после первой покупки',
     sort: (p) => p.topup_rate_30,
-    cell: (p) => rateCell(p.topup_rate_30, p.topup_30, p.final_30),
+    cell: (p) => rateCell(p.topup_rate_30, p.topup_30, p.final_30, '', windowTip(p, 30)),
   },
   {
     key: 'revenue_per_customer_30',
     title: 'Revenue / customer 30d',
     tip: 'Выручка с клиента за 30 дней с первой покупки — включая её, за вычетом рефандов',
     sort: (p) => p.revenue_per_customer_30,
-    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_30), p.final_30),
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_30), p.final_30, '', windowTip(p, 30)),
   },
   {
     key: 'revenue_per_customer_90',
     title: 'Revenue / customer 90d',
     tip: 'Выручка с клиента за 90 дней с первой покупки — включая её, за вычетом рефандов',
     sort: (p) => p.revenue_per_customer_90,
-    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_90), p.final_90),
+    cell: (p) => (before30(p) ? NOT_YET_90 : pendingCell(usdAverage(p.revenue_per_customer_90), p.final_90, '', windowTip(p, 90))),
   },
   { key: 'avg_days_to_second', title: 'Days to 2nd purchase', tip: 'Дней от первой покупки до второй — у тех, кто купил снова', sort: (p) => p.avg_days_to_second, cell: (p) => `<td>${decimal(p.avg_days_to_second)}</td>` },
 ];

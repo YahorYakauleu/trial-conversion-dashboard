@@ -171,6 +171,7 @@ interface RepeatCounts {
   revenue_90: number;
   repeaters: number; // купили второй раз когда-либо
   seconds_to_second: number; // сумма времени до второй покупки — у них
+  first_first_at: number; // самая ранняя первая покупка в когорте (0 — клиентов нет): пока ей меньше 30 дней, 90 дней = 30 дням
   last_first_at: number; // самая поздняя первая покупка — для окончательности
 }
 
@@ -186,7 +187,7 @@ export interface RepeatTotals extends RepeatCounts {
 }
 
 const zeroRepeat = (): RepeatCounts => ({
-  customers: 0, repeat_30: 0, repeat_90: 0, topup_30: 0, revenue_30: 0, revenue_90: 0, repeaters: 0, seconds_to_second: 0, last_first_at: 0,
+  customers: 0, repeat_30: 0, repeat_90: 0, topup_30: 0, revenue_30: 0, revenue_90: 0, repeaters: 0, seconds_to_second: 0, first_first_at: 0, last_first_at: 0,
 });
 const addRepeat = (a: RepeatCounts, b: RepeatCounts): RepeatCounts => ({
   customers: a.customers + b.customers,
@@ -197,6 +198,7 @@ const addRepeat = (a: RepeatCounts, b: RepeatCounts): RepeatCounts => ({
   revenue_90: a.revenue_90 + b.revenue_90,
   repeaters: a.repeaters + b.repeaters,
   seconds_to_second: a.seconds_to_second + b.seconds_to_second,
+  first_first_at: a.first_first_at && b.first_first_at ? Math.min(a.first_first_at, b.first_first_at) : a.first_first_at || b.first_first_at,
   last_first_at: Math.max(a.last_first_at, b.last_first_at),
 });
 const withRepeatRates = <T extends RepeatCounts>(c: T, now: number): T & RepeatTotals => ({
@@ -236,7 +238,7 @@ function repeatSums(db: Db, o: EsimOptions, key: string) {
               COALESCE(SUM(c.second_at < f.paid_at + @d30), 0) AS repeat_30, COALESCE(SUM(c.second_at < f.paid_at + @d90), 0) AS repeat_90,
               COALESCE(SUM(c.topup_30), 0) AS topup_30, SUM(c.revenue_30) AS revenue_30, SUM(c.revenue_90) AS revenue_90,
               SUM(c.second_at IS NOT NULL) AS repeaters,
-              COALESCE(SUM(c.second_at - f.paid_at), 0) AS seconds_to_second, MAX(f.paid_at) AS last_first_at
+              COALESCE(SUM(c.second_at - f.paid_at), 0) AS seconds_to_second, MIN(f.paid_at) AS first_first_at, MAX(f.paid_at) AS last_first_at
        FROM ranked f JOIN per_customer c ON c.customer_id = f.customer_id
        WHERE f.n = 1 AND ${[period.sql, ...dims.clauses].join(' AND ')}
        GROUP BY key`,
