@@ -270,11 +270,14 @@ describe('платёжные метрики: проходимость, decline, 
   });
 
   it('причины отказа: коды Stripe и Solidgate сведены к общим названиям, доля от всех отказов', () => {
+    const noRecovery = { first_declines: 0, recovered: 0, recovery_rate: null, avg_attempts: null, avg_days_to_pay: null, final: true };
     expect(getDeclineReasons(paymentsStore().db, opts)).toEqual([
-      { reason: 'Недостаточно средств', count: 2, share: 0.5 },
-      { reason: 'Отказ банка без причины', count: 1, share: 0.25 },
-      { reason: 'Подозрение на фрод (банк)', count: 1, share: 0.25 },
+      // первая попытка отклонена у b (оплатил через 2 дня, 3 попытки) и у c (не оплатил, 2 попытки); окно ретраев ещё открыто
+      { reason: 'Недостаточно средств', count: 2, share: 0.5, first_declines: 2, recovered: 1, recovery_rate: 0.5, avg_attempts: 2.5, avg_days_to_pay: 2, final: false },
+      { reason: 'Отказ банка без причины', count: 1, share: 0.25, ...noRecovery }, // только на повторных попытках
+      { reason: 'Подозрение на фрод (банк)', count: 1, share: 0.25, ...noRecovery },
     ]);
+    expect(getDeclineReasons(paymentsStore().db, { ...opts, now: NOW + 30 * DAY })[0].final).toBe(true); // окно закрылось
     expect(getDeclineReasons(paymentsStore().db, { ...opts, provider: 'solidgate' }).map((r) => r.reason)).toEqual([
       'Недостаточно средств',
       'Подозрение на фрод (банк)',

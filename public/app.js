@@ -96,6 +96,7 @@ const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const num = (n) => n.toLocaleString('ru-RU');
+const decimal = (x) => (x === null || x === undefined ? '—' : x.toFixed(1));
 const pct = (r) => (r === null || r === undefined ? '—' : `${(r * 100).toFixed(1)}%`);
 // суммы оборота приходят в центах USD
 const usdWhole = new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -322,7 +323,7 @@ function renderTabs() {
     ? { time: 'Оборот — все успешные списания по дню платежа, в долларах' }
     : {
         time: 'Сконвертилось — оплатили первый платный период в течение 30 дней после конца триала',
-        decline_reason: 'Отклонённые попытки списания первого платежа, по причинам',
+        decline_reason: 'Отказов — все отклонённые попытки первого платежа. Recovery rate — из триалов, где первая попытка отклонена по этой причине, доля оплативших в течение 30 дней после конца триала',
       };
   $('hint').textContent = hints[state.view] ?? 'Нажмите на строку, чтобы посмотреть её динамику; на заголовок — чтобы отсортировать';
 }
@@ -370,6 +371,18 @@ const REASON_COLUMNS = [
   { key: 'reason', title: 'Причина отказа', text: true, sort: (r) => r.reason, cell: (r) => `<td>${esc(r.reason)}</td>` },
   { key: 'count', title: 'Отказов', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
   { key: 'share', title: 'Доля от всех отказов', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
+  { key: 'first_declines', title: 'Первый отказ', sort: (r) => r.first_declines, cell: (r) => `<td title="Триалов, у которых первая попытка отклонена по этой причине">${num(r.first_declines)}</td>` },
+  {
+    key: 'recovery_rate',
+    title: 'Recovery rate',
+    sort: (r) => r.recovery_rate,
+    cell: (r) =>
+      r.recovery_rate === null
+        ? '<td>—</td>' // причина встречается только на повторных попытках
+        : pendingCell(`${pct(r.recovery_rate)}<span class="n">${num(r.recovered)}</span>`, r.final, `оплатили ${num(r.recovered)} из ${num(r.first_declines)}`),
+  },
+  { key: 'avg_attempts', title: 'Попыток', sort: (r) => r.avg_attempts, cell: (r) => `<td title="Попыток на такой триал в среднем">${decimal(r.avg_attempts)}</td>` },
+  { key: 'avg_days_to_pay', title: 'Дней до оплаты', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td title="От первого отказа до оплаты — у восстановленных">${decimal(r.avg_days_to_pay)}</td>` },
 ];
 
 // Без выбранной сортировки: динамика — свежие дни сверху, разбивки — как отдал сервер (по главной метрике)
@@ -430,6 +443,11 @@ function renderView(data) {
     renderCharts(data.series);
   } else if (state.view === 'decline_reason') {
     renderTable(REASON_COLUMNS, data.reasons, { empty: 'Отказов за этот период нет' });
+    // итог по всем причинам — в подсказке над таблицей
+    const first = data.reasons.reduce((s, r) => s + r.first_declines, 0);
+    const recovered = data.reasons.reduce((s, r) => s + r.recovered, 0);
+    const approx = data.reasons.every((r) => r.final) ? '' : '≈ ';
+    if (first) $('hint').textContent += `. Всего: ${approx}${pct(recovered / first)} — оплатили ${num(recovered)} из ${num(first)}`;
   } else {
     renderTable([valueColumn(), ...CONVERSION_COLUMNS], data.breakdown, { link: true, limit: true });
   }
