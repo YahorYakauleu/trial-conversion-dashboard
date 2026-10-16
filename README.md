@@ -2,7 +2,7 @@
 
 Дашборд команды Billing по Stripe и Solidgate: конверсия триальных подписок в платные и оборот. Данные берутся напрямую из API провайдеров, складываются в локальную SQLite и обновляются каждые 4 часа.
 
-**Что считаем** (коротко с примером — [public/metrics.md](public/metrics.md), откуда берутся данные и как связываются — [public/data-sources.md](public/data-sources.md); оба открываются в дашборде по кнопке «Methodology»; решения — в [спеке](docs/specs/2026-10-12-trial-conversion-dashboard-design.md)):
+**Что считаем** (метрики с примерами — [VPN](public/methodology-vpn.md) и [eSIM](public/methodology-esim.md), откуда данные — [public/data-sources.md](public/data-sources.md); все три открываются в дашборде по кнопке «Methodology»; решения — в [спеке](docs/specs/2026-10-12-trial-conversion-dashboard-design.md)):
 - **Когорта** — триалы, оформленные в день D по времени провайдера, как в его кабинете: Stripe — `TIMEZONE` (по умолчанию America/New_York — как в Stripe и Campaignswell), Solidgate — `SOLIDGATE_TIMEZONE` (по умолчанию UTC — как в Solidgate Hub), начиная с `HISTORY_FROM`. Отменённые во время триала входят в знаменатель.
 - **Сконвертилось** — первый платный инвойс оплачен в течение `RETRY_WINDOW_DAYS` (30) дней после конца триала, с любой попытки.
 - **Из них с первой попытки** — оплачен первой автоматической попыткой.

@@ -1107,9 +1107,10 @@ document.addEventListener('mousedown', (event) => {
 });
 addEventListener('resize', closePopover);
 
-// «Как считается»: тексты — public/metrics.md и public/data-sources.md, один источник для дашборда и репозитория
+// «Methodology»: вкладки VPN, eSIM и Data sources — тексты в public/*.md, один источник для дашборда и репозитория.
+// Открывается на вкладке продукта, который сейчас на экране; вкладка eSIM — только если он подключён
 const helpCache = {};
-let helpTab = 'metrics';
+let helpTab = null;
 async function showHelpTab(tab) {
   helpTab = tab;
   document.querySelectorAll('#help-tabs button').forEach((b) => {
@@ -1134,7 +1135,8 @@ function openHelp() {
   $('help').hidden = false;
   $('help-overlay').hidden = false;
   $('help-close').focus();
-  showHelpTab(helpTab);
+  document.querySelector('#help-tabs [data-v="methodology-esim"]').hidden = !products.includes('esim');
+  showHelpTab(helpTab === 'data-sources' ? helpTab : `methodology-${product()}`);
 }
 function closeHelp() {
   $('help').hidden = true;
