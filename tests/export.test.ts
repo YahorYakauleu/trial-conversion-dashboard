@@ -46,6 +46,25 @@ describe('выгрузка списком', () => {
     expect(table.truncated).toBe(false);
   });
 
+  it('VPN, отменённые триалы: только отменённые, день и причина отмены; по строке причины — её группа', () => {
+    const store = vpnStore();
+    store.setCancellation('solidgate', 'sg_b', started + 3 * 3600, '8.06');
+    const table = exportTrials(store.db, vpn, { reason: null });
+    const rows = table.rows.map((r) => Object.fromEntries(table.columns.map((c, i) => [c, r[i]])));
+    expect(rows).toEqual([
+      expect.objectContaining({ subscription_id: 'sg_b', canceled_utc: '2026-09-10 15:00:00', canceled_on_day: 1, cancellation: 'in trial', cancel_reason: 'Requested', cancel_code: '8.06' }),
+    ]);
+    expect(exportTrials(store.db, vpn, { reason: 'Requested' }).rows).toHaveLength(1);
+    expect(exportTrials(store.db, vpn, { reason: 'Payment failed' }).rows).toEqual([]);
+    // в выгрузке Conversion — все триалы; у неотменённых колонки отмены пустые
+    const all = exportTrials(store.db, vpn);
+    const cancelColumns = ['canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code'].map((c) => all.columns.indexOf(c));
+    expect(all.rows.map((r) => cancelColumns.map((i) => r[i]))).toEqual([
+      ['2026-09-10 15:00:00', 1, 'in trial', 'Requested', '8.06'],
+      ['', '', '', '', ''],
+    ]);
+  });
+
   it('VPN, отклонённые попытки: все или только одной группы причин; номер попытки', () => {
     const all = exportDeclinedAttempts(vpnStore().db, vpn, null);
     expect(all.rows.map((r) => [r[2], r[6], r[7]])).toEqual([

@@ -139,6 +139,38 @@ describe('server', () => {
     expect((await get('view=bank')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['SUTTON BANK', null]);
   });
 
+  it('/api/cancellations: итоги, разбивки и причины отмены; значения фильтра и выгрузка', async () => {
+    const store = openStore(':memory:');
+    const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    for (const [id, method, cancel] of [['a', 'apple_pay', 3600], ['b', 'google_pay', null], ['c', 'apple_pay', 9 * 86_400]] as const) {
+      store.upsertTrial({
+        provider: 'stripe', account: 'corp', subscription_id: id, trial_started_at: started, trial_ended_at: started + 7 * 86_400,
+        first_invoice_id: null, first_attempt_succeeded: null, paid_at: null, country: 'US', payment_method: method, card_brand: 'visa', bank: null,
+        canceled_at: cancel === null ? null : started + cancel, cancel_reason: cancel === null ? null : 'cancellation_requested',
+      });
+    }
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const period = 'period=custom&from=2026-09-10&to=2026-09-10';
+    const get = async (q: string) => (await fetch(`${url}/api/cancellations?${period}&${q}`, { headers: auth })).json();
+
+    const trend = await get('');
+    expect(trend.totals).toMatchObject({ started: 3, canceled_in_trial: 1, canceled_day0: 1, canceled_after: 1 });
+    expect([trend.series.length, trend.by_day, trend.median_cancel_day]).toEqual([1, [{ day: 0, count: 1, share: 1 }], 0]);
+    expect((await get('payment_method=google_pay')).totals.started).toBe(1);
+    const byMethod = await get('view=payment_method');
+    expect([byMethod.series, byMethod.breakdown.map((r: { value: string; started: number }) => [r.value, r.started])]).toEqual([[], [['apple_pay', 2], ['google_pay', 1]]]);
+    expect((await get('view=cancel_reason')).reasons).toMatchObject([{ reason: 'Requested', count: 2, in_trial: 1, after_trial: 1 }]);
+
+    const values = await (await fetch(`${url}/api/values?mode=cancellations&dimension=payment_method&${period}`, { headers: auth })).json();
+    expect(values.values).toEqual([{ value: 'apple_pay', count: 2 }, { value: 'google_pay', count: 1 }]);
+    const csv = await fetch(`${url}/api/export?mode=cancellations&view=cancel_reason&reason=Requested&${period}`, { headers: auth });
+    expect(csv.headers.get('content-disposition')).toBe('attachment; filename="vpn-cancelled-trials_2026-09-10_2026-09-10.csv"');
+    expect((await csv.text()).trim().split('\r\n')).toHaveLength(3); // заголовок и два отменённых
+  });
+
   it('eSIM: продукт есть только с ключом; оборот — только VPN; обзор и удержание eSIM', async () => {
     const store = openStore(':memory:');
     const at = Date.parse('2026-09-10T12:00:00Z') / 1000;

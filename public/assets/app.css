@@ -90,6 +90,9 @@ button, select, input { font: inherit; color: var(--text); }
 .side-label { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .side-group .seg { display: flex; }
 .side-group .seg button { flex: 1; justify-content: center; }
+/* экраны продукта — списком: их может быть больше, чем влезает в строку */
+.side-group .seg.stack { flex-direction: column; }
+.side-group .seg.stack button { flex: none; justify-content: flex-start; }
 .filters { display: flex; flex-direction: column; gap: 6px; }
 .side-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 14px; border-top: 1px solid var(--border); }
 .who { display: flex; flex-direction: column; font-size: 12px; line-height: 1.3; }

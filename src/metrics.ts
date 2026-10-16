@@ -21,7 +21,7 @@ export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'c
 // Измерения для разбивки и фильтров и их значение в SQL по триалу (алиас t)
 export const DIMENSIONS = ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'] as const;
 export type Dimension = (typeof DIMENSIONS)[number];
-const DIMENSION_SQL: Record<Dimension, string> = {
+export const DIMENSION_SQL: Record<Dimension, string> = {
   // провайдер вместе с аккаунтом: одинаковые имена у Stripe и Solidgate не склеиваются (stripe:corp, solidgate:sgH2H)
   account: "t.provider || ':' || t.account",
   // MID, как на экране оборота: stripe:corp, solidgate:<uuid>; у Solidgate без заказа — не определён
@@ -210,7 +210,7 @@ function aggregate(db: Db, o: RangeOptions, key: string): Map<string | number | 
 }
 
 // Окончательность дня: самый длинный триал периода закончился и прошло окно ожидания оплаты
-function finality(o: RangeOptions, day: string, maxLength: number) {
+export function finality(o: RangeOptions, day: string, maxLength: number) {
   const lastTrialEnd = dayEnd(day, o.timeZones) + maxLength;
   return {
     final_first: lastTrialEnd + FIRST_ATTEMPT_SETTLE <= o.now,

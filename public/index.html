@@ -36,7 +36,7 @@
 
     <section class="side-group">
       <div class="side-label">Report</div>
-      <div class="seg" id="mode" role="group" aria-label="Report"></div>
+      <div class="seg stack" id="mode" role="group" aria-label="Report"></div>
     </section>
 
     <section class="side-group" id="provider-group">
@@ -136,6 +136,24 @@
         <div class="panel">
           <div class="chart-head"><h2>Trials started</h2></div>
           <div class="chart small"><canvas id="count-chart" aria-label="Trials started"></canvas></div>
+        </div>
+      </section>
+
+      <section id="cancel-charts" hidden>
+        <div class="panel">
+          <div class="chart-head">
+            <h2>Cancellation rate by trial start date, %</h2>
+            <div class="legend">
+              <span data-tip="Отменили до конца триала"><i style="background: var(--s-converted)"></i>During trial</span>
+              <span data-tip="Отменили в первые 30 дней после конца триала"><i style="background: var(--s-first)"></i>Within 30 days after trial</span>
+              <span data-tip="Триалы ещё идут или окно 30 дней не закрылось — цифра может вырасти"><i class="dashed"></i>≈ not final</span>
+            </div>
+          </div>
+          <div class="chart"><canvas id="cancel-rate-chart" aria-label="Trial cancellation rate by trial start date, percent"></canvas></div>
+        </div>
+        <div class="panel">
+          <div class="chart-head"><h2 data-tip="Как распределены отмены во время триала по дням от оформления. Day 1 — первые 24 часа">When trials are cancelled — day since trial start, % of cancellations</h2></div>
+          <div class="chart small"><canvas id="cancel-day-chart" aria-label="Cancellations during trial by day since trial start, percent"></canvas></div>
         </div>
       </section>
 

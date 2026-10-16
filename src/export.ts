@@ -1,3 +1,4 @@
+import { AFTER_TRIAL, cancelCodes, cancelLabel, IN_TRIAL } from './cancellations.js';
 import type { Db } from './db.js';
 import { declineCodes, declineLabel } from './declines.js';
 import { cohortCte, ordersCte, type EsimOptions } from './esim.js';
@@ -32,10 +33,10 @@ const text = (value: string | number | null | undefined) => value ?? '';
 // Строк на одну больше лимита — чтобы понять, что выгрузка обрезана
 const limited = <T>(rows: T[]) => ({ rows: rows.slice(0, EXPORT_LIMIT), truncated: rows.length > EXPORT_LIMIT });
 
-// Условие «причина отказа из группы» для строки вкладки Decline reasons
-function reasonSql(column: string, label: string | null) {
+// Условие «причина из группы» для строки вкладки причин (отказы списания или отмены подписки)
+function reasonSql(column: string, label: string | null, codesOf = declineCodes) {
   if (!label) return { sql: '1 = 1', params: {} };
-  const { codes, withoutCode } = declineCodes(label);
+  const { codes, withoutCode } = codesOf(label);
   const params = Object.fromEntries(codes.map((code, i) => [`reason_${i}`, code]));
   const parts = [codes.length ? `${column} IN (${codes.map((_, i) => `@reason_${i}`).join(', ')})` : '', withoutCode ? `${column} IS NULL` : ''];
   return { sql: `(${parts.filter(Boolean).join(' OR ')})`, params };
@@ -43,29 +44,37 @@ function reasonSql(column: string, label: string | null) {
 
 // --- VPN
 
-// Триалы когорты (Conversion: динамика и разрезы)
-export function exportTrials(db: Db, o: RangeOptions): ExportTable {
+// Триалы когорты (Conversion: динамика и разрезы). canceled — только отменённые (Cancellations; по строке причины — её группа)
+export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string | null } | null = null): ExportTable {
   const filter = trialFilter(o);
+  const byReason = reasonSql('t.cancel_reason', canceled?.reason ?? null, cancelCodes);
+  const onlyCanceled = canceled ? ` AND ((${IN_TRIAL}) OR (${AFTER_TRIAL})) AND ${byReason.sql}` : '';
   type Row = Record<string, string | number | null>;
   const all = db
-    .prepare(`SELECT t.* FROM trials t WHERE ${filter.sql} ORDER BY t.trial_started_at, t.subscription_id LIMIT ${EXPORT_LIMIT + 1}`)
-    .all(filter.params) as Row[];
+    .prepare(`SELECT t.* FROM trials t WHERE ${filter.sql}${onlyCanceled} ORDER BY t.trial_started_at, t.subscription_id LIMIT ${EXPORT_LIMIT + 1}`)
+    .all({ ...filter.params, ...(canceled ? { ...byReason.params, window: o.retryWindowDays * DAY } : {}) }) as Row[];
   const { rows, truncated } = limited(all);
   const window = o.retryWindowDays * DAY;
   return {
     columns: [
       'provider', 'account', 'subscription_id', 'customer_id', 'first_invoice_id', 'trial_started_utc', 'trial_ended_utc',
       'paid_within_30_days', 'paid_utc', 'paid_on_first_attempt', 'attempts', 'declines', 'refunded',
-      'mid', 'card_country', 'payment_method', 'card_brand', 'issuing_bank', 'subscription_link', 'customer_link',
+      'mid', 'card_country', 'payment_method', 'card_brand', 'issuing_bank',
+      'canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code', 'subscription_link', 'customer_link',
     ],
     rows: rows.map((t) => {
       const [provider, account] = [String(t.provider), String(t.account)];
       const paid = t.paid_at !== null && Number(t.paid_at) <= Number(t.trial_ended_at) + window;
+      const canceledAt = t.canceled_at === null ? null : Number(t.canceled_at);
+      // день отмены от оформления (1 — первые 24 часа, как на экране); во время триала или уже после его конца
+      const cancelDay = canceledAt === null ? '' : Math.floor((canceledAt - Number(t.trial_started_at)) / DAY) + 1;
+      const when = canceledAt === null ? '' : canceledAt < Number(t.trial_ended_at) ? 'in trial' : 'after trial';
       return [
         provider, account, text(t.subscription_id), text(t.customer_id), text(t.first_invoice_id),
         utc(t.trial_started_at as number), utc(t.trial_ended_at as number),
         yesNo(paid), utc(t.paid_at as number | null), yesNo(t.first_attempt_succeeded), text(t.attempts), Number(t.attempts) - Number(t.approved), yesNo(t.refunded),
         text(t.mid), text(t.country), text(t.payment_method), text(t.card_brand), text(t.bank),
+        utc(canceledAt), cancelDay, when, canceledAt === null ? '' : cancelLabel(t.cancel_reason as string | null), text(t.cancel_reason),
         stripeLink(provider, account, 'subscriptions', t.subscription_id as string), stripeLink(provider, account, 'customers', t.customer_id as string | null),
       ];
     }),

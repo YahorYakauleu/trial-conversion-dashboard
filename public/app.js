@@ -1,5 +1,5 @@
 // Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
-// данные — /api/metrics (конверсия), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
+// данные — /api/metrics (конверсия), /api/cancellations (отмены), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
 
 const DAY_MS = 86_400_000;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -11,7 +11,7 @@ const PRESETS = [
   ['prevMonth', 'Last month'],
   ['all', 'All time'],
 ];
-// Экраны по продуктам. VPN: конверсия триалов (когорты по дню оформления) и оборот (успешные платежи по дню платежа).
+// Экраны по продуктам. VPN: конверсия и отмены триалов (когорты по дню оформления), оборот (успешные платежи по дню платежа).
 // eSIM — если подключён его Stripe-аккаунт: оборот, повторные покупки (когорты по первой покупке) и платёжное здоровье.
 // kind — как рисуется экран; label и tip — кнопка в панели «Report»
 const MODES = {
@@ -28,6 +28,21 @@ const MODES = {
     hints: {
       time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
       decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
+    },
+  },
+  cancellations: {
+    product: 'vpn',
+    kind: 'cancellations',
+    label: 'Cancellations',
+    tip: 'Отмены подписок: сколько триалов отменили и на какой день',
+    title: 'Trial cancellations',
+    api: '/api/cancellations',
+    charts: 'cancel-charts',
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
+    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['cancel_reason', 'Cancellation reasons']],
+    hints: {
+      time: 'Trials by start date: how many were cancelled before the trial ended, and how soon. A cancellation counts when it was requested, even if access lasts until the period end',
+      cancel_reason: 'Cancellations during the trial and within 30 days after it. Stripe and Solidgate reasons are grouped — hover a reason for details',
     },
   },
   turnover: {
@@ -88,6 +103,7 @@ const TAB_TIPS = {
   bank: 'Банк-эмитент карты — пока только у Solidgate',
   card_brand: 'Платёжная система карты: Visa, Mastercard…',
   decline_reason: 'Почему отклонили попытки списания',
+  cancel_reason: 'Почему отменили подписку',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
 };
@@ -328,6 +344,7 @@ function render(data) {
   if (kind() === 'turnover') renderTurnoverKpis(data.totals, data.range);
   else if (kind() === 'repeat') renderRepeatKpis(data);
   else if (kind() === 'overview') renderOverviewKpis(data);
+  else if (kind() === 'cancellations') renderCancelKpis(data);
   else renderKpis(data.totals, data.range);
   renderTabs();
   renderView(data);
@@ -405,6 +422,19 @@ function renderTurnoverKpis(t, range) {
     ['Refunds', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} of gross` : '—', 'Сколько денег вернули клиентам'],
     ['Successful payments', num(t.payments), 'successful charges', 'Число успешных списаний'],
     ['Avg. transaction value', usdAverage(t.average), 'gross ÷ payments', 'Средний чек: оборот ÷ число платежей'],
+  ]);
+}
+
+// Отмены: день отмены считаем от оформления, «Day 1» — первые 24 часа
+const cancelDay = (day) => (day === null ? '—' : `day ${day + 1}`);
+
+function renderCancelKpis({ totals: t, median_cancel_day: median }) {
+  kpiCards([
+    ['Trials started', num(t.started), 'in the selected period', 'Сколько триалов оформлено за период'],
+    ['Trial cancellation rate', approxPct(t.trial_cancellation_rate, t.final_trial), `${num(t.canceled_in_trial)} of ${num(t.started)}`, 'Доля триалов, отменённых до конца пробного периода'],
+    ['Cancelled within 24h', pct(t.day0_share), `${num(t.canceled_day0)} of ${num(t.canceled_in_trial)} cancellations`, 'Какая доля отмен во время триала случилась в первые сутки после оформления'],
+    ['Avg. days to cancel', t.avg_cancel_day === null ? '—' : `${decimal(t.avg_cancel_day)} days`, `median: ${cancelDay(median)}`, 'Через сколько дней после оформления в среднем отменяют — среди отменивших во время триала. Медиана: к этому дню отменила половина'],
+    ['Post-trial cancellation rate', approxPct(t.post_trial_cancellation_rate, t.final_after), `${num(t.canceled_after)} of ${num(t.started)} · 30 days`, 'Доля триалов, отменённых в первые 30 дней после конца триала — включая закрытые из-за неоплаты'],
   ]);
 }
 
@@ -547,6 +577,46 @@ const REASON_COLUMNS = [
   { key: 'avg_attempts', title: 'Avg. attempts', tip: 'Попыток на такой триал в среднем', sort: (r) => r.avg_attempts, cell: (r) => `<td>${decimal(r.avg_attempts)}</td>` },
   { key: 'avg_days_to_pay', title: 'Days to recover', tip: 'Дней от первого отказа до оплаты — у восстановленных', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td>${decimal(r.avg_days_to_pay)}</td>` },
 ];
+// Отмены VPN: «≈» — пока не закончились триалы когорты (во время триала) или не прошло окно 30 дней после них
+const CANCEL_COLUMNS = [
+  { key: 'started', title: 'Trials', tip: 'Оформлено триалов', sort: (p) => p.started, cell: (p) => `<td>${num(p.started)}</td>` },
+  {
+    key: 'trial_cancellation_rate',
+    title: 'Trial cancellation rate',
+    tip: 'Отменили до конца триала',
+    sort: (p) => p.trial_cancellation_rate,
+    cell: (p) => rateCell(p.trial_cancellation_rate, p.canceled_in_trial, p.final_trial, `${num(p.canceled_in_trial)} of ${num(p.started)} cancelled`),
+  },
+  {
+    key: 'day0_share',
+    title: 'Within 24h',
+    tip: 'Доля отмен во время триала, случившихся в первые сутки после оформления',
+    sort: (p) => p.day0_share,
+    cell: (p) => rateCell(p.day0_share, p.canceled_day0, p.final_trial, `${num(p.canceled_day0)} of ${num(p.canceled_in_trial)} cancellations`),
+  },
+  {
+    key: 'avg_cancel_day',
+    title: 'Avg. days to cancel',
+    tip: 'Дней от оформления до отмены в среднем — у отменивших во время триала',
+    sort: (p) => p.avg_cancel_day,
+    cell: (p) => pendingCell(decimal(p.avg_cancel_day), p.final_trial),
+  },
+  {
+    key: 'post_trial_cancellation_rate',
+    title: 'Post-trial cancellation',
+    tip: 'Отменили в первые 30 дней после конца триала — включая закрытые из-за неоплаты',
+    sort: (p) => p.post_trial_cancellation_rate,
+    cell: (p) => rateCell(p.post_trial_cancellation_rate, p.canceled_after, p.final_after, `${num(p.canceled_after)} of ${num(p.started)} cancelled`),
+  },
+];
+const CANCEL_REASON_COLUMNS = [
+  { key: 'reason', title: 'Cancellation reason', tip: 'Причины отмены Stripe и Solidgate, сведённые в общие группы', text: true, sort: (r) => r.reason, cell: (r) => `<td data-tip="${esc(r.hint)}">${esc(r.reason)}</td>` },
+  { key: 'count', title: 'Cancellations', tip: 'Отмены во время триала и в 30 дней после него', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
+  { key: 'share', title: 'Share', tip: 'Доля от всех отмен', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
+  { key: 'in_trial', title: 'During trial', tip: 'Отменили до конца триала', sort: (r) => r.in_trial, cell: (r) => `<td>${num(r.in_trial)}</td>` },
+  { key: 'after_trial', title: 'After trial', tip: 'Отменили в 30 дней после конца триала', sort: (r) => r.after_trial, cell: (r) => `<td>${num(r.after_trial)}</td>` },
+];
+
 // eSIM, удержание: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
 // В подсказке к «≈» — сколько дней окна прошло (у самых свежих клиентов группы) и когда цифра станет итоговой
 const DAY_SECONDS = 86_400;
@@ -660,6 +730,17 @@ function renderView(data) {
       renderTable(OVERVIEW_REASON_COLUMNS, data.reasons, { empty: 'No unpaid orders for this period' });
     } else {
       renderTable([valueColumn(), ...OVERVIEW_COLUMNS], data.breakdown, { ...breakdown, empty: 'No orders for this period' });
+    }
+    return;
+  }
+  if (kind() === 'cancellations') {
+    if (isTime) {
+      renderTable([periodColumn(timeHead('Trial start date')), ...CANCEL_COLUMNS], data.series);
+      renderCancelCharts(data);
+    } else if (state.view === 'cancel_reason') {
+      renderTable(CANCEL_REASON_COLUMNS, data.reasons, { empty: 'No cancellations for this period' });
+    } else {
+      renderTable([valueColumn(), ...CANCEL_COLUMNS], data.breakdown, breakdown);
     }
     return;
   }
@@ -784,9 +865,50 @@ function renderOverviewChart(series) {
   });
 }
 
+// Отмены: доли по дням оформления и распределение отмен во время триала по дню от оформления (Day 1 — первые 24 часа)
+function renderCancelCharts({ series, by_day: byDay }) {
+  const { muted, grid, x, common } = chartBase();
+  const percentAxis = { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => `${v}%` } };
+  charts.cancelRate = new Chart($('cancel-rate-chart'), {
+    type: 'line',
+    data: {
+      labels: chartLabels(series),
+      datasets: [
+        percentLine(series, 'During trial', 'trial_cancellation_rate', 'final_trial', css('--s-converted')),
+        percentLine(series, 'Within 30 days after trial', 'post_trial_cancellation_rate', 'final_after', css('--s-first')),
+      ],
+    },
+    options: { ...common, plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` ${c.dataset.label}: ${c.raw ?? '—'}%`) }, scales: { x, y: percentAxis } },
+  });
+  charts.cancelDay = new Chart($('cancel-day-chart'), {
+    type: 'bar',
+    data: {
+      labels: byDay.map((d) => `Day ${d.day + 1}`),
+      datasets: [{ label: 'Cancellations', data: byDay.map((d) => +(d.share * 100).toFixed(1)), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 48 }],
+    },
+    options: {
+      ...common,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          padding: 10,
+          cornerRadius: 8,
+          callbacks: {
+            title: (items) => (byDay[items[0].dataIndex].day === 0 ? 'Day 1 — first 24 hours' : items[0].label),
+            label: (c) => ` ${num(byDay[c.dataIndex].count)} cancellations · ${c.raw}%`,
+          },
+        },
+      },
+      scales: { x, y: percentAxis },
+    },
+  });
+}
+
 // Графики своего экрана — при смене темы перерисовываются: цвета берутся из неё
-function renderModeCharts(series) {
-  ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](series);
+function renderModeCharts(data) {
+  if (kind() === 'cancellations') return renderCancelCharts(data);
+  ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](data.series);
 }
 
 function renderTurnoverChart(series) {
@@ -1105,7 +1227,7 @@ async function exportCsv(patch = {}, button = $('export')) {
 // Строка таблицы сужает выгрузку: период строки (динамика), причина отказа или значение разреза
 function rowPatch(r) {
   if (state.view === 'time') return { period: 'custom', from: r.period, to: r.period_end };
-  if (state.view === 'decline_reason') return { reason: r.reason };
+  if (state.view === 'decline_reason' || state.view === 'cancel_reason') return { reason: r.reason };
   return { [state.view]: r.value ?? 'none' };
 }
 
@@ -1138,7 +1260,7 @@ $('theme').addEventListener('click', (event) => {
     localStorage.setItem('theme', value);
   } catch {}
   markTheme();
-  if (lastData && state.view === 'time') renderModeCharts(lastData.series);
+  if (lastData && state.view === 'time') renderModeCharts(lastData);
 });
 
 document.addEventListener('mousedown', (event) => {

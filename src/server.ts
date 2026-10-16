@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createAuth } from './auth.js';
+import { getCancellationBreakdown, getCancellationReasons, getCancellations } from './cancellations.js';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
 import {
@@ -152,6 +153,20 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
+  // Отмены VPN: те же параметры, что у /api/metrics; view=time|<измерение>|cancel_reason. Когорты по дню оформления триала
+  app.get('/api/cancellations', (req, res) => {
+    const { now, provider, granularity, range, meta } = common(req.query);
+    const view = [...DIMENSIONS, 'cancel_reason'].find((v) => v === req.query.view) ?? 'time';
+    const filters: Filters = parseFilters(req.query, DIMENSIONS);
+    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+    const data = cached({ api: 'cancellations', provider, granularity, range, view, filters }, () => {
+      if (view === 'time') return { ...getCancellations(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
+      if (view === 'cancel_reason') return { ...getCancellations(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getCancellationReasons(store.db, options) };
+      return { ...getCancellationBreakdown(store.db, options, view as Dimension), series: [], reasons: [] };
+    });
+    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
+  });
+
   // Оборот VPN: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
   app.get('/api/turnover', (req, res) => {
     const { provider, granularity, range, meta } = common(req.query);
@@ -220,7 +235,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       return { dimension, filters };
     };
     const compute = (): { value: string | null; count: number }[] => {
-      if (mode === 'conversion') {
+      if (mode === 'conversion' || mode === 'cancellations') {
         const { dimension, filters } = facet(DIMENSIONS);
         const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
         return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
@@ -261,6 +276,10 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       if (mode === 'conversion') {
         const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
         return view === 'decline_reason' ? ['vpn-declined-attempts', exportDeclinedAttempts(store.db, o, reason)] : ['vpn-trials', exportTrials(store.db, o)];
+      }
+      if (mode === 'cancellations') {
+        const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
+        return ['vpn-cancelled-trials', exportTrials(store.db, o, { reason: view === 'cancel_reason' ? reason : null })];
       }
       if (mode === 'turnover') return ['vpn-payments', exportPayments(store.db, { ...base, provider: rest.provider, filters: parseFilters(req.query, TURNOVER_DIMENSIONS) })];
       if (mode === 'esim_overview') {

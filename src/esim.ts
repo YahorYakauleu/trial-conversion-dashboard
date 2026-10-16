@@ -1,7 +1,7 @@
 import type { Db } from './db.js';
+import { groupDays } from './days.js';
 import { declineHint, declineLabel, FRAUD_RULE_CODES } from './declines.js';
-import { bucketDay, bucketSql, DAY, dimensionFilterSql, mondayOf, periodSql, type Granularity, type TimeZones } from './metrics.js';
-import { addDays } from './time.js';
+import { bucketDay, bucketSql, DAY, dimensionFilterSql, periodSql, type Granularity, type TimeZones } from './metrics.js';
 
 // Метрики eSIM: у продукта нет подписок — каждая покупка пакета или пополнение отдельный заказ (PaymentIntent),
 // в котором может быть несколько попыток списания (повторное нажатие, другая карта). Наружу — только заказы:
@@ -23,17 +23,6 @@ export interface EsimOptions {
 
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
 const column = (alias: string) => Object.fromEntries(OVERVIEW_DIMENSIONS.map((d) => [d, `${alias}.${d}`]));
-
-// Ряд по дням периода (пустые дни — нулями), сгруппированный по неделям (ISO) или месяцам; края подписаны днями периода
-function series<T extends object>(byDay: Map<string, T>, o: { from: string; to: string; granularity: Granularity }, zero: () => T, add: (a: T, b: T) => T) {
-  const groups = new Map<string, T & { period: string; period_end: string }>();
-  for (let day = o.from; day <= o.to; day = addDays(day, 1)) {
-    const key = o.granularity === 'day' ? day : o.granularity === 'month' ? day.slice(0, 7) : mondayOf(day);
-    const g = groups.get(key);
-    groups.set(key, { ...add(g ?? zero(), byDay.get(day) ?? zero()), period: g?.period ?? day, period_end: day });
-  }
-  return [...groups.values()];
-}
 
 // --- обзор: что случилось в этот день — заказы, деньги, новые клиенты, неоплаченные заказы
 
@@ -122,7 +111,7 @@ export function getOverview(db: Db, o: EsimOptions & { granularity: Granularity 
     const day = bucketDay(key, o.timeZones);
     byDay.set(day, addOverview(byDay.get(day) ?? zeroOverview(), c));
   }
-  const points = series(byDay, o, zeroOverview, addOverview).map(withOverviewRates);
+  const points = groupDays(byDay, o, zeroOverview, addOverview).map(withOverviewRates);
   return { totals: withOverviewRates(points.reduce<OverviewCounts>(addOverview, zeroOverview())), series: points };
 }
 
@@ -253,7 +242,7 @@ export function getRepeat(db: Db, o: EsimOptions & { granularity: Granularity })
     const day = bucketDay(key, o.timeZones);
     byDay.set(day, addRepeat(byDay.get(day) ?? zeroRepeat(), c));
   }
-  const points = series(byDay, o, zeroRepeat, addRepeat).map((p) => withRepeatRates(p, o.now));
+  const points = groupDays(byDay, o, zeroRepeat, addRepeat).map((p) => withRepeatRates(p, o.now));
   return { totals: withRepeatRates(points.reduce<RepeatCounts>(addRepeat, zeroRepeat()), o.now), series: points };
 }
 
