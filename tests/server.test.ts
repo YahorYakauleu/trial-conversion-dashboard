@@ -5,14 +5,15 @@ import { openStore } from '../src/db.js';
 import { createApp } from '../src/server.js';
 import type { Source } from '../src/sync.js';
 
-const config = loadConfig({
+const env = {
   STRIPE_KEYS: 'org=rk',
   BASIC_AUTH_USER: 'billing',
   BASIC_AUTH_PASSWORD: 'p:ss',
   GUEST_USER: 'guest',
   GUEST_PASSWORD: 'g-pass',
   HISTORY_FROM: '2026-09-01',
-});
+};
+const config = loadConfig(env);
 const auth = { authorization: `Basic ${Buffer.from('billing:p:ss').toString('base64')}` };
 let close: () => void = () => {};
 
@@ -136,6 +137,38 @@ describe('server', () => {
       { reason: 'Do not honor / Generic decline', hint: 'Банк отклонил без объяснения причины', count: 1, share: 1, first_declines: 1, recovered: 0, recovery_rate: 0, avg_attempts: 1, avg_days_to_pay: null, final: expect.any(Boolean) }, // окончательность — от текущей даты
     ]);
     expect((await get('view=bank')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['SUTTON BANK', null]);
+  });
+
+  it('eSIM: продукт есть только с ключом; оборот по product=esim не смешивается с VPN; здоровье и повторные покупки', async () => {
+    const store = openStore(':memory:');
+    const at = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    const esim = { provider: 'stripe' as const, account: 'esim', mid: 'esim', refunded_usd_cents: 0, country: 'ES', payment_method: 'apple_pay', card_brand: 'visa', bank: null,
+      customer_id: 'cus_1', destination: 'Spain', package: '5 GB · 7 days', order_type: 'purchase' };
+    store.upsertEsimCharge({ ...esim, payment_id: 'ch_1', intent_id: 'pi_1', paid_at: at, amount_usd_cents: 800, approved: false, reason: 'insufficient_funds' });
+    store.upsertEsimCharge({ ...esim, payment_id: 'ch_2', intent_id: 'pi_1', paid_at: at + 60, amount_usd_cents: 800, approved: true, reason: null });
+    store.upsertPayment({ provider: 'stripe', payment_id: 'ch_vpn', account: 'corp', mid: 'corp', paid_at: at, amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null });
+    const withEsim = loadConfig({ ...env, ESIM_STRIPE_KEY: 'rk_esim' });
+    const server = createApp({ store, config: withEsim, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const get = async (path: string) => (await fetch(`${url}${path}${path.includes('?') ? '&' : '?'}period=custom&from=2026-09-10&to=2026-09-10`, { headers: auth })).json();
+
+    const vpn = await get('/api/turnover');
+    expect([vpn.products, vpn.product, vpn.totals.gross]).toEqual([['vpn', 'esim'], 'vpn', 999]);
+    const volume = await get('/api/turnover?product=esim&view=destination');
+    expect([volume.product, volume.totals.gross, volume.breakdown.map((r: { value: string }) => r.value)]).toEqual(['esim', 800, ['Spain']]);
+    expect((await get('/api/esim/health')).totals).toMatchObject({ charges: 2, approved: 1, checkouts: 1, paid_checkouts: 1, recovery_rate: 1 });
+    expect((await get('/api/esim/health?view=decline_reason')).reasons.map((r: { reason: string }) => r.reason)).toEqual(['Insufficient funds']);
+    expect((await get('/api/esim/repeat')).totals).toMatchObject({ customers: 1, repeat_30: 0 });
+    const { values } = await (await fetch(`${url}/api/values?mode=esim_health`, { headers: auth })).json();
+    expect(values.destination).toEqual([{ value: 'Spain', count: 2 }]);
+
+    // без ключа eSIM нет: эндпоинты — 404, оборот — всегда VPN
+    server.close();
+    const plain = await start();
+    expect((await fetch(`${plain}/api/esim/health`, { headers: auth })).status).toBe(404);
+    expect((await (await fetch(`${plain}/api/turnover?product=esim`, { headers: auth })).json()).product).toBe('vpn');
   });
 
   it('/api/sync: 202, а во время синка — 409', async () => {

@@ -11,6 +11,9 @@ const BUCKET = 900;
 const PROVIDERS: Provider[] = ['stripe', 'solidgate'];
 
 export type ProviderFilter = Provider | 'all';
+// Продукты: VPN — подписки с триалом (Stripe-аккаунты из STRIPE_KEYS и Solidgate), eSIM — разовые покупки, свой Stripe-аккаунт
+export const PRODUCTS = ['vpn', 'esim'] as const;
+export type Product = (typeof PRODUCTS)[number];
 // Сутки у каждого провайдера свои — как в его кабинете: Stripe — по часовому поясу аккаунта, Solidgate Hub — по UTC
 export type TimeZones = Record<Provider, string>;
 export type Granularity = 'day' | 'week' | 'month';

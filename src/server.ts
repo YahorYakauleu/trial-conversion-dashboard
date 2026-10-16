@@ -16,15 +16,27 @@ import {
   type Dimension,
   type Filters,
   type Granularity,
+  type Product,
   type ProviderFilter,
 } from './metrics.js';
+import {
+  getHealth,
+  getHealthBreakdown,
+  getHealthReasons,
+  getRepeat,
+  getRepeatBreakdown,
+  HEALTH_DIMENSIONS,
+  REPEAT_DIMENSIONS,
+  type EsimFilters,
+} from './esim.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
+import { localDay } from './time.js';
 import {
   getTurnover,
   getTurnoverBreakdown,
   getTurnoverDimensionValues,
   turnoverTotalsOf,
-  TURNOVER_DIMENSIONS,
+  turnoverDimensions,
   type TurnoverDimension,
 } from './turnover.js';
 
@@ -43,6 +55,9 @@ const FILTER_FORMAT: Record<Dimension | TurnoverDimension, RegExp> = {
   payment_method: /^[a-z_]{1,32}$/,
   card_brand: /^[a-z_ ]{1,32}$/,
   bank: /^.{1,120}$/,
+  destination: /^.{1,80}$/, // eSIM: страна или регион пакета
+  package: /^.{1,40}$/, // eSIM: «5 GB · 7 days»
+  order_type: /^[a-z_]{1,20}$/, // eSIM: purchase | topup
 };
 
 // Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA
@@ -64,6 +79,7 @@ function parseFilters<D extends Dimension | TurnoverDimension>(query: Record<str
 export function createApp({ store, config, sources }: { store: Store; config: Config; sources: Source[] }) {
   const app = express();
   const auth = createAuth(config.users);
+  const esimEnabled = Boolean(config.esimStripeKey);
   app.set('trust proxy', 1); // Render: https заканчивается на прокси — нужно для Secure-cookie
 
   // Без входа: проверка живости, форма входа, стили и иконка (public/assets)
@@ -97,22 +113,24 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   //  &from=YYYY-MM-DD&to=YYYY-MM-DD (для custom)&account=stripe:corp&country=…&payment_method=…&bank=…&card_brand=… ('none' — не определено)
   //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки провайдера (config.timeZones).
   // Общее для обоих экранов: провайдер, шаг, период (в местных сутках) и статус синка
-  const common = (query: Record<string, unknown>) => {
+  // first — начало истории экрана: у VPN — HISTORY_FROM, у eSIM — его первый платёж (его история грузится целиком)
+  const common = (query: Record<string, unknown>, first = config.historyFromDay) => {
     const now = nowSec();
     const today = latestDay(now, config.timeZones);
     return {
       now,
       provider: PROVIDERS.find((p) => p === query.provider) ?? 'all',
       granularity: GRANULARITIES.find((g) => g === query.granularity) ?? 'day',
-      range: resolveRange(config.historyFromDay, today, { period: query.period, from: query.from, to: query.to }),
+      range: resolveRange(first, today, { period: query.period, from: query.from, to: query.to }),
       meta: {
         generated_at: now,
         time_zones: config.timeZones,
-        history_from: config.historyFromDay,
+        history_from: first,
         today,
         sync_running: isSyncRunning(),
         sync: store.latestRuns(),
         data_version: store.dataVersion(), // меняется после каждого синка — по ней браузер обновляет значения фильтров
+        products: esimEnabled ? ['vpn', 'esim'] : ['vpn'], // eSIM — если подключён его Stripe-аккаунт
       },
     };
   };
@@ -135,29 +153,69 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
-  // Оборот: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
+  // Оборот: те же параметры, что у /api/metrics, плюс &product=vpn|esim. Разрезы VPN — mid (stripe:corp, solidgate:<uuid>),
+  // страна, способ оплаты, банк, система; eSIM — направление, пакет, тип заказа, страна, способ оплаты, система
   app.get('/api/turnover', (req, res) => {
-    const { provider, granularity, range, meta } = common(req.query);
-    const view = TURNOVER_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
-    const filters = parseFilters(req.query, TURNOVER_DIMENSIONS);
-    const options = { provider, filters, ...range, timeZones: config.timeZones };
-    const data = cached({ api: 'turnover', provider, granularity, range, view, filters }, () => {
+    const product: Product = esimEnabled && req.query.product === 'esim' ? 'esim' : 'vpn';
+    const { granularity, range, meta, ...rest } = product === 'esim' ? common(req.query, esimFirstDay()) : common(req.query);
+    const provider = product === 'esim' ? 'all' : rest.provider; // у eSIM только Stripe
+    const dimensions = turnoverDimensions(product);
+    const view = dimensions.find((v) => v === req.query.view) ?? 'time';
+    const filters = parseFilters(req.query, dimensions);
+    const options = { product, provider, filters, ...range, timeZones: config.timeZones };
+    const data = cached({ api: 'turnover', product, provider, granularity, range, view, filters }, () => {
       if (view !== 'time') {
         const breakdown = getTurnoverBreakdown(store.db, options, view);
         return { totals: turnoverTotalsOf(breakdown), series: [], breakdown };
       }
       return { ...getTurnover(store.db, { ...options, granularity }), breakdown: [] };
     });
+    res.json({ ...meta, role: res.locals.role, product, range, filters, view, ...data });
+  });
+
+  // История eSIM — с его первого платежа: аккаунт небольшой, грузится целиком, иначе «новые клиенты» первых когорт были бы старыми
+  const esimFirstDay = () => {
+    const first = store.firstPaymentAt('esim');
+    return first === null ? config.historyFromDay : localDay(first, config.timeZones.stripe);
+  };
+
+  // eSIM: платёжное здоровье — попытки и оплаты. ?granularity&period&view=time|decline_reason|destination|package|order_type|country|…
+  app.get('/api/esim/health', (req, res) => {
+    if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
+    const { now, granularity, range, meta } = common(req.query, esimFirstDay());
+    const view = [...HEALTH_DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
+    const filters: EsimFilters = parseFilters(req.query, HEALTH_DIMENSIONS);
+    const options = { filters, ...range, timeZones: config.timeZones, now };
+    const data = cached({ api: 'esim-health', granularity, range, view, filters }, () => {
+      if (view === 'decline_reason') return { ...getHealth(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getHealthReasons(store.db, options) };
+      if (view !== 'time') return { ...getHealthBreakdown(store.db, options, view as (typeof HEALTH_DIMENSIONS)[number]), series: [], reasons: [] };
+      return { ...getHealth(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
+    });
     res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
   });
 
-  // Значения измерений для фильтров в боковой панели: ?mode=conversion|turnover&provider=…
+  // eSIM: повторные покупки — когорты клиентов по дню первой покупки. ?granularity&period&view=time|destination|package|country|…
+  app.get('/api/esim/repeat', (req, res) => {
+    if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
+    const { now, granularity, range, meta } = common(req.query, esimFirstDay());
+    const view = REPEAT_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
+    const filters: EsimFilters = parseFilters(req.query, REPEAT_DIMENSIONS);
+    const options = { filters, ...range, timeZones: config.timeZones, now };
+    const data = cached({ api: 'esim-repeat', granularity, range, view, filters }, () =>
+      view === 'time' ? { ...getRepeat(store.db, { ...options, granularity }), breakdown: [] } : { ...getRepeatBreakdown(store.db, options, view), series: [] },
+    );
+    res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
+  });
+
+  // Значения измерений для фильтров в боковой панели: ?mode=conversion|turnover|esim_volume|esim_repeat|esim_health&provider=…
   app.get('/api/values', (req, res) => {
     const provider = PROVIDERS.find((p) => p === req.query.provider) ?? 'all';
-    const turnover = req.query.mode === 'turnover';
-    const values = cached({ api: 'values', turnover, provider }, () =>
-      turnover ? getTurnoverDimensionValues(store.db, provider) : getDimensionValues(store.db, provider),
-    );
+    const mode = String(req.query.mode ?? 'conversion');
+    const esim = esimEnabled && mode.startsWith('esim_');
+    const values = cached({ api: 'values', mode: esim ? 'esim' : mode, provider }, () => {
+      if (esim) return getTurnoverDimensionValues(store.db, 'all', 'esim');
+      return mode === 'turnover' ? getTurnoverDimensionValues(store.db, provider) : getDimensionValues(store.db, provider);
+    });
     res.json({ values });
   });
 

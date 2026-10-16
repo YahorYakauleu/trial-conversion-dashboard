@@ -30,6 +30,8 @@ export interface Config {
   historyFromDay: string; // HISTORY_FROM, YYYY-MM-DD
   historyFrom: number; // начало выгрузки, unix-секунды: самая ранняя из полуночей HISTORY_FROM по часовым поясам провайдеров
   syncCron: string;
+  // Stripe-аккаунт eSIM — отдельный продукт: разовые покупки пакетов и пополнения, без подписок. Без ключа продукта eSIM нет
+  esimStripeKey: string | null;
   users: { admin: Credentials; guest: Credentials | null };
   dataDir: string;
   port: number;
@@ -69,6 +71,7 @@ export function loadConfig(env: Env = process.env): Config {
     historyFromDay,
     historyFrom: Math.min(...Object.values(timeZones).map((tz) => localMidnight(historyFromDay, tz))),
     syncCron: env.SYNC_CRON?.trim() || '0 */4 * * *',
+    esimStripeKey: env.ESIM_STRIPE_KEY?.trim() || null,
     users: {
       // BASIC_AUTH_* — прежние имена переменных, работают как вход админа
       admin: {
