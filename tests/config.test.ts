@@ -26,7 +26,9 @@ describe('loadConfig', () => {
       dataDir: './data',
       port: 3000,
       users: { admin: { user: 'billing', password: 'secret' }, guest: null }, // BASIC_AUTH_* — вход админа
+      vamp: { ratio: 0.015, count: 1500 }, // порог Visa VAMP Excessive
     });
+    expect(loadConfig({ ...base, VAMP_RATIO_THRESHOLD: '0.022', VAMP_COUNT_THRESHOLD: '1000' }).vamp).toEqual({ ratio: 0.022, count: 1000 });
   });
 
   it('требует хотя бы один ключ провайдера', () => {
@@ -42,6 +44,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, STRIPE_KEYS: 'rk_live_a' })).toThrow(/name=value/);
     expect(() => loadConfig({ ...base, SOLIDGATE_KEYS: 'sg=only_public' })).toThrow(/public:secret/);
     expect(() => loadConfig({ ...base, RETRY_WINDOW_DAYS: '0' })).toThrow(/RETRY_WINDOW_DAYS/);
+    expect(() => loadConfig({ ...base, VAMP_RATIO_THRESHOLD: '1.5' })).toThrow(/VAMP_RATIO_THRESHOLD/); // доля, а не проценты
     expect(() => loadConfig({ ...base, HISTORY_FROM: '01.09.2026' })).toThrow(/YYYY-MM-DD/);
     expect(() => loadConfig({ ...base, HISTORY_FROM: '2026-13-01' })).toThrow(/YYYY-MM-DD/);
     expect(() => loadConfig({ ...base, TIMEZONE: 'Mars/Olympus' })).toThrow(/TIMEZONE/);

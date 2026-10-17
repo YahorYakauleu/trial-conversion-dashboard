@@ -29,7 +29,17 @@ import {
   REPEAT_DIMENSIONS,
   type EsimFilters,
 } from './esim.js';
-import { EXPORT_LIMIT, exportCustomers, exportDeclinedAttempts, exportOrders, exportPayments, exportTrials, toCsv, type ExportTable } from './export.js';
+import {
+  EXPORT_LIMIT,
+  exportCustomers,
+  exportDeclinedAttempts,
+  exportOrders,
+  exportPayments,
+  exportTrials,
+  exportVampReports,
+  toCsv,
+  type ExportTable,
+} from './export.js';
 import { isSyncRunning, runSync, type Source } from './sync.js';
 import { localDay } from './time.js';
 import {
@@ -39,6 +49,16 @@ import {
   TURNOVER_DIMENSIONS,
   type TurnoverDimension,
 } from './turnover.js';
+import {
+  getVampBreakdown,
+  getVampDaily,
+  getVampMonth,
+  getVampSeries,
+  monthStart,
+  VAMP_DIMENSIONS,
+  VAMP_FILTERS,
+  type VampDimension,
+} from './vamp.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -48,7 +68,7 @@ const MAX_FILTER_VALUES = 100;
 // «Сегодня» и окончательность цифр зависят от текущего времени — кэш живёт не дольше этого
 const CACHE_TTL_MS = 5 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
-type AnyDimension = Dimension | TurnoverDimension | OverviewDimension;
+type AnyDimension = Dimension | TurnoverDimension | OverviewDimension | VampDimension;
 const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
   mid: /^(stripe|solidgate):[A-Za-z0-9_-]{1,64}$/, // у Solidgate MID — UUID
@@ -58,6 +78,8 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   bank: /^.{1,120}$/,
   destination: /^.{1,80}$/, // eSIM: страна или регион пакета
   package: /^.{1,40}$/, // eSIM: «5 GB · 7 days»
+  risk: /^\d{1,2}–\d{2}$/, // VAMP: полоса Radar risk score, «50–74»
+  charge_type: /^(first_payment|renewal)$/, // VAMP: первый платёж после триала или продление
 };
 
 // Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA
@@ -167,6 +189,24 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
+  // Visa VAMP: календарные месяцы UTC — период расширяется до начала месяца; view=time|mid|country|payment_method|risk|charge_type.
+  // Карточки, график по дням и разбивки — за последний месяц периода (VAMP считается помесячно)
+  const vampScope = (range: { from: string; to: string }) => ({ months: { from: monthStart(range.from), to: range.to }, latest: { from: monthStart(range.to), to: range.to } });
+  app.get('/api/vamp', (req, res) => {
+    const { now, provider, range, meta } = common(req.query);
+    const view = (['time', ...VAMP_DIMENSIONS] as const).find((v) => v === req.query.view) ?? 'time';
+    const filters = parseFilters(req.query, VAMP_FILTERS);
+    const { months, latest } = vampScope(range);
+    const o = { provider, filters, now };
+    const data = cached({ api: 'vamp', provider, months, view, filters }, () => ({
+      month: { ...latest, ...getVampMonth(store.db, { ...o, ...latest }, config.vamp) },
+      series: view === 'time' ? getVampSeries(store.db, { ...o, ...months }, config.vamp) : [],
+      daily: view === 'time' ? getVampDaily(store.db, { ...o, ...latest }, latest.from) : null,
+      breakdown: view === 'time' ? [] : getVampBreakdown(store.db, { ...o, ...latest }, view, config.vamp),
+    }));
+    res.json({ ...meta, role: res.locals.role, range: months, filters, view, thresholds: config.vamp, ...data });
+  });
+
   // Оборот VPN: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
   app.get('/api/turnover', (req, res) => {
     const { provider, granularity, range, meta } = common(req.query);
@@ -244,6 +284,11 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         const { dimension, filters } = facet(TURNOVER_DIMENSIONS);
         return dimension ? getTurnoverBreakdown(store.db, { ...base, provider, filters }, dimension).map((r) => ({ value: r.value, count: r.payments })) : [];
       }
+      if (mode === 'vamp') {
+        const { dimension, filters } = facet(VAMP_FILTERS);
+        const o = { provider, filters, now, ...vampScope(range).latest };
+        return dimension ? getVampBreakdown(store.db, o, dimension, config.vamp).map((r) => ({ value: r.value, count: r.vamp_count })) : [];
+      }
       if (mode === 'esim_overview') {
         const { dimension, filters } = facet(OVERVIEW_DIMENSIONS);
         return dimension ? getOverviewBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.orders })) : [];
@@ -280,6 +325,12 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       if (mode === 'cancellations') {
         const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
         return ['vpn-cancelled-trials', exportTrials(store.db, o, { reason: view === 'cancel_reason' ? reason : null })];
+      }
+      if (mode === 'vamp') {
+        // строка разреза — в пределах последнего месяца, как на экране; строка месяца — её даты (period=custom)
+        const { months, latest } = vampScope(range);
+        const scope = view === 'time' ? months : latest;
+        return ['vamp-reports', exportVampReports(store.db, { provider: rest.provider, filters: parseFilters(req.query, VAMP_DIMENSIONS), now, ...scope })];
       }
       if (mode === 'turnover') return ['vpn-payments', exportPayments(store.db, { ...base, provider: rest.provider, filters: parseFilters(req.query, TURNOVER_DIMENSIONS) })];
       if (mode === 'esim_overview') {

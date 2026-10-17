@@ -171,6 +171,39 @@ describe('server', () => {
     expect((await csv.text()).trim().split('\r\n')).toHaveLength(3); // заголовок и два отменённых
   });
 
+  it('/api/vamp: месяцы, итог месяца по мерчантам, разбивки; значения фильтра и выгрузка', async () => {
+    const store = openStore(':memory:');
+    const at = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    for (let i = 0; i < 20; i++) {
+      store.upsertPayment({ provider: 'stripe', payment_id: `ch_${i}`, account: 'org', mid: 'org', paid_at: at, amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa', bank: null });
+    }
+    const report = { provider: 'stripe' as const, account: 'org', mid: 'org', reported_at: at, payment_id: 'ch_1', charged_at: at, network: 'visa', country: 'US',
+      payment_method: 'card', customer_id: null, risk_score: 70, reason: null, case_type: null, rdr: false, lost_usd_cents: 0 };
+    store.upsertVampReport({ ...report, report_id: 'issfr_1', kind: 'fraud' });
+    store.upsertVampReport({ ...report, report_id: 'du_1', kind: 'dispute', case_type: 'chargeback' });
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // период — с середины месяца: расширяется до его начала
+    const period = 'period=custom&from=2026-09-15&to=2026-09-30';
+    const get = async (q: string) => (await fetch(`${url}/api/vamp?${period}&${q}`, { headers: auth })).json();
+
+    const trend = await get('');
+    expect([trend.range, trend.thresholds]).toEqual([{ from: '2026-09-01', to: '2026-09-30' }, { ratio: 0.015, count: 1500 }]);
+    expect(trend.month).toMatchObject({ from: '2026-09-01', vamp_count: 2, visa_sales: 20, vamp_ratio: 0.1, merchants: 1, status: 'at_risk', final: true });
+    expect(trend.series).toHaveLength(1);
+    expect(trend.daily.current).toHaveLength(30);
+    expect((await get('view=mid')).breakdown.map((r: { value: string; status: string }) => [r.value, r.status])).toEqual([['stripe:org', 'at_risk']]);
+    expect((await get('view=risk')).breakdown.map((r: { value: string }) => r.value)).toEqual(['50–74']);
+
+    const values = await (await fetch(`${url}/api/values?mode=vamp&dimension=country&${period}`, { headers: auth })).json();
+    expect(values.values).toEqual([{ value: 'US', count: 2 }]);
+    const csv = await fetch(`${url}/api/export?mode=vamp&view=risk&risk=${encodeURIComponent('50–74')}&${period}`, { headers: auth });
+    expect(csv.headers.get('content-disposition')).toContain('vamp-reports_');
+    expect((await csv.text()).trim().split('\r\n')).toHaveLength(3);
+  });
+
   it('eSIM: продукт есть только с ключом; оборот — только VPN; обзор и удержание eSIM', async () => {
     const store = openStore(':memory:');
     const at = Date.parse('2026-09-10T12:00:00Z') / 1000;

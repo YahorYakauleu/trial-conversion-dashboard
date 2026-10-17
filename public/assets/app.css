@@ -20,6 +20,8 @@
   --accent-soft: rgba(79, 70, 229, 0.1);
   --on-accent: #ffffff;
   --danger: #c2353a;
+  --warning: #a35f00;
+  --success: #1a7f4b;
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 16px rgba(15, 23, 42, 0.04);
   --shadow-pop: 0 12px 40px rgba(15, 23, 42, 0.16);
   --blur: none;
@@ -49,6 +51,8 @@
   --accent-soft: rgba(139, 124, 255, 0.16);
   --on-accent: #0b0c12;
   --danger: #ff7b81;
+  --warning: #f0b351;
+  --success: #3ccf8e;
   --shadow: 0 0 0 1px rgba(255, 255, 255, 0.02), 0 12px 40px rgba(0, 0, 0, 0.45);
   --shadow-pop: 0 16px 48px rgba(0, 0, 0, 0.6);
   --blur: blur(14px);
@@ -285,6 +289,12 @@ td .n { color: var(--muted); margin-left: 6px; }
 tr.link { cursor: pointer; }
 tbody tr:hover td { background: var(--surface-sunken); }
 .pending { color: var(--muted); }
+/* статус VAMP: название всегда текстом, цвет — только подсказка */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 1.5; }
+.badge.excessive { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.badge.at_risk { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.badge.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.kpi .value .badge { font-size: 15px; padding: 3px 10px; }
 .bar-cell { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
 .bar { width: 120px; height: 6px; border-radius: 999px; background: var(--surface-sunken); overflow: hidden; }
 .bar span { display: block; height: 100%; border-radius: 999px; background: var(--s-converted); }

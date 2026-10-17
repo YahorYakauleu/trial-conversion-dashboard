@@ -3,8 +3,8 @@ import { nowSec, type Provider, type Store } from './db.js';
 import { createToUsd } from './fx.js';
 import { DAY } from './metrics.js';
 import { ESIM_ACCOUNT, syncEsimAccount } from './providers/esim.js';
-import { syncSolidgateAccount } from './providers/solidgate.js';
-import { createStripeClient, syncStripeAccount } from './providers/stripe.js';
+import { syncSolidgateAccount, syncSolidgateVamp } from './providers/solidgate.js';
+import { createStripeClient, syncStripeAccount, syncStripeVamp } from './providers/stripe.js';
 
 export interface Source {
   provider: Provider;
@@ -53,15 +53,22 @@ export function buildSources(config: Config): Source[] {
   const syncConfig = (store: Store) => ({ historyFrom: config.historyFrom, retryWindowDays: config.retryWindowDays, toUsd: createToUsd(store) });
   const stripe = config.stripeAccounts.map(({ account, key }): Source => {
     const client = createStripeClient(key);
-    return { provider: 'stripe', account, run: (store, now) => syncStripeAccount(store, client, account, syncConfig(store), now) };
+    // после основных данных — фрод-репорты и диспуты для Visa VAMP
+    const run = async (store: Store, now: number) => {
+      const items = await syncStripeAccount(store, client, account, syncConfig(store), now);
+      await syncStripeVamp(store, client, account, config.historyFrom, now);
+      return items;
+    };
+    return { provider: 'stripe', account, run };
   });
-  const solidgate = config.solidgateAccounts.map(
-    (acc): Source => ({
-      provider: 'solidgate',
-      account: acc.account,
-      run: (store, now) => syncSolidgateAccount(store, acc, syncConfig(store), now),
-    }),
-  );
+  const solidgate = config.solidgateAccounts.map((acc): Source => {
+    const run = async (store: Store, now: number) => {
+      const items = await syncSolidgateAccount(store, acc, syncConfig(store), now);
+      await syncSolidgateVamp(store, acc, config.historyFrom, now);
+      return items;
+    };
+    return { provider: 'solidgate', account: acc.account, run };
+  });
   // eSIM — свой Stripe-аккаунт со своей выгрузкой (разовые покупки вместо подписок)
   const esimClient = config.esimStripeKey && createStripeClient(config.esimStripeKey);
   const esim: Source[] = esimClient

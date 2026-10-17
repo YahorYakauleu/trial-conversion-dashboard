@@ -1,13 +1,17 @@
 import type { SolidgateAccount } from '../config.js';
 import { toAlpha2 } from '../countries.js';
-import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow } from '../db.js';
+import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import type { ToUsd } from '../fx.js';
 import { DAY, dayKey } from '../metrics.js';
 import {
   listCardOrders,
+  listChargebacks,
+  listFraudAlerts,
   listSubscriptions,
   type ReportFilter,
   type SgCardOrder,
+  type SgChargebackOrder,
+  type SgFraudAlert,
   type SgInvoice,
   type SgOrder,
   type SgSubscription,
@@ -260,4 +264,52 @@ export async function syncSolidgateAccount(
 
   store.setState('solidgate', acc.account, 'cursor', now);
   return items;
+}
+
+// --- Visa VAMP: фрод-алерты (TC40/SAFE) и чарджбэки. Карту, MID и страну подсчёт берёт из платежа по ID заказа.
+// У чарджбэка сети в отчёте нет — определяем по коду причины (коды у каждой сети свои), иначе возьмётся из платежа
+const VISA_REASON = /^1[0-3]\.\d+$/; // 10.x — фрод, 11.x — авторизация, 12.x — обработка, 13.x — споры клиента
+const MASTERCARD_REASON = /^48\d\d$/;
+const networkByReason = (code: string | null | undefined) =>
+  VISA_REASON.test(code ?? '') ? 'visa' : MASTERCARD_REASON.test(code ?? '') ? 'mastercard' : null;
+
+export function vampFromFraudAlert(alert: SgFraudAlert, account: string): VampReportRow {
+  return {
+    provider: 'solidgate', report_id: `fa_${alert.id}`, account, mid: null, kind: 'fraud', reported_at: parseSgDate(alert.created_at),
+    payment_id: alert.order_id, charged_at: null, network: alert.card_scheme ? alert.card_scheme.toLowerCase() : null,
+    country: null, payment_method: null, customer_id: null, risk_score: null,
+    reason: alert.reason_code_description || alert.fraud_type || null, case_type: null, rdr: false, lost_usd_cents: 0,
+  };
+}
+
+// Один чарджбэк — один диспут, на какой бы стадии он ни был (1st_chb, дальше арбитраж); запрос документов — не чарджбэк
+export function vampFromChargebacks(order: SgChargebackOrder, account: string): VampReportRow[] {
+  return (order.chargebacks ?? []).map((cb) => ({
+    provider: 'solidgate', report_id: `cb_${cb.id}`, account, mid: null, kind: 'dispute', reported_at: parseSgDate(cb.created_at),
+    payment_id: order.order_id, charged_at: order.created_at ? parseSgDate(order.created_at) : null, network: networkByReason(cb.reason_code),
+    country: null, payment_method: null, customer_id: order.customer_account_id ?? null, risk_score: null,
+    reason: cb.reason_description ?? cb.reason_code ?? null,
+    case_type: /retrieval|inquiry/i.test(cb.type ?? '') ? 'inquiry' : 'chargeback',
+    rdr: /rdr/i.test(cb.type ?? ''),
+    lost_usd_cents: 0,
+  }));
+}
+
+// Первый раз — с HISTORY_FROM, дальше — с прошлого раза с запасом в сутки; окнами по 30 дней
+const VAMP_WINDOW = 30 * DAY;
+export async function syncSolidgateVamp(
+  store: Store,
+  acc: SolidgateAccount,
+  historyFrom: number,
+  now: number,
+  alerts = listFraudAlerts,
+  chargebacks = listChargebacks,
+): Promise<void> {
+  const cursor = store.getState('solidgate', acc.account, 'vamp_cursor');
+  for (let from = cursor === null ? historyFrom : cursor - DAY; from < now; from += VAMP_WINDOW) {
+    const to = Math.min(from + VAMP_WINDOW, now);
+    for await (const alert of alerts(acc, from, to)) store.upsertVampReport(vampFromFraudAlert(alert, acc.account));
+    for await (const order of chargebacks(acc, from, to)) vampFromChargebacks(order, acc.account).forEach((row) => store.upsertVampReport(row));
+  }
+  store.setState('solidgate', acc.account, 'vamp_cursor', now);
 }

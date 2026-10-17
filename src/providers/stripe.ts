@@ -1,11 +1,11 @@
 import Stripe from 'stripe';
 import { toAlpha2 } from '../countries.js';
-import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow } from '../db.js';
+import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import { forEachWindow } from '../days.js';
 import type { ToUsd } from '../fx.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 
-export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds'>;
+export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds' | 'radar' | 'disputes'>;
 
 interface StripeSyncConfig {
   historyFrom: number;
@@ -123,6 +123,77 @@ export async function paymentFromCharge(charge: Stripe.Charge, account: string, 
     card_brand: details?.card?.brand ?? null,
     bank: details?.card?.issuer ?? null,
   };
+}
+
+// --- Visa VAMP: фрод-репорты (early fraud warnings, это TC40) и диспуты (TC15) — с картой и Radar score списания.
+// Что из этого идёт в VAMP (Visa, чарджбэк без RDR), решает подсчёт — src/vamp.ts
+
+const chargeId = (charge: string | Stripe.Charge | null) => (typeof charge === 'string' ? charge : (charge?.id ?? null));
+
+function vampCharge(charge: string | Stripe.Charge | null) {
+  const full = typeof charge === 'object' ? charge : null;
+  const details = full?.payment_method_details;
+  const customer = full?.customer;
+  return {
+    payment_id: chargeId(charge),
+    charged_at: full?.created ?? null,
+    network: details?.card?.network ?? details?.card?.brand ?? null,
+    country: toAlpha2(details?.card?.country),
+    payment_method: details?.card?.wallet?.type ?? details?.type ?? null,
+    customer_id: typeof customer === 'string' ? customer : (customer?.id ?? null),
+    risk_score: full?.outcome?.risk_score ?? null,
+  };
+}
+
+export function vampFromFraudWarning(efw: Stripe.Radar.EarlyFraudWarning, account: string): VampReportRow {
+  return {
+    provider: 'stripe', report_id: efw.id, account, mid: account, kind: 'fraud', reported_at: efw.created,
+    ...vampCharge(efw.charge), reason: efw.fraud_type, case_type: null, rdr: false, lost_usd_cents: 0,
+  };
+}
+
+// RDR — в network_details, сеть карты — в payment_method_details.card.network (в типах SDK их пока нет);
+// списано по RDR — отрицательные проводки диспута в USD
+type DisputeWithNetwork = Stripe.Dispute & { network_details?: { visa?: { rapid_dispute_resolution?: boolean } | null } | null };
+type DisputeCard = Stripe.Dispute.PaymentMethodDetails.Card & { network?: string | null };
+
+export function vampFromDispute(dispute: DisputeWithNetwork, account: string): VampReportRow {
+  const rdr = dispute.network_details?.visa?.rapid_dispute_resolution === true;
+  const card = dispute.payment_method_details?.card as DisputeCard | undefined;
+  const charge = vampCharge(dispute.charge);
+  return {
+    provider: 'stripe', report_id: dispute.id, account, mid: account, kind: 'dispute', reported_at: dispute.created,
+    ...charge, network: card?.network ?? card?.brand ?? charge.network, reason: dispute.reason, case_type: card?.case_type ?? null, rdr,
+    lost_usd_cents: rdr ? dispute.balance_transactions.filter((t) => t.currency === 'usd' && t.amount < 0).reduce((sum, t) => sum - t.amount, 0) : 0,
+  };
+}
+
+// Первый раз — с HISTORY_FROM неделями (прогресс сохраняется), дальше — с прошлого раза с запасом в сутки
+const VAMP_WINDOW = 7 * DAY;
+export async function syncStripeVamp(store: Store, stripe: StripeLike, account: string, historyFrom: number, now: number): Promise<void> {
+  const save = async (created: Stripe.RangeQueryParam) => {
+    for await (const efw of stripe.radar.earlyFraudWarnings.list({ created, limit: 100, expand: ['data.charge'] })) {
+      store.upsertVampReport(vampFromFraudWarning(efw, account));
+    }
+    for await (const dispute of stripe.disputes.list({ created, limit: 100, expand: ['data.charge'] })) store.upsertVampReport(vampFromDispute(dispute, account));
+  };
+  const cursor = store.getState('stripe', account, 'vamp_cursor');
+  if (cursor === null) {
+    await forEachWindow(
+      store.getState('stripe', account, 'vamp_day') ?? historyFrom,
+      now,
+      VAMP_WINDOW,
+      PARALLEL,
+      async (from) => {
+        await save({ gte: from, lt: from + VAMP_WINDOW });
+        console.log(`[stripe:${account}] VAMP ${dayKey(from)} готово`);
+      },
+      (next) => store.setState('stripe', account, 'vamp_day', next),
+    );
+  } else {
+    await save({ gte: cursor - DAY });
+  }
+  store.setState('stripe', account, 'vamp_cursor', now);
 }
 
 export function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {

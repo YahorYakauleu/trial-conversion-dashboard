@@ -157,6 +157,20 @@
         </div>
       </section>
 
+      <section id="vamp-charts" hidden>
+        <div class="panel">
+          <div class="chart-head">
+            <h2 id="vamp-chart-title" data-tip="Сколько фрод-репортов и чарджбэков без RDR накопилось к каждому дню месяца">VAMP count by day, cumulative</h2>
+            <div class="legend">
+              <span><i style="background: var(--s-converted)"></i><span id="vamp-legend-current"></span></span>
+              <span><i class="dashed"></i><span id="vamp-legend-previous"></span></span>
+              <span id="vamp-legend-threshold" data-tip="Порог count у мерчанта: Excessive — если ещё и ratio ≥ 1,5%"><i style="background: var(--danger)"></i>Excessive threshold</span>
+            </div>
+          </div>
+          <div class="chart"><canvas id="vamp-chart" aria-label="Cumulative Visa VAMP count by day of month"></canvas></div>
+        </div>
+      </section>
+
       <section id="turnover-charts" hidden>
         <div class="panel">
           <div class="chart-head"><h2>Gross volume, $</h2></div>

@@ -1,5 +1,5 @@
 // Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
-// данные — /api/metrics (конверсия), /api/cancellations (отмены), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
+// данные — /api/metrics (конверсия), /api/cancellations (отмены), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
 
 const DAY_MS = 86_400_000;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -43,6 +43,20 @@ const MODES = {
     hints: {
       time: 'Trials by start date: how many were cancelled before the trial ended, and how soon. A cancellation counts when it was requested, even if access lasts until the period end',
       cancel_reason: 'Cancellations during the trial and within 30 days after it. Stripe and Solidgate reasons are grouped — hover a reason for details',
+    },
+  },
+  vamp: {
+    product: 'vpn',
+    kind: 'vamp',
+    label: 'VAMP',
+    tip: 'Visa VAMP: фрод-репорты и чарджбэки Visa к успешным Visa-списаниям — по месяцам и мерчантам',
+    title: 'Visa VAMP',
+    api: '/api/vamp',
+    charts: 'vamp-charts',
+    dimensions: ['mid', 'country', 'payment_method'],
+    tabs: [['time', 'Trend'], ['mid', 'Merchants'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['risk', 'Radar risk'], ['charge_type', 'Charge type']],
+    hints: {
+      time: 'Calendar months, UTC. A report counts in the month it arrived, not the month of the charge. Status is shown for a single merchant',
     },
   },
   turnover: {
@@ -91,7 +105,7 @@ const MODES = {
 const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
-  destination: 'Destination', package: 'Package',
+  destination: 'Destination', package: 'Package', risk: 'Radar risk score', charge_type: 'Charge type',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
 const TAB_TIPS = {
@@ -104,6 +118,8 @@ const TAB_TIPS = {
   card_brand: 'Платёжная система карты: Visa, Mastercard…',
   decline_reason: 'Почему отклонили попытки списания',
   cancel_reason: 'Почему отменили подписку',
+  risk: 'Radar risk score списания — только у Stripe',
+  charge_type: 'Первый платёж после триала или продление',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
 };
@@ -224,8 +240,10 @@ function valueName(dimension, value) {
   if (dimension === 'mid') return ACCOUNT_NAMES[value] ?? `Stripe · ${value.split(':')[1]}`; // MID Stripe — аккаунт
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
+  if (dimension === 'charge_type') return CHARGE_TYPES[value] ?? value;
   return value;
 }
+const CHARGE_TYPES = { first_payment: 'First payment after trial', renewal: 'Renewal or other' };
 
 function query() {
   const q = new URLSearchParams({ mode: state.mode, product: product(), provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
@@ -345,6 +363,7 @@ function render(data) {
   else if (kind() === 'repeat') renderRepeatKpis(data);
   else if (kind() === 'overview') renderOverviewKpis(data);
   else if (kind() === 'cancellations') renderCancelKpis(data);
+  else if (kind() === 'vamp') renderVampKpis(data);
   else renderKpis(data.totals, data.range);
   renderTabs();
   renderView(data);
@@ -374,7 +393,9 @@ function renderHeader(data) {
   // сутки у провайдеров свои — как в их кабинетах
   const zone = (tz) => tz.split('/').pop().replace('_', ' ');
   $('subtitle').textContent =
-    product() === 'esim'
+    kind() === 'vamp'
+      ? 'Calendar months, UTC · Visa only · An estimate: official numbers are on the VAMP page in Stripe'
+      : product() === 'esim'
       ? `Day boundaries: ${zone(data.time_zones.stripe)} · Stripe account Toggle eSim`
       : `Day boundaries: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
   const errors = data.sync
@@ -438,6 +459,32 @@ function renderCancelKpis({ totals: t, median_cancel_day: median }) {
   ]);
 }
 
+// Visa VAMP: карточки — за последний месяц периода; статус — у одного мерчанта, иначе сколько мерчантов в каком статусе
+const pct2 = (r) => (r === null || r === undefined ? '—' : `${(r * 100).toFixed(2)}%`);
+const STATUS_NAMES = { excessive: 'Excessive', at_risk: 'At risk', ok: 'OK' };
+const STATUS_TIPS = {
+  excessive: 'Оба порога превышены: ratio и count',
+  at_risk: 'Превышен один порог — или count превысит порог к концу месяца при нынешнем темпе',
+  ok: 'Ниже обоих порогов',
+};
+const statusBadge = (status) => (status ? `<span class="badge ${status}" data-tip="${STATUS_TIPS[status]}">${STATUS_NAMES[status]}</span>` : '—');
+
+function renderVampKpis({ month: m, thresholds: t }) {
+  const approx = (html) => (m.final || html === '—' ? html : `≈ ${html}`);
+  const when = `${monthName(m.from)}${m.final ? '' : ', to date'}`;
+  const summary = Object.entries(m.statuses).filter(([, n]) => n > 0).map(([s, n]) => `${n} ${STATUS_NAMES[s].toLowerCase()}`).join(' · ');
+  kpiCards([
+    ['VAMP count', approx(num(m.vamp_count)), `${when} · threshold ${num(t.count)}`, 'Фрод-репорты Visa (TC40) + Visa-чарджбэки без RDR (TC15) за месяц. Порог Excessive у мерчанта — 1 500'],
+    ['VAMP ratio', approx(pct2(m.vamp_ratio)), `of ${num(m.visa_sales)} Visa sales · threshold ${pct2(t.ratio)}`, 'VAMP count ÷ успешные Visa-списания за месяц. В начале месяца завышен: репорты приходят и по списаниям прошлых месяцев'],
+    m.status
+      ? ['Status', statusBadge(m.status), m.forecast_count === null ? 'month closed' : `forecast ${num(m.forecast_count)} by month end`, 'Excessive — оба порога сразу. Прогноз — count к концу месяца при нынешнем темпе']
+      : ['Merchants', summary || '—', `${num(m.merchants)} merchants · status per merchant`, 'Пороги VAMP — у каждого мерчанта (MID) отдельно: статус каждого — во вкладке Merchants'],
+    ['Fraud reports (TC40)', num(m.fraud), 'Visa early fraud warnings', 'Банк сообщил Visa о мошенничестве по списанию (у Stripe — early fraud warning). Идут в VAMP, даже если деньги вернули'],
+    ['Chargebacks (TC15)', num(m.disputes), 'Visa, not resolved by RDR', 'Visa-чарджбэки, не закрытые через RDR. Запросы документов (inquiry) не считаются'],
+    ['RDR, excluded', num(m.rdr), `${usd(m.rdr_lost)} lost`, 'Visa-диспуты, закрытые через RDR: в VAMP не идут, но деньги списаны'],
+  ]);
+}
+
 // Окончательность у eSIM своя: у повторных покупок — окна 30 и 90 дней с первой покупки
 const approxPct = (r, final) => `${final || r === null ? '' : '≈ '}${pct(r)}`;
 
@@ -466,7 +513,7 @@ function renderTabs() {
   $('view').innerHTML = MODES[state.mode].tabs
     .map(([v, title]) => `<button data-v="${v}" class="${v === state.view ? 'on' : ''}" data-tip="${TAB_TIPS[v]}">${title}</button>`)
     .join('');
-  $('granularity').hidden = state.view !== 'time';
+  $('granularity').hidden = state.view !== 'time' || kind() === 'vamp'; // VAMP — только по месяцам
   const { hints } = MODES[state.mode];
   $('hint').textContent = hints[state.view] ?? hints._breakdown ?? 'Click a row to see its trend, or a column header to sort';
 }
@@ -475,6 +522,10 @@ function renderTabs() {
 function periodLabel(p) {
   if (state.granularity === 'day') return fullDay(p.period);
   if (state.granularity === 'week') return `${shortDay(p.period)} — ${shortDay(p.period_end)}`;
+  return monthLabel(p);
+}
+// Месяц, обрезанный периодом, — с его днями
+function monthLabel(p) {
   const name = monthName(p.period);
   return p.period.endsWith('-01') && isMonthEnd(p.period_end) ? name : `${name} (${shortDay(p.period)} — ${shortDay(p.period_end)})`;
 }
@@ -617,6 +668,20 @@ const CANCEL_REASON_COLUMNS = [
   { key: 'after_trial', title: 'After trial', tip: 'Отменили в 30 дней после конца триала', sort: (r) => r.after_trial, cell: (r) => `<td>${num(r.after_trial)}</td>` },
 ];
 
+// Visa VAMP: «≈» — месяц ещё идёт; без платежей у измерения (риск, тип списания) — продаж и ratio нет
+const hasSales = () => !['risk', 'charge_type'].includes(state.view);
+const VAMP_COLUMNS = [
+  { key: 'vamp_count', title: 'VAMP count', tip: 'Фрод-репорты Visa + чарджбэки без RDR', sort: (p) => p.vamp_count, cell: (p) => pendingCell(num(p.vamp_count), p.final) },
+  { key: 'vamp_ratio', title: 'VAMP ratio', tip: 'VAMP count ÷ Visa sales; порог — 1,5%', sort: (p) => p.vamp_ratio, cell: (p) => pendingCell(pct2(p.vamp_ratio), p.final) },
+  { key: 'forecast_count', title: 'Forecast', tip: 'VAMP count к концу месяца при нынешнем темпе', sort: (p) => p.forecast_count, cell: (p) => `<td class="muted">${p.forecast_count === null ? '—' : num(p.forecast_count)}</td>` },
+  { key: 'fraud', title: 'Fraud reports', tip: 'Фрод-репорты Visa (TC40)', sort: (p) => p.fraud, cell: (p) => `<td>${num(p.fraud)}</td>` },
+  { key: 'disputes', title: 'Chargebacks', tip: 'Visa-чарджбэки без RDR (TC15)', sort: (p) => p.disputes, cell: (p) => `<td>${num(p.disputes)}</td>` },
+  { key: 'visa_sales', title: 'Visa sales', tip: 'Успешные Visa-списания', sort: (p) => p.visa_sales, cell: (p) => `<td>${hasSales() ? num(p.visa_sales) : '—'}</td>` },
+  { key: 'rdr', title: 'RDR', tip: 'Visa-диспуты, закрытые через RDR, — в VAMP не идут', sort: (p) => p.rdr, cell: (p) => `<td title="${usd(p.rdr_lost)} lost">${num(p.rdr)}</td>` },
+];
+const STATUS_COLUMN = { key: 'status', title: 'Status', tip: 'Excessive — оба порога сразу: ratio ≥ 1,5% и count ≥ 1 500', text: true, sort: (p) => p.status, cell: (p) => `<td>${statusBadge(p.status)}</td>` };
+const VAMP_SHARE_COLUMN = { key: 'share', title: 'Share', tip: 'Доля в VAMP count месяца', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
+
 // eSIM, удержание: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
 // В подсказке к «≈» — сколько дней окна прошло (у самых свежих клиентов группы) и когда цифра станет итоговой
 const DAY_SECONDS = 86_400;
@@ -739,6 +804,21 @@ function renderView(data) {
       renderTable(OVERVIEW_REASON_COLUMNS, data.reasons, { empty: 'No unpaid orders for this period' });
     } else {
       renderTable([valueColumn(), ...OVERVIEW_COLUMNS], data.breakdown, { ...breakdown, empty: 'No orders for this period' });
+    }
+    return;
+  }
+  if (kind() === 'vamp') {
+    if (isTime) {
+      const status = data.series.some((p) => p.status) ? [STATUS_COLUMN] : [];
+      const month = { ...periodColumn('Month'), cell: (p) => `<td>${monthLabel(p)}</td>` }; // VAMP — всегда по месяцам
+      renderTable([month, ...status, ...VAMP_COLUMNS], data.series);
+      renderVampChart(data);
+    } else {
+      // у мерчантов главное — статус; у остальных разрезов — доля в count
+      const [count, ...rest] = VAMP_COLUMNS;
+      const columns = state.view === 'mid' ? [valueColumn(), STATUS_COLUMN, ...VAMP_COLUMNS] : [valueColumn(), count, VAMP_SHARE_COLUMN, ...rest];
+      renderTable(columns, data.breakdown, { link: dimensions().includes(state.view), limit: true, empty: 'No Visa fraud reports or chargebacks for this month' });
+      $('hint').textContent = `${monthName(data.month.from)}${data.month.final ? '' : ', to date'}. Thresholds are per merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
     }
     return;
   }
@@ -914,9 +994,44 @@ function renderCancelCharts({ series, by_day: byDay }) {
   });
 }
 
+// VAMP: накопленный count по дням месяца — этот и прошлый; порог — только у одного мерчанта (он у каждого свой)
+function renderVampChart({ daily, month, thresholds }) {
+  const { muted, grid, common } = chartBase();
+  const days = Array.from({ length: Math.max(daily.current.length, daily.previous.length) }, (_, i) => i + 1);
+  const single = month.merchants === 1;
+  const line = (label, data, color, dash) => ({ label, data, borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.2, borderDash: dash });
+  $('vamp-chart-title').textContent = `VAMP count by day, cumulative — ${monthName(daily.month)}`;
+  $('vamp-legend-current').textContent = monthName(daily.month);
+  $('vamp-legend-previous').textContent = monthName(daily.previous_month);
+  $('vamp-legend-threshold').hidden = !single;
+  charts.vamp = new Chart($('vamp-chart'), {
+    type: 'line',
+    data: {
+      labels: days,
+      datasets: [
+        line(monthName(daily.month), daily.current, css('--s-converted')),
+        line(monthName(daily.previous_month), daily.previous, css('--muted'), [5, 4]),
+        ...(single ? [line('Excessive threshold', days.map(() => thresholds.count), css('--danger'), [2, 3])] : []),
+      ],
+    },
+    options: {
+      ...common,
+      plugins: {
+        legend: { display: false },
+        tooltip: { padding: 10, cornerRadius: 8, callbacks: { title: (items) => `Day ${items[0].label}`, label: (c) => ` ${c.dataset.label}: ${num(c.raw)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { color: grid }, ticks: { color: muted, maxRotation: 0, autoSkipPadding: 12 } },
+        y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => num(v) } },
+      },
+    },
+  });
+}
+
 // Графики своего экрана — при смене темы перерисовываются: цвета берутся из неё
 function renderModeCharts(data) {
   if (kind() === 'cancellations') return renderCancelCharts(data);
+  if (kind() === 'vamp') return renderVampChart(data);
   ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](data.series);
 }
 

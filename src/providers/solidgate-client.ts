@@ -72,6 +72,32 @@ export interface SgCardOrder {
   transactions?: Record<string, SgTransaction> | SgTransaction[];
 }
 
+// Фрод-алерт (TC40 или SAFE) — отчёт card-orders/fraud-alerts
+export interface SgFraudAlert {
+  id: number | string;
+  created_at: string; // когда пришёл в Solidgate
+  order_id: string;
+  card_scheme?: string | null; // VISA, MASTERCARD…
+  fraud_type?: string | null;
+  reason_code_description?: string | null;
+}
+
+// Чарджбэки — отчёт card-orders/chargebacks: заказ, в нём его чарджбэки (личные данные клиента из отчёта не берём)
+export interface SgChargeback {
+  id: string;
+  created_at: string; // когда пришёл в Solidgate
+  type?: string | null; // 1st_chb…
+  reason_code?: string | null; // у Visa — 10.4 и т. п., у Mastercard — 4837
+  reason_description?: string | null;
+}
+
+export interface SgChargebackOrder {
+  order_id: string;
+  created_at?: string;
+  customer_account_id?: string | null;
+  chargebacks?: SgChargeback[];
+}
+
 export type ReportFilter = 'created_at' | 'updated_at';
 
 interface ClientOptions {
@@ -82,6 +108,7 @@ interface ClientOptions {
 interface ReportPage {
   subscriptions?: Record<string, SgSubscription>;
   orders?: SgCardOrder[] | Record<string, SgCardOrder>;
+  alerts?: SgFraudAlert[] | Record<string, SgFraudAlert>;
   metadata?: { next_page_iterator: string | null };
   error?: { code: string; messages?: string[] } | null;
 }
@@ -114,9 +141,18 @@ export function listCardOrders(
   return paginate(keys, 'card-orders', from, to, filter, options, (page) => page.orders);
 }
 
+// Фильтр по дате самого алерта / чарджбэка (не заказа) — новые берутся короткими окнами
+export function listFraudAlerts(keys: SolidgateKeys, from: number, to: number, options: ClientOptions = {}): AsyncGenerator<SgFraudAlert> {
+  return paginate(keys, 'card-orders/fraud-alerts', from, to, 'created_at', options, (page) => page.alerts);
+}
+
+export function listChargebacks(keys: SolidgateKeys, from: number, to: number, options: ClientOptions = {}): AsyncGenerator<SgChargebackOrder> {
+  return paginate(keys, 'card-orders/chargebacks', from, to, 'updated_at', options, (page) => page.orders as unknown as SgChargebackOrder[]);
+}
+
 async function* paginate<T>(
   keys: SolidgateKeys,
-  report: 'subscriptions' | 'card-orders',
+  report: 'subscriptions' | 'card-orders' | 'card-orders/fraud-alerts' | 'card-orders/chargebacks',
   from: number,
   to: number,
   filter: ReportFilter,

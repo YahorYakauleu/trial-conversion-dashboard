@@ -66,6 +66,31 @@ export interface EsimChargeRow extends PaymentRow {
   order_type: string | null; // purchase | topup
 }
 
+// Событие для Visa VAMP: фрод-репорт (TC40 — Stripe early fraud warning, Solidgate fraud alert) или диспут (TC15).
+// Храним все сети, в VAMP идут только прошедшие через сеть Visa: фрод-репорты и чарджбэки, не закрытые через RDR.
+// Поля карты у Solidgate пустые — берутся из платежа (payments) по ID заказа
+export interface VampReportRow {
+  provider: Provider;
+  report_id: string; // Stripe issfr_… / du_…, Solidgate — id алерта или чарджбэка
+  account: string;
+  mid: string | null; // Stripe — аккаунт; Solidgate — из платежа
+  kind: 'fraud' | 'dispute';
+  reported_at: number; // когда пришёл к провайдеру — по этой дате событие попадает в месяц
+  payment_id: string | null; // Stripe charge / Solidgate order
+  charged_at: number | null; // когда было само списание
+  // сеть, через которую прошло списание (visa, mastercard, cartes_bancaires, pulse…) — не бренд: французская Visa/CB
+  // может пройти через Cartes Bancaires, и тогда в VAMP не идёт. У Solidgate — схема карты
+  network: string | null;
+  country: string | null;
+  payment_method: string | null;
+  customer_id: string | null;
+  risk_score: number | null; // Stripe Radar, 0–99
+  reason: string | null; // тип фрода или причина диспута
+  case_type: string | null; // у диспута: chargeback | inquiry
+  rdr: boolean; // диспут закрыт через Visa RDR — в VAMP не считается
+  lost_usd_cents: number; // сколько списано по RDR-диспуту
+}
+
 export interface LatestRun {
   provider: Provider;
   account: string;
@@ -180,6 +205,27 @@ export function openStore(file: string) {
       day TEXT PRIMARY KEY,
       rates TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS vamp_reports (
+      provider TEXT NOT NULL,
+      report_id TEXT NOT NULL,
+      account TEXT NOT NULL,
+      mid TEXT,
+      kind TEXT NOT NULL,
+      reported_at INTEGER NOT NULL,
+      payment_id TEXT,
+      charged_at INTEGER,
+      network TEXT,
+      country TEXT,
+      payment_method TEXT,
+      customer_id TEXT,
+      risk_score INTEGER,
+      reason TEXT,
+      case_type TEXT,
+      rdr INTEGER NOT NULL DEFAULT 0,
+      lost_usd_cents INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (provider, report_id)
+    );
+    CREATE INDEX IF NOT EXISTS vamp_reports_reported_idx ON vamp_reports (reported_at);
   `);
   // Платежи eSIM — в той же таблице (product = 'esim'), вместе с отклонёнными списаниями (approved = 0);
   // у VPN в payments только успешные списания
@@ -296,6 +342,13 @@ export function openStore(file: string) {
       package = excluded.package,
       order_type = excluded.order_type
   `);
+  const vampColumns = ['provider', 'report_id', 'account', 'mid', 'kind', 'reported_at', 'payment_id', 'charged_at', 'network', 'country',
+    'payment_method', 'customer_id', 'risk_score', 'reason', 'case_type', 'rdr', 'lost_usd_cents'];
+  const upsertVampStmt = db.prepare(`
+    INSERT INTO vamp_reports (${vampColumns.join(', ')}) VALUES (${vampColumns.map((c) => `@${c}`).join(', ')})
+    ON CONFLICT (provider, report_id) DO UPDATE SET
+      ${vampColumns.slice(2).map((c) => `${c} = excluded.${c}`).join(',\n      ')}
+  `);
   const setCancellationStmt = db.prepare('UPDATE trials SET canceled_at = ?, cancel_reason = ? WHERE provider = ? AND subscription_id = ?');
   const setCustomerIdStmt = db.prepare('UPDATE trials SET customer_id = ? WHERE provider = ? AND subscription_id = ? AND customer_id IS NULL');
   const selectByInvoice = db.prepare('SELECT subscription_id FROM trials WHERE provider = ? AND first_invoice_id = ?');
@@ -370,6 +423,10 @@ export function openStore(file: string) {
 
     upsertPayment(p: PaymentRow): void {
       upsertPaymentStmt.run({ ...p });
+    },
+
+    upsertVampReport(r: VampReportRow): void {
+      upsertVampStmt.run({ ...r, rdr: Number(r.rdr) });
     },
 
     upsertEsimCharge(c: EsimChargeRow): void {

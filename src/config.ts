@@ -32,6 +32,8 @@ export interface Config {
   syncCron: string;
   // Stripe-аккаунт eSIM — отдельный продукт: разовые покупки пакетов и пополнения, без подписок. Без ключа продукта eSIM нет
   esimStripeKey: string | null;
+  // Порог Visa VAMP для мерчанта (Excessive): ratio и count за месяц — оба сразу
+  vamp: { ratio: number; count: number };
   users: { admin: Credentials; guest: Credentials | null };
   dataDir: string;
   port: number;
@@ -72,6 +74,7 @@ export function loadConfig(env: Env = process.env): Config {
     historyFrom: Math.min(...Object.values(timeZones).map((tz) => localMidnight(historyFromDay, tz))),
     syncCron: env.SYNC_CRON?.trim() || '0 */4 * * *',
     esimStripeKey: env.ESIM_STRIPE_KEY?.trim() || null,
+    vamp: { ratio: share(env, 'VAMP_RATIO_THRESHOLD', 0.015), count: positiveInt(env, 'VAMP_COUNT_THRESHOLD', 1500) },
     users: {
       // BASIC_AUTH_* — прежние имена переменных, работают как вход админа
       admin: {
@@ -124,6 +127,15 @@ function date(env: Env, name: string): string {
   const valid = /^\d{4}-\d{2}-\d{2}$/.test(raw) && !Number.isNaN(Date.parse(`${raw}T00:00:00Z`));
   if (!valid) throw new Error(`${name} должна быть датой в формате YYYY-MM-DD`);
   return raw;
+}
+
+// Доля: 0.015 = 1,5%
+function share(env: Env, name: string, fallback: number): number {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!(value > 0 && value < 1)) throw new Error(`${name} должен быть долей от 0 до 1, например 0.015`);
+  return value;
 }
 
 function positiveInt(env: Env, name: string, fallback: number): number {
