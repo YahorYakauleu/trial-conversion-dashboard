@@ -32,8 +32,8 @@ export interface Config {
   syncCron: string;
   // Stripe-аккаунт eSIM — отдельный продукт: разовые покупки пакетов и пополнения, без подписок. Без ключа продукта eSIM нет
   esimStripeKey: string | null;
-  // Порог Visa VAMP для мерчанта (Excessive): ratio и count за месяц — оба сразу
-  vamp: { ratio: number; count: number };
+  // Visa VAMP: порог Excessive для мерчанта (ratio и count за месяц — оба сразу) и какие MID Visa считает одним мерчантом
+  vamp: { ratio: number; count: number; merchants: Record<string, string[]> };
   users: { admin: Credentials; guest: Credentials | null };
   dataDir: string;
   port: number;
@@ -74,7 +74,11 @@ export function loadConfig(env: Env = process.env): Config {
     historyFrom: Math.min(...Object.values(timeZones).map((tz) => localMidnight(historyFromDay, tz))),
     syncCron: env.SYNC_CRON?.trim() || '0 */4 * * *',
     esimStripeKey: env.ESIM_STRIPE_KEY?.trim() || null,
-    vamp: { ratio: share(env, 'VAMP_RATIO_THRESHOLD', 0.015), count: positiveInt(env, 'VAMP_COUNT_THRESHOLD', 1500) },
+    vamp: {
+      ratio: share(env, 'VAMP_RATIO_THRESHOLD', 0.015),
+      count: positiveInt(env, 'VAMP_COUNT_THRESHOLD', 1500),
+      merchants: vampMerchants(env.VAMP_MERCHANTS, stripeAccounts),
+    },
     users: {
       // BASIC_AUTH_* — прежние имена переменных, работают как вход админа
       admin: {
@@ -127,6 +131,24 @@ function date(env: Env, name: string): string {
   const valid = /^\d{4}-\d{2}-\d{2}$/.test(raw) && !Number.isNaN(Date.parse(`${raw}T00:00:00Z`));
   if (!valid) throw new Error(`${name} должна быть датой в формате YYYY-MM-DD`);
   return raw;
+}
+
+// Мерчанты Visa: «Имя=stripe:org|stripe:corp; Другой=solidgate:<MID>». По умолчанию все Stripe-аккаунты VPN — один мерчант:
+// так Visa считает Toggle (TOGGLE (10000290) = Org + Corp + Incorp — видно на странице VAMP в Stripe)
+export const DEFAULT_VAMP_MERCHANT = 'TOGGLE (10000290)';
+function vampMerchants(raw: string | undefined, stripeAccounts: StripeAccount[]): Record<string, string[]> {
+  if (!raw?.trim()) return stripeAccounts.length ? { [DEFAULT_VAMP_MERCHANT]: stripeAccounts.map((a) => `stripe:${a.account}`) } : {};
+  return Object.fromEntries(
+    raw.split(';').filter((item) => item.trim()).map((item) => {
+      const i = item.indexOf('=');
+      const name = item.slice(0, i).trim();
+      const mids = item.slice(i + 1).split('|').map((m) => m.trim());
+      if (i <= 0 || !name || mids.some((m) => !/^(stripe|solidgate):[A-Za-z0-9_-]{1,64}$/.test(m))) {
+        throw new Error(`VAMP_MERCHANTS: неверный формат "${item.trim()}", ожидается Имя=stripe:org|stripe:corp`);
+      }
+      return [name, mids];
+    }),
+  );
 }
 
 // Доля: 0.015 = 1,5%

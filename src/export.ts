@@ -4,7 +4,7 @@ import { declineCodes, declineLabel } from './declines.js';
 import { cohortCte, ordersCte, type EsimOptions } from './esim.js';
 import { DAY, trialFilter, type RangeOptions } from './metrics.js';
 import { paymentFilter, type TurnoverOptions } from './turnover.js';
-import { listVampReports, type VampOptions } from './vamp.js';
+import { listVampReports, type VampOptions, type VampRules } from './vamp.js';
 
 // Выгрузка списком: записи, из которых посчитана цифра на экране, — с их ID в Stripe и Solidgate,
 // чтобы точечно посмотреть детали в кабинете провайдера. Для Stripe — ещё и ссылки на объект в дашборде Stripe.
@@ -135,17 +135,17 @@ export function exportPayments(db: Db, o: TurnoverOptions): ExportTable {
 }
 
 // Visa VAMP: фрод-репорты и диспуты Visa; counted_in_vamp — входит ли в VAMP count (RDR и запросы документов — нет)
-export function exportVampReports(db: Db, o: VampOptions): ExportTable {
-  const { rows, truncated } = limited(listVampReports(db, o, EXPORT_LIMIT + 1));
+export function exportVampReports(db: Db, o: VampOptions, rules: VampRules): ExportTable {
+  const { rows, truncated } = limited(listVampReports(db, o, rules, EXPORT_LIMIT + 1));
   const event = (r: (typeof rows)[number]) =>
     r.kind === 'fraud' ? 'fraud report (TC40)' : r.case_type !== 'chargeback' ? (r.case_type ?? 'dispute') : r.rdr ? 'chargeback, RDR' : 'chargeback (TC15)';
   return {
     columns: [
-      'provider', 'account', 'mid', 'event', 'counted_in_vamp', 'report_id', 'reported_utc', 'payment_id', 'charged_utc', 'charge',
+      'provider', 'account', 'visa_merchant', 'mid', 'event', 'counted_in_vamp', 'report_id', 'reported_utc', 'payment_id', 'charged_utc', 'charge',
       'card_country', 'payment_method', 'radar_risk_score', 'reason', 'rdr_lost_usd', 'customer_id', 'payment_link', 'customer_link',
     ],
     rows: rows.map((r) => [
-      r.provider, r.account, text(r.mid), event(r), yesNo(r.counted), r.report_id, utc(r.reported_at), text(r.payment_id), utc(r.charged_at),
+      r.provider, r.account, text(r.merchant), text(r.mid), event(r), yesNo(r.counted), r.report_id, utc(r.reported_at), text(r.payment_id), utc(r.charged_at),
       r.charge_type === 'first_payment' ? 'first payment after trial' : 'renewal or other', text(r.country), text(r.payment_method), text(r.risk_score),
       text(r.reason), r.rdr ? dollars(r.lost_usd_cents) : '', text(r.customer_id),
       stripeLink(r.provider, r.account, 'payments', r.payment_id), stripeLink(r.provider, r.account, 'customers', r.customer_id),

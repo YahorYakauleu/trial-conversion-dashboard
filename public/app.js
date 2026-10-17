@@ -53,10 +53,10 @@ const MODES = {
     title: 'Visa VAMP',
     api: '/api/vamp',
     charts: 'vamp-charts',
-    dimensions: ['mid', 'country', 'payment_method'],
-    tabs: [['time', 'Trend'], ['mid', 'Merchants'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['risk', 'Radar risk'], ['charge_type', 'Charge type']],
+    dimensions: ['merchant', 'mid', 'country', 'payment_method'],
+    tabs: [['time', 'Trend'], ['merchant', 'Merchants'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['risk', 'Radar risk'], ['charge_type', 'Charge type']],
     hints: {
-      time: 'Calendar months, UTC. A report counts in the month it arrived, not the month of the charge. Status is shown for a single merchant',
+      time: "A report counts in the month it reached Stripe or Solidgate (UTC); Visa dates it by when the bank reported it, so around month boundaries counts can differ by 10–15%. Visa's official figures come next month: Stripe → VAMP → Visa data",
     },
   },
   turnover: {
@@ -105,7 +105,7 @@ const MODES = {
 const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
-  destination: 'Destination', package: 'Package', risk: 'Radar risk score', charge_type: 'Charge type',
+  destination: 'Destination', package: 'Package', risk: 'Radar risk score', charge_type: 'Charge type', merchant: 'Visa merchant',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
 const TAB_TIPS = {
@@ -119,6 +119,7 @@ const TAB_TIPS = {
   decline_reason: 'Почему отклонили попытки списания',
   cancel_reason: 'Почему отменили подписку',
   risk: 'Radar risk score списания — только у Stripe',
+  merchant: 'Мерчант Visa: аккаунты Stripe одного бизнеса Visa считает вместе — пороги у мерчанта целиком',
   charge_type: 'Первый платёж после триала или продление',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
@@ -221,6 +222,8 @@ const valueLabel = (dimension, value) => valueParts(dimension, value).filter(Boo
 
 // Подпись из двух частей: название и, для MID Solidgate, полный UUID — в таблице и списке он идёт второй строкой
 function valueParts(dimension, value) {
+  // мерчант Visa — имя группы MID или сам MID, если он ни в какой группе
+  if (dimension === 'merchant') return value?.includes(':') ? valueParts('mid', value) : [valueName(dimension, value), null];
   if (dimension === 'mid' && value?.startsWith('solidgate:')) {
     const mid = value.slice('solidgate:'.length);
     return [MID_DESCRIPTORS[mid] ? `Solidgate · ${MID_DESCRIPTORS[mid]}` : 'Solidgate', mid];
@@ -394,7 +397,7 @@ function renderHeader(data) {
   const zone = (tz) => tz.split('/').pop().replace('_', ' ');
   $('subtitle').textContent =
     kind() === 'vamp'
-      ? 'Calendar months, UTC · Visa only · An estimate: official numbers are on the VAMP page in Stripe'
+      ? 'Estimate · calendar months, UTC · Visa only · thresholds apply to a whole Visa merchant'
       : product() === 'esim'
       ? `Day boundaries: ${zone(data.time_zones.stripe)} · Stripe account Toggle eSim`
       : `Day boundaries: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
@@ -472,13 +475,15 @@ const statusBadge = (status) => (status ? `<span class="badge ${status}" data-ti
 function renderVampKpis({ month: m, thresholds: t }) {
   const approx = (html) => (m.final || html === '—' ? html : `≈ ${html}`);
   const when = `${monthName(m.from)}${m.final ? '' : ', to date'}`;
-  const summary = Object.entries(m.statuses).filter(([, n]) => n > 0).map(([s, n]) => `${n} ${STATUS_NAMES[s].toLowerCase()}`).join(' · ');
+  const statusCard = m.status
+    ? ['Status', statusBadge(m.status), m.forecast_count === null ? 'month closed' : `forecast ${num(m.forecast_count)} by month end`, 'Excessive — оба порога сразу. Прогноз — count к концу месяца при нынешнем темпе']
+    : m.statuses
+      ? ['Excessive merchants', `${num(m.statuses.excessive)} of ${num(m.merchants)}`, `${num(m.statuses.at_risk)} at risk · ${num(m.statuses.ok)} OK`, 'Пороги VAMP — у каждого мерчанта Visa отдельно: статус каждого — во вкладке Merchants']
+      : ['Status', '—', 'only for a whole merchant, without filters', 'Пороги считаются по мерчанту Visa целиком: по одной стране, способу оплаты или одному аккаунту Stripe статуса нет'];
   kpiCards([
     ['VAMP count', approx(num(m.vamp_count)), `${when} · threshold ${num(t.count)}`, 'Фрод-репорты Visa (TC40) + Visa-чарджбэки без RDR (TC15) за месяц. Порог Excessive у мерчанта — 1 500'],
     ['VAMP ratio', approx(pct2(m.vamp_ratio)), `of ${num(m.visa_sales)} Visa sales · threshold ${pct2(t.ratio)}`, 'VAMP count ÷ успешные Visa-списания за месяц. В начале месяца завышен: репорты приходят и по списаниям прошлых месяцев'],
-    m.status
-      ? ['Status', statusBadge(m.status), m.forecast_count === null ? 'month closed' : `forecast ${num(m.forecast_count)} by month end`, 'Excessive — оба порога сразу. Прогноз — count к концу месяца при нынешнем темпе']
-      : ['Merchants', summary || '—', `${num(m.merchants)} merchants · status per merchant`, 'Пороги VAMP — у каждого мерчанта (MID) отдельно: статус каждого — во вкладке Merchants'],
+    statusCard,
     ['Fraud reports (TC40)', num(m.fraud), 'Visa early fraud warnings', 'Банк сообщил Visa о мошенничестве по списанию (у Stripe — early fraud warning). Идут в VAMP, даже если деньги вернули'],
     ['Chargebacks (TC15)', num(m.disputes), 'Visa, not resolved by RDR', 'Visa-чарджбэки, не закрытые через RDR. Запросы документов (inquiry) не считаются'],
     ['RDR, excluded', num(m.rdr), `${usd(m.rdr_lost)} lost`, 'Visa-диспуты, закрытые через RDR: в VAMP не идут, но деньги списаны'],
@@ -814,11 +819,11 @@ function renderView(data) {
       renderTable([month, ...status, ...VAMP_COLUMNS], data.series);
       renderVampChart(data);
     } else {
-      // у мерчантов главное — статус; у остальных разрезов — доля в count
+      // у мерчантов главное — статус (если выборка не сужена фильтрами); у остальных разрезов — доля в count
       const [count, ...rest] = VAMP_COLUMNS;
-      const columns = state.view === 'mid' ? [valueColumn(), STATUS_COLUMN, ...VAMP_COLUMNS] : [valueColumn(), count, VAMP_SHARE_COLUMN, ...rest];
+      const columns = data.breakdown.some((r) => r.status) ? [valueColumn(), STATUS_COLUMN, ...VAMP_COLUMNS] : [valueColumn(), count, VAMP_SHARE_COLUMN, ...rest];
       renderTable(columns, data.breakdown, { link: dimensions().includes(state.view), limit: true, empty: 'No Visa fraud reports or chargebacks for this month' });
-      $('hint').textContent = `${monthName(data.month.from)}${data.month.final ? '' : ', to date'}. Thresholds are per merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
+      $('hint').textContent = `${monthName(data.month.from)}${data.month.final ? '' : ', to date'}. Thresholds apply to a whole Visa merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
     }
     return;
   }
@@ -998,7 +1003,7 @@ function renderCancelCharts({ series, by_day: byDay }) {
 function renderVampChart({ daily, month, thresholds }) {
   const { muted, grid, common } = chartBase();
   const days = Array.from({ length: Math.max(daily.current.length, daily.previous.length) }, (_, i) => i + 1);
-  const single = month.merchants === 1;
+  const single = month.status !== null; // один мерчант целиком
   const line = (label, data, color, dash) => ({ label, data, borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.2, borderDash: dash });
   $('vamp-chart-title').textContent = `VAMP count by day, cumulative — ${monthName(daily.month)}`;
   $('vamp-legend-current').textContent = monthName(daily.month);

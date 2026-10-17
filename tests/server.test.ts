@@ -192,9 +192,12 @@ describe('server', () => {
     const trend = await get('');
     expect([trend.range, trend.thresholds]).toEqual([{ from: '2026-09-01', to: '2026-09-30' }, { ratio: 0.015, count: 1500 }]);
     expect(trend.month).toMatchObject({ from: '2026-09-01', vamp_count: 2, visa_sales: 20, vamp_ratio: 0.1, merchants: 1, status: 'at_risk', final: true });
+    // аккаунты Stripe по умолчанию — один мерчант Visa
     expect(trend.series).toHaveLength(1);
     expect(trend.daily.current).toHaveLength(30);
-    expect((await get('view=mid')).breakdown.map((r: { value: string; status: string }) => [r.value, r.status])).toEqual([['stripe:org', 'at_risk']]);
+    expect((await get('view=merchant')).breakdown.map((r: { value: string; status: string }) => [r.value, r.status])).toEqual([['TOGGLE (10000290)', 'at_risk']]);
+    expect((await get('view=mid')).breakdown.map((r: { value: string; status: string }) => [r.value, r.status])).toEqual([['stripe:org', null]]);
+    expect((await get(`merchant=${encodeURIComponent('TOGGLE (10000290)')}`)).month.status).toBe('at_risk');
     expect((await get('view=risk')).breakdown.map((r: { value: string }) => r.value)).toEqual(['50–74']);
 
     const values = await (await fetch(`${url}/api/values?mode=vamp&dimension=country&${period}`, { headers: auth })).json();

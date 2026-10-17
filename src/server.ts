@@ -78,6 +78,7 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   bank: /^.{1,120}$/,
   destination: /^.{1,80}$/, // eSIM: страна или регион пакета
   package: /^.{1,40}$/, // eSIM: «5 GB · 7 days»
+  merchant: /^.{1,80}$/, // VAMP: мерчант Visa — имя группы MID или сам MID
   risk: /^\d{1,2}–\d{2}$/, // VAMP: полоса Radar risk score, «50–74»
   charge_type: /^(first_payment|renewal)$/, // VAMP: первый платёж после триала или продление
 };
@@ -201,10 +202,10 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const data = cached({ api: 'vamp', provider, months, view, filters }, () => ({
       month: { ...latest, ...getVampMonth(store.db, { ...o, ...latest }, config.vamp) },
       series: view === 'time' ? getVampSeries(store.db, { ...o, ...months }, config.vamp) : [],
-      daily: view === 'time' ? getVampDaily(store.db, { ...o, ...latest }, latest.from) : null,
+      daily: view === 'time' ? getVampDaily(store.db, { ...o, ...latest }, config.vamp, latest.from) : null,
       breakdown: view === 'time' ? [] : getVampBreakdown(store.db, { ...o, ...latest }, view, config.vamp),
     }));
-    res.json({ ...meta, role: res.locals.role, range: months, filters, view, thresholds: config.vamp, ...data });
+    res.json({ ...meta, role: res.locals.role, range: months, filters, view, thresholds: { ratio: config.vamp.ratio, count: config.vamp.count }, ...data });
   });
 
   // Оборот VPN: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
@@ -330,7 +331,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         // строка разреза — в пределах последнего месяца, как на экране; строка месяца — её даты (period=custom)
         const { months, latest } = vampScope(range);
         const scope = view === 'time' ? months : latest;
-        return ['vamp-reports', exportVampReports(store.db, { provider: rest.provider, filters: parseFilters(req.query, VAMP_DIMENSIONS), now, ...scope })];
+        return ['vamp-reports', exportVampReports(store.db, { provider: rest.provider, filters: parseFilters(req.query, VAMP_DIMENSIONS), now, ...scope }, config.vamp)];
       }
       if (mode === 'turnover') return ['vpn-payments', exportPayments(store.db, { ...base, provider: rest.provider, filters: parseFilters(req.query, TURNOVER_DIMENSIONS) })];
       if (mode === 'esim_overview') {

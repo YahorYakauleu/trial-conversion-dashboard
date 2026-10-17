@@ -9,7 +9,8 @@ import { getVampBreakdown, getVampDaily, getVampMonth, getVampSeries, vampStatus
 // «Сейчас» — 17 октября 12:00 UTC: сентябрь закрыт, октябрь идёт (прошло 16,5 из 31 дня)
 const ts = (iso: string) => Date.parse(iso) / 1000;
 const NOW = ts('2026-10-17T12:00:00Z');
-const t = { ratio: 0.015, count: 1500 };
+// без групп: каждый MID — сам себе мерчант
+const t = { ratio: 0.015, count: 1500, merchants: {} };
 const base = { provider: 'all' as const, filters: {}, now: NOW };
 
 function report(id: string, patch: Partial<VampReportRow>): VampReportRow {
@@ -60,11 +61,33 @@ describe('Visa VAMP', () => {
     expect(series.every((m) => m.status === null)).toBe(true); // мерчантов два — общий статус не имеет смысла
   });
 
-  it('один мерчант — со статусом; фильтр MID работает и для событий Solidgate (MID — из платежа)', () => {
-    const corp = getVampSeries(storeWithData().db, { ...base, filters: { mid: ['stripe:corp'] }, from: '2026-09-01', to: '2026-09-30' }, t);
+  it('один мерчант — со статусом; фильтр мерчанта работает и для событий Solidgate (MID — из платежа)', () => {
+    const corp = getVampSeries(storeWithData().db, { ...base, filters: { merchant: ['stripe:corp'] }, from: '2026-09-01', to: '2026-09-30' }, t);
     expect(corp[0]).toMatchObject({ vamp_count: 4, status: 'at_risk' }); // ratio 4% > 1,5%, count < 1 500
-    const sg = getVampMonth(storeWithData().db, { ...base, filters: { mid: ['solidgate:m1'] }, from: '2026-10-01', to: '2026-10-17' }, t);
+    const sg = getVampMonth(storeWithData().db, { ...base, filters: { merchant: ['solidgate:m1'] }, from: '2026-10-01', to: '2026-10-17' }, t);
     expect(sg).toMatchObject({ fraud: 1, disputes: 1, visa_sales: 10, vamp_ratio: 0.2, merchants: 1, status: 'at_risk' });
+  });
+
+  it('выборка, суженная не мерчантом (MID, страна), — без статуса: пороги у мерчанта целиком', () => {
+    const oct = { ...base, from: '2026-10-01', to: '2026-10-17' };
+    const byMid = getVampMonth(storeWithData().db, { ...oct, filters: { mid: ['solidgate:m1'] } }, t);
+    expect(byMid).toMatchObject({ vamp_count: 2, status: null, statuses: null });
+    expect(getVampSeries(storeWithData().db, { ...oct, filters: { country: ['US'] } }, t)[0].status).toBeNull();
+    expect(getVampBreakdown(storeWithData().db, { ...oct, filters: { country: ['US'] } }, 'merchant', t).every((r) => r.status === null)).toBe(true);
+  });
+
+  it('мерчант Visa — группа MID: пороги к сумме, MID — без статуса', () => {
+    const grouped = { ...t, merchants: { 'TOGGLE (10000290)': ['stripe:corp', 'solidgate:m1'] } };
+    const oct = { ...base, from: '2026-10-01', to: '2026-10-17' };
+    // Corp 1 из 200 и Solidgate 2 из 10 — вместе 3 из 210
+    expect(getVampMonth(storeWithData().db, oct, grouped)).toMatchObject({ vamp_count: 3, visa_sales: 210, merchants: 1, status: 'ok' });
+    expect(getVampBreakdown(storeWithData().db, oct, 'merchant', grouped).map((r) => [r.value, r.vamp_count, r.status])).toEqual([['TOGGLE (10000290)', 3, 'ok']]);
+    expect(getVampBreakdown(storeWithData().db, oct, 'mid', grouped).map((r) => [r.value, r.vamp_count, r.status])).toEqual([
+      ['solidgate:m1', 2, null],
+      ['stripe:corp', 1, null],
+    ]);
+    const filtered = getVampMonth(storeWithData().db, { ...oct, filters: { merchant: ['TOGGLE (10000290)'] } }, grouped);
+    expect(filtered).toMatchObject({ vamp_count: 3, status: 'ok' });
   });
 
   it('месяц: итоги и сколько мерчантов в каком статусе', () => {
@@ -76,7 +99,7 @@ describe('Visa VAMP', () => {
   it('разбивки: мерчанты со статусом, страны с ratio; у риска и типа списания продаж нет', () => {
     const db = storeWithData().db;
     const sept = { ...base, from: '2026-09-01', to: '2026-09-30' };
-    expect(getVampBreakdown(db, sept, 'mid', t).map((r) => [r.value, r.vamp_count, r.visa_sales, r.status])).toEqual([['stripe:corp', 4, 100, 'at_risk']]);
+    expect(getVampBreakdown(db, sept, 'merchant', t).map((r) => [r.value, r.vamp_count, r.visa_sales, r.status])).toEqual([['stripe:corp', 4, 100, 'at_risk']]);
     expect(getVampBreakdown(db, sept, 'country', t).map((r) => [r.value, r.vamp_count, r.vamp_ratio])).toEqual([['US', 3, 0.03], ['MX', 1, null]]);
     expect(getVampBreakdown(db, sept, 'risk', t).map((r) => [r.value, r.vamp_count, r.vamp_ratio])).toEqual([
       ['0–19', 1, null], ['50–74', 1, null], ['75–99', 1, null], [null, 1, null],
@@ -85,7 +108,7 @@ describe('Visa VAMP', () => {
   });
 
   it('накопленный count по дням месяца и прошлого', () => {
-    const daily = getVampDaily(storeWithData().db, { ...base, from: '2026-10-01', to: '2026-10-17' }, '2026-10-01');
+    const daily = getVampDaily(storeWithData().db, { ...base, from: '2026-10-01', to: '2026-10-17' }, t, '2026-10-01');
     expect([daily.month, daily.previous_month, daily.current.length, daily.previous.length]).toEqual(['2026-10-01', '2026-09-01', 17, 30]);
     expect([daily.current[0], daily.current[1], daily.current[11], daily.current[16]]).toEqual([0, 1, 2, 3]);
     expect(daily.previous.at(-1)).toBe(4);
@@ -101,7 +124,7 @@ describe('Visa VAMP', () => {
   });
 
   it('выгрузка: события Visa, входит ли в VAMP, тип события', () => {
-    const table = exportVampReports(storeWithData().db, { ...base, from: '2026-09-01', to: '2026-09-30' });
+    const table = exportVampReports(storeWithData().db, { ...base, from: '2026-09-01', to: '2026-09-30' }, t);
     const rows = table.rows.map((r) => Object.fromEntries(table.columns.map((c, i) => [c, r[i]])));
     expect(rows.map((r) => [r.report_id, r.event, r.counted_in_vamp])).toEqual([
       ['du_1', 'chargeback (TC15)', 'yes'],
