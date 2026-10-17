@@ -53,8 +53,10 @@ import {
   getVampBreakdown,
   getVampDaily,
   getVampMonth,
+  getVampOutcomes,
   getVampSeries,
   monthStart,
+  OUTCOMES,
   VAMP_DIMENSIONS,
   VAMP_FILTERS,
   type VampDimension,
@@ -190,12 +192,12 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
-  // Visa VAMP: календарные месяцы UTC — период расширяется до начала месяца; view=time|mid|country|payment_method|risk|charge_type.
+  // Visa VAMP: календарные месяцы UTC — период расширяется до начала месяца; view=time|<измерение>|outcome (что стало после фрод-репорта).
   // Карточки, график по дням и разбивки — за последний месяц периода (VAMP считается помесячно)
   const vampScope = (range: { from: string; to: string }) => ({ months: { from: monthStart(range.from), to: range.to }, latest: { from: monthStart(range.to), to: range.to } });
   app.get('/api/vamp', (req, res) => {
     const { now, provider, range, meta } = common(req.query);
-    const view = (['time', ...VAMP_DIMENSIONS] as const).find((v) => v === req.query.view) ?? 'time';
+    const view = (['time', 'outcome', ...VAMP_DIMENSIONS] as const).find((v) => v === req.query.view) ?? 'time';
     const filters = parseFilters(req.query, VAMP_FILTERS);
     const { months, latest } = vampScope(range);
     const o = { provider, filters, now };
@@ -203,7 +205,8 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       month: { ...latest, ...getVampMonth(store.db, { ...o, ...latest }, config.vamp) },
       series: view === 'time' ? getVampSeries(store.db, { ...o, ...months }, config.vamp) : [],
       daily: view === 'time' ? getVampDaily(store.db, { ...o, ...latest }, config.vamp, latest.from) : null,
-      breakdown: view === 'time' ? [] : getVampBreakdown(store.db, { ...o, ...latest }, view, config.vamp),
+      breakdown: view === 'time' || view === 'outcome' ? [] : getVampBreakdown(store.db, { ...o, ...latest }, view, config.vamp),
+      outcomes: view === 'outcome' ? getVampOutcomes(store.db, { ...o, ...latest }, config.vamp) : [],
     }));
     res.json({ ...meta, role: res.locals.role, range: months, filters, view, thresholds: { ratio: config.vamp.ratio, count: config.vamp.count }, ...data });
   });
@@ -331,7 +334,9 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         // строка разреза — в пределах последнего месяца, как на экране; строка месяца — её даты (period=custom)
         const { months, latest } = vampScope(range);
         const scope = view === 'time' ? months : latest;
-        return ['vamp-reports', exportVampReports(store.db, { provider: rest.provider, filters: parseFilters(req.query, VAMP_DIMENSIONS), now, ...scope }, config.vamp)];
+        const outcome = view === 'outcome' ? (OUTCOMES.find((x) => x === reason) ?? null) : null; // строка вкладки After report
+        const o = { provider: rest.provider, filters: parseFilters(req.query, VAMP_DIMENSIONS), now, ...scope };
+        return ['vamp-reports', exportVampReports(store.db, o, config.vamp, outcome)];
       }
       if (mode === 'turnover') return ['vpn-payments', exportPayments(store.db, { ...base, provider: rest.provider, filters: parseFilters(req.query, TURNOVER_DIMENSIONS) })];
       if (mode === 'esim_overview') {

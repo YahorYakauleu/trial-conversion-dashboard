@@ -4,6 +4,7 @@ import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRo
 import { forEachWindow } from '../days.js';
 import type { ToUsd } from '../fx.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
+import { refreshTrialFraud } from '../vamp.js';
 
 export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds' | 'radar' | 'disputes'>;
 
@@ -142,6 +143,9 @@ function vampCharge(charge: string | Stripe.Charge | null) {
     payment_method: details?.card?.wallet?.type ?? details?.type ?? null,
     customer_id: typeof customer === 'string' ? customer : (customer?.id ?? null),
     risk_score: full?.outcome?.risk_score ?? null,
+    // сумма — если списание в долларах (иначе её даст платёж дашборда); вернули ли деньги — на момент загрузки
+    amount_usd_cents: full?.currency === 'usd' ? full.amount : null,
+    refunded: (full?.amount_refunded ?? 0) > 0,
   };
 }
 
@@ -168,8 +172,10 @@ export function vampFromDispute(dispute: DisputeWithNetwork, account: string): V
   };
 }
 
-// Первый раз — с HISTORY_FROM неделями (прогресс сохраняется), дальше — с прошлого раза с запасом в сутки
+// Первый раз — с HISTORY_FROM неделями (прогресс сохраняется), дальше — с прошлого раза с запасом в сутки.
+// Версия набора полей: 2 — сумма и рефанд списания; загруженное раньше один раз проходится заново
 const VAMP_WINDOW = 7 * DAY;
+const VAMP_VERSION = 2;
 export async function syncStripeVamp(store: Store, stripe: StripeLike, account: string, historyFrom: number, now: number): Promise<void> {
   const save = async (created: Stripe.RangeQueryParam) => {
     for await (const efw of stripe.radar.earlyFraudWarnings.list({ created, limit: 100, expand: ['data.charge'] })) {
@@ -177,10 +183,12 @@ export async function syncStripeVamp(store: Store, stripe: StripeLike, account: 
     }
     for await (const dispute of stripe.disputes.list({ created, limit: 100, expand: ['data.charge'] })) store.upsertVampReport(vampFromDispute(dispute, account));
   };
-  const cursor = store.getState('stripe', account, 'vamp_cursor');
+  const current = (store.getState('stripe', account, 'vamp_version') ?? 0) >= VAMP_VERSION;
+  const cursor = current ? store.getState('stripe', account, 'vamp_cursor') : null;
+  const progressKey = `vamp_v${VAMP_VERSION}_day`;
   if (cursor === null) {
     await forEachWindow(
-      store.getState('stripe', account, 'vamp_day') ?? historyFrom,
+      store.getState('stripe', account, progressKey) ?? historyFrom,
       now,
       VAMP_WINDOW,
       PARALLEL,
@@ -188,12 +196,14 @@ export async function syncStripeVamp(store: Store, stripe: StripeLike, account: 
         await save({ gte: from, lt: from + VAMP_WINDOW });
         console.log(`[stripe:${account}] VAMP ${dayKey(from)} готово`);
       },
-      (next) => store.setState('stripe', account, 'vamp_day', next),
+      (next) => store.setState('stripe', account, progressKey, next),
     );
+    store.setState('stripe', account, 'vamp_version', VAMP_VERSION);
   } else {
     await save({ gte: cursor - DAY });
   }
   store.setState('stripe', account, 'vamp_cursor', now);
+  refreshTrialFraud(store.db, 'stripe');
 }
 
 export function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
@@ -410,6 +420,7 @@ export async function syncStripeAccount(
     const charge = typeof refund.charge === 'object' ? refund.charge : null;
     const chargeId = charge?.id ?? (typeof refund.charge === 'string' ? refund.charge : null);
     if (chargeId) store.markRefunded('stripe', chargeId);
+    if (chargeId) store.markVampRefunded('stripe', chargeId);
     if (charge && charge.amount > 0) store.setPaymentRefundShare('stripe', charge.id, charge.amount_refunded / charge.amount);
   }
 

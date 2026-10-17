@@ -44,6 +44,8 @@ export interface Counts {
   refunded: number; // сконвертившихся, кому вернули первый платёж
   first_declined: number; // первая попытка списания отклонена
   recovered: number; // из них всё же оплатили в окне ретраев
+  fraud: number; // сконвертившихся, по чьим списаниям потом пришёл фрод-репорт или чарджбэк
+  vamp_events: number; // событий Visa VAMP от клиентов когорты — фрод-репорты и чарджбэки без RDR
 }
 
 export interface Totals extends Counts {
@@ -53,6 +55,8 @@ export interface Totals extends Counts {
   decline_rate: number | null; // отклонённые попытки / все попытки
   refund_rate: number | null; // рефанды / сконвертившиеся
   recovery_rate: number | null; // восстановленные / триалы с отклонённой первой попыткой
+  fraud_rate: number | null; // фрод / сконвертившиеся
+  vamp_per_100: number | null; // событий VAMP на 100 оформленных триалов
   final_first: boolean;
   final_retry: boolean; // для конверсии, проходимости, decline, рефандов и recovery
 }
@@ -98,7 +102,7 @@ export const dayKey = (ts: number) => new Date(ts * 1000).toISOString().slice(0,
 const rate = (part: number, total: number) => (total === 0 ? null : part / total);
 const isDay = (value: unknown): value is string =>
   typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
-const zero = (): Counts => ({ started: 0, paid_first: 0, paid_retry: 0, attempts: 0, approved: 0, refunded: 0, first_declined: 0, recovered: 0 });
+const zero = (): Counts => ({ started: 0, paid_first: 0, paid_retry: 0, attempts: 0, approved: 0, refunded: 0, first_declined: 0, recovered: 0, fraud: 0, vamp_events: 0 });
 
 // Условие «момент column попал в местные сутки периода» — в часовом поясе провайдера строки (alias — алиас таблицы).
 // node:sqlite не принимает лишние именованные параметры — условия есть для всех провайдеров, параметры используются все.
@@ -202,6 +206,8 @@ function aggregate(db: Db, o: RangeOptions, key: string): Map<string | number | 
               SUM(t.approved) AS approved,
               SUM(CASE WHEN ${firstDeclined} THEN 1 ELSE 0 END) AS first_declined,
               SUM(CASE WHEN ${firstDeclined} AND ${paid} THEN 1 ELSE 0 END) AS recovered,
+              SUM(CASE WHEN ${paid} AND t.fraud_flagged = 1 THEN 1 ELSE 0 END) AS fraud,
+              SUM(t.vamp_events) AS vamp_events,
               MAX(t.trial_ended_at - t.trial_started_at) AS max_len
        FROM trials t WHERE ${filter.sql} GROUP BY key`,
     )
@@ -229,6 +235,8 @@ function withRates<T extends Counts & { final_first: boolean; final_retry: boole
     decline_rate: rate(c.attempts - c.approved, c.attempts),
     refund_rate: rate(c.refunded, c.paid_retry),
     recovery_rate: rate(c.recovered, c.first_declined),
+    fraud_rate: rate(c.fraud, c.paid_retry),
+    vamp_per_100: c.started === 0 ? null : (c.vamp_events * 100) / c.started,
   };
 }
 
@@ -346,6 +354,8 @@ const add = (a: Counts, b: Counts): Counts => ({
   refunded: a.refunded + b.refunded,
   first_declined: a.first_declined + b.first_declined,
   recovered: a.recovered + b.recovered,
+  fraud: a.fraud + b.fraud,
+  vamp_events: a.vamp_events + b.vamp_events,
 });
 
 // Неделя — ISO (с понедельника), месяц — календарный; края, обрезанные периодом, подписаны его днями

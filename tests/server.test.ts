@@ -178,7 +178,7 @@ describe('server', () => {
       store.upsertPayment({ provider: 'stripe', payment_id: `ch_${i}`, account: 'org', mid: 'org', paid_at: at, amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa', bank: null });
     }
     const report = { provider: 'stripe' as const, account: 'org', mid: 'org', reported_at: at, payment_id: 'ch_1', charged_at: at, network: 'visa', country: 'US',
-      payment_method: 'card', customer_id: null, risk_score: 70, reason: null, case_type: null, rdr: false, lost_usd_cents: 0 };
+      payment_method: 'card', customer_id: null, risk_score: 70, reason: null, case_type: null, rdr: false, lost_usd_cents: 0, amount_usd_cents: null, refunded: false };
     store.upsertVampReport({ ...report, report_id: 'issfr_1', kind: 'fraud' });
     store.upsertVampReport({ ...report, report_id: 'du_1', kind: 'dispute', case_type: 'chargeback' });
     const server = createApp({ store, config, sources: [] }).listen(0);
@@ -199,6 +199,14 @@ describe('server', () => {
     expect((await get('view=mid')).breakdown.map((r: { value: string; status: string }) => [r.value, r.status])).toEqual([['stripe:org', null]]);
     expect((await get(`merchant=${encodeURIComponent('TOGGLE (10000290)')}`)).month.status).toBe('at_risk');
     expect((await get('view=risk')).breakdown.map((r: { value: string }) => r.value)).toEqual(['50–74']);
+    // после фрод-репорта: по ch_1 пришёл и чарджбэк — сумма из платежа
+    const after = await get('view=outcome');
+    expect(after.outcomes.map((r: { outcome: string; count: number; amount: number }) => [r.outcome, r.count, r.amount])).toEqual([
+      ['chargeback', 1, 999], ['rdr', 0, 0], ['refunded', 0, 0], ['no_action', 0, 0],
+    ]);
+    const csvOf = async (outcome: string) =>
+      (await (await fetch(`${url}/api/export?mode=vamp&view=outcome&reason=${outcome}&${period}`, { headers: auth })).text()).trim().split('\r\n');
+    expect([(await csvOf('chargeback')).length, (await csvOf('no_action')).length]).toEqual([2, 1]); // заголовок и строки
 
     const values = await (await fetch(`${url}/api/values?mode=vamp&dimension=country&${period}`, { headers: auth })).json();
     expect(values.values).toEqual([{ value: 'US', count: 2 }]);

@@ -89,6 +89,8 @@ export interface VampReportRow {
   case_type: string | null; // у диспута: chargeback | inquiry
   rdr: boolean; // диспут закрыт через Visa RDR — в VAMP не считается
   lost_usd_cents: number; // сколько списано по RDR-диспуту
+  amount_usd_cents: number | null; // сумма списания в долларах, если известна (у платежей дашборда — из payments)
+  refunded: boolean; // по списанию вернули деньги (на момент загрузки; рефанды потом дописываются)
 }
 
 export interface LatestRun {
@@ -163,6 +165,11 @@ export function openStore(file: string) {
   }
   if (!columns.has('mid')) db.exec(`UPDATE trials SET mid = account WHERE provider = 'stripe'`);
   if (!columns.has('canceled_at')) db.exec('ALTER TABLE trials ADD COLUMN canceled_at INTEGER');
+  // Фрод по клиенту триала — пересчитывается после загрузки событий VAMP (src/vamp.ts → refreshTrialFraud):
+  // был ли фрод-репорт или чарджбэк (любая сеть) и сколько событий клиент добавил в Visa VAMP
+  for (const column of ['fraud_flagged', 'vamp_events']) {
+    if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+  }
   // Итоги попыток прямо в строке триала: метрики считаются одним проходом по trials, без соединения с attempts
   const withoutAttemptTotals = !columns.has('attempts');
   for (const column of ['attempts', 'approved', 'refunded']) {
@@ -226,6 +233,14 @@ export function openStore(file: string) {
       PRIMARY KEY (provider, report_id)
     );
     CREATE INDEX IF NOT EXISTS vamp_reports_reported_idx ON vamp_reports (reported_at);
+  `);
+  const vampTableColumns = new Set((db.prepare('PRAGMA table_info(vamp_reports)').all() as { name: string }[]).map((c) => c.name));
+  if (!vampTableColumns.has('amount_usd_cents')) db.exec('ALTER TABLE vamp_reports ADD COLUMN amount_usd_cents INTEGER');
+  if (!vampTableColumns.has('refunded')) db.exec('ALTER TABLE vamp_reports ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS vamp_reports_customer_idx ON vamp_reports (provider, customer_id) WHERE customer_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS vamp_reports_payment_idx ON vamp_reports (provider, payment_id);
+    CREATE INDEX IF NOT EXISTS trials_customer_idx ON trials (provider, customer_id) WHERE customer_id IS NOT NULL;
   `);
   // Платежи eSIM — в той же таблице (product = 'esim'), вместе с отклонёнными списаниями (approved = 0);
   // у VPN в payments только успешные списания
@@ -343,11 +358,12 @@ export function openStore(file: string) {
       order_type = excluded.order_type
   `);
   const vampColumns = ['provider', 'report_id', 'account', 'mid', 'kind', 'reported_at', 'payment_id', 'charged_at', 'network', 'country',
-    'payment_method', 'customer_id', 'risk_score', 'reason', 'case_type', 'rdr', 'lost_usd_cents'];
+    'payment_method', 'customer_id', 'risk_score', 'reason', 'case_type', 'rdr', 'lost_usd_cents', 'amount_usd_cents', 'refunded'];
+  // перевыгрузка обновляет всё, кроме рефанда — он только появляется
   const upsertVampStmt = db.prepare(`
     INSERT INTO vamp_reports (${vampColumns.join(', ')}) VALUES (${vampColumns.map((c) => `@${c}`).join(', ')})
     ON CONFLICT (provider, report_id) DO UPDATE SET
-      ${vampColumns.slice(2).map((c) => `${c} = excluded.${c}`).join(',\n      ')}
+      ${vampColumns.slice(2).map((c) => (c === 'refunded' ? 'refunded = MAX(excluded.refunded, vamp_reports.refunded)' : `${c} = excluded.${c}`)).join(',\n      ')}
   `);
   const setCancellationStmt = db.prepare('UPDATE trials SET canceled_at = ?, cancel_reason = ? WHERE provider = ? AND subscription_id = ?');
   const setCustomerIdStmt = db.prepare('UPDATE trials SET customer_id = ? WHERE provider = ? AND subscription_id = ? AND customer_id IS NULL');
@@ -426,7 +442,23 @@ export function openStore(file: string) {
     },
 
     upsertVampReport(r: VampReportRow): void {
-      upsertVampStmt.run({ ...r, rdr: Number(r.rdr) });
+      upsertVampStmt.run({ ...r, rdr: Number(r.rdr), refunded: Number(r.refunded) });
+    },
+
+    // Рефанд, пришедший позже фрод-репорта (Stripe refunds, Solidgate — заказ с возвратом)
+    markVampRefunded(provider: Provider, paymentId: string): void {
+      db.prepare('UPDATE vamp_reports SET refunded = 1 WHERE provider = ? AND payment_id = ?').run(provider, paymentId);
+    },
+
+    // Клиент триала по списанию его первого платежа — у фрод-алертов Solidgate клиента нет
+    customerByAttempt(provider: Provider, attemptId: string): string | null {
+      const row = db
+        .prepare(
+          `SELECT t.customer_id FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
+           WHERE a.provider = ? AND a.attempt_id = ?`,
+        )
+        .get(provider, attemptId) as { customer_id: string | null } | undefined;
+      return row?.customer_id ?? null;
     },
 
     upsertEsimCharge(c: EsimChargeRow): void {

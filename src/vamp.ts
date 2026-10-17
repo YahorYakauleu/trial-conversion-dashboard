@@ -237,23 +237,70 @@ export function getVampDaily(db: Db, o: VampOptions, t: VampRules, month: string
 }
 
 // События Visa за период — для выгрузки списком; counted — входит ли в VAMP count
-export function listVampReports(db: Db, o: VampOptions, t: VampRules, limit: number) {
+// outcome — только фрод-репорты с этим исходом (строка вкладки After report)
+export function listVampReports(db: Db, o: VampOptions, t: VampRules, limit: number, outcome: Outcome | null = null) {
   const { report } = sqlOf(t);
   const period = periodSql('v', 'v.reported_at', { ...o, timeZones: UTC });
   const filters = dimensionFilterSql(report, o.filters);
-  const where = [period.sql, "(@provider = 'all' OR v.provider = @provider)", `${NETWORK} = 'visa'`, ...filters.clauses];
+  const byOutcome = outcome ? [FRAUD, `${OUTCOME_SQL} = @outcome`] : [];
+  const where = [period.sql, "(@provider = 'all' OR v.provider = @provider)", `${NETWORK} = 'visa'`, ...filters.clauses, ...byOutcome];
   return db
     .prepare(
-      `SELECT v.provider, v.account, ${report.merchant} AS merchant, ${REPORT_SQL.mid} AS mid, v.kind, v.report_id, v.reported_at, v.payment_id,
+      `SELECT v.provider, v.account, ${report.merchant} AS merchant, ${REPORT_SQL.mid} AS mid, v.kind,
+              CASE WHEN v.kind = 'fraud' THEN ${OUTCOME_SQL} END AS outcome, ${AMOUNT} AS amount_usd_cents, v.report_id, v.reported_at, v.payment_id,
               COALESCE(v.charged_at, p.paid_at) AS charged_at, ${REPORT_SQL.country} AS country, ${REPORT_SQL.payment_method} AS payment_method,
               v.risk_score, ${REPORT_SQL.charge_type} AS charge_type, v.reason, v.case_type, v.rdr, v.lost_usd_cents, v.customer_id,
               CASE WHEN ${COUNTED} THEN 1 ELSE 0 END AS counted
        FROM ${REPORTS} WHERE ${where.join(' AND ')}
        ORDER BY v.reported_at, v.report_id LIMIT ${limit}`,
     )
-    .all({ ...period.params, ...filters.params, provider: o.provider }) as unknown as {
-    provider: string; account: string; merchant: string | null; mid: string | null; kind: 'fraud' | 'dispute'; report_id: string; reported_at: number; payment_id: string | null;
+    .all({ ...period.params, ...filters.params, provider: o.provider, ...(outcome ? { outcome } : {}) }) as unknown as {
+    provider: string; account: string; merchant: string | null; mid: string | null; outcome: Outcome | null; amount_usd_cents: number | null; kind: 'fraud' | 'dispute'; report_id: string; reported_at: number; payment_id: string | null;
     charged_at: number | null; country: string | null; payment_method: string | null; risk_score: number | null; charge_type: string;
     reason: string | null; case_type: string | null; rdr: number; lost_usd_cents: number; customer_id: string | null; counted: number;
   }[];
+}
+
+// --- Фрод по когортам триалов: в строку триала — был ли по его клиенту фрод-репорт или чарджбэк (любая сеть,
+// включая RDR; запросы документов — нет) и сколько событий клиент добавил в Visa VAMP. Только события после оформления.
+// Пересчёт после каждой загрузки событий — для триалов, у клиентов которых они есть
+export function refreshTrialFraud(db: Db, provider: 'stripe' | 'solidgate'): void {
+  const events = `FROM ${REPORTS} WHERE v.provider = trials.provider AND v.customer_id = trials.customer_id AND v.reported_at >= trials.trial_started_at`;
+  db.prepare(
+    `UPDATE trials SET
+       fraud_flagged = (SELECT COUNT(*) > 0 ${events} AND (v.kind = 'fraud' OR v.case_type = 'chargeback')),
+       vamp_events = (SELECT COUNT(*) ${events} AND ${COUNTED})
+     WHERE provider = @provider AND customer_id IN (SELECT customer_id FROM vamp_reports WHERE provider = @provider AND customer_id IS NOT NULL)`,
+  ).run({ provider });
+}
+
+// --- Что стало со списанием после фрод-репорта Visa: чарджбэк, RDR, вернули деньги или ничего.
+// Сумма — из платежа дашборда, иначе из самого списания (если оно в долларах)
+const OUTCOME_SQL = `CASE
+  WHEN EXISTS (SELECT 1 FROM vamp_reports d WHERE d.provider = v.provider AND d.payment_id = v.payment_id AND d.kind = 'dispute'
+               AND d.case_type = 'chargeback' AND d.rdr = 0) THEN 'chargeback'
+  WHEN EXISTS (SELECT 1 FROM vamp_reports d WHERE d.provider = v.provider AND d.payment_id = v.payment_id AND d.kind = 'dispute' AND d.rdr = 1) THEN 'rdr'
+  WHEN COALESCE(p.refunded_usd_cents, 0) > 0 OR v.refunded = 1 THEN 'refunded'
+  ELSE 'no_action' END`;
+const AMOUNT = 'COALESCE(p.amount_usd_cents, v.amount_usd_cents)';
+export const OUTCOMES = ['chargeback', 'rdr', 'refunded', 'no_action'] as const;
+export type Outcome = (typeof OUTCOMES)[number];
+
+export function getVampOutcomes(db: Db, o: VampOptions, t: VampRules) {
+  const period = periodSql('v', 'v.reported_at', { ...o, timeZones: UTC });
+  const filters = dimensionFilterSql(sqlOf(t).report, o.filters);
+  const rows = db
+    .prepare(
+      `SELECT ${OUTCOME_SQL} AS outcome, COUNT(*) AS count, COALESCE(SUM(${AMOUNT}), 0) AS amount,
+              SUM(CASE WHEN ${AMOUNT} IS NULL THEN 1 ELSE 0 END) AS unknown_amount
+       FROM ${REPORTS}
+       WHERE ${[period.sql, "(@provider = 'all' OR v.provider = @provider)", FRAUD, ...filters.clauses].join(' AND ')}
+       GROUP BY outcome`,
+    )
+    .all({ ...period.params, ...filters.params, provider: o.provider }) as unknown as { outcome: Outcome; count: number; amount: number; unknown_amount: number }[];
+  const total = rows.reduce((sum, r) => sum + r.count, 0);
+  return OUTCOMES.map((outcome) => {
+    const r = rows.find((x) => x.outcome === outcome) ?? { count: 0, amount: 0, unknown_amount: 0 };
+    return { outcome, count: r.count, share: total === 0 ? null : r.count / total, amount: r.amount, unknown_amount: r.unknown_amount };
+  });
 }

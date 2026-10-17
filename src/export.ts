@@ -4,7 +4,7 @@ import { declineCodes, declineLabel } from './declines.js';
 import { cohortCte, ordersCte, type EsimOptions } from './esim.js';
 import { DAY, trialFilter, type RangeOptions } from './metrics.js';
 import { paymentFilter, type TurnoverOptions } from './turnover.js';
-import { listVampReports, type VampOptions, type VampRules } from './vamp.js';
+import { listVampReports, type Outcome, type VampOptions, type VampRules } from './vamp.js';
 
 // Выгрузка списком: записи, из которых посчитана цифра на экране, — с их ID в Stripe и Solidgate,
 // чтобы точечно посмотреть детали в кабинете провайдера. Для Stripe — ещё и ссылки на объект в дашборде Stripe.
@@ -61,7 +61,7 @@ export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string
       'provider', 'account', 'subscription_id', 'customer_id', 'first_invoice_id', 'trial_started_utc', 'trial_ended_utc',
       'paid_within_30_days', 'paid_utc', 'paid_on_first_attempt', 'attempts', 'declines', 'refunded',
       'mid', 'card_country', 'payment_method', 'card_brand', 'issuing_bank',
-      'canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code', 'subscription_link', 'customer_link',
+      'canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code', 'fraud_reported', 'vamp_events', 'subscription_link', 'customer_link',
     ],
     rows: rows.map((t) => {
       const [provider, account] = [String(t.provider), String(t.account)];
@@ -76,6 +76,7 @@ export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string
         yesNo(paid), utc(t.paid_at as number | null), yesNo(t.first_attempt_succeeded), text(t.attempts), Number(t.attempts) - Number(t.approved), yesNo(t.refunded),
         text(t.mid), text(t.country), text(t.payment_method), text(t.card_brand), text(t.bank),
         utc(canceledAt), cancelDay, when, canceledAt === null ? '' : cancelLabel(t.cancel_reason as string | null), text(t.cancel_reason),
+        yesNo(t.fraud_flagged), Number(t.vamp_events),
         stripeLink(provider, account, 'subscriptions', t.subscription_id as string), stripeLink(provider, account, 'customers', t.customer_id as string | null),
       ];
     }),
@@ -135,17 +136,19 @@ export function exportPayments(db: Db, o: TurnoverOptions): ExportTable {
 }
 
 // Visa VAMP: фрод-репорты и диспуты Visa; counted_in_vamp — входит ли в VAMP count (RDR и запросы документов — нет)
-export function exportVampReports(db: Db, o: VampOptions, rules: VampRules): ExportTable {
-  const { rows, truncated } = limited(listVampReports(db, o, rules, EXPORT_LIMIT + 1));
+export function exportVampReports(db: Db, o: VampOptions, rules: VampRules, outcome: Outcome | null = null): ExportTable {
+  const { rows, truncated } = limited(listVampReports(db, o, rules, EXPORT_LIMIT + 1, outcome));
   const event = (r: (typeof rows)[number]) =>
     r.kind === 'fraud' ? 'fraud report (TC40)' : r.case_type !== 'chargeback' ? (r.case_type ?? 'dispute') : r.rdr ? 'chargeback, RDR' : 'chargeback (TC15)';
   return {
     columns: [
-      'provider', 'account', 'visa_merchant', 'mid', 'event', 'counted_in_vamp', 'report_id', 'reported_utc', 'payment_id', 'charged_utc', 'charge',
+      'provider', 'account', 'visa_merchant', 'mid', 'event', 'counted_in_vamp', 'after_report', 'report_id', 'reported_utc', 'payment_id', 'charged_utc',
+      'amount_usd', 'charge',
       'card_country', 'payment_method', 'radar_risk_score', 'reason', 'rdr_lost_usd', 'customer_id', 'payment_link', 'customer_link',
     ],
     rows: rows.map((r) => [
-      r.provider, r.account, text(r.merchant), text(r.mid), event(r), yesNo(r.counted), r.report_id, utc(r.reported_at), text(r.payment_id), utc(r.charged_at),
+      r.provider, r.account, text(r.merchant), text(r.mid), event(r), yesNo(r.counted), text(r.outcome), r.report_id, utc(r.reported_at), text(r.payment_id), utc(r.charged_at),
+      dollars(r.amount_usd_cents),
       r.charge_type === 'first_payment' ? 'first payment after trial' : 'renewal or other', text(r.country), text(r.payment_method), text(r.risk_score),
       text(r.reason), r.rdr ? dollars(r.lost_usd_cents) : '', text(r.customer_id),
       stripeLink(r.provider, r.account, 'payments', r.payment_id), stripeLink(r.provider, r.account, 'customers', r.customer_id),

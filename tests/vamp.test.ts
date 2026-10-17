@@ -4,7 +4,8 @@ import { exportVampReports } from '../src/export.js';
 import { DAY } from '../src/metrics.js';
 import { syncSolidgateVamp, vampFromChargebacks, vampFromFraudAlert } from '../src/providers/solidgate.js';
 import { syncStripeVamp, vampFromDispute, vampFromFraudWarning, type StripeLike } from '../src/providers/stripe.js';
-import { getVampBreakdown, getVampDaily, getVampMonth, getVampSeries, vampStatus } from '../src/vamp.js';
+import { getMetrics } from '../src/metrics.js';
+import { getVampBreakdown, getVampDaily, getVampMonth, getVampOutcomes, getVampSeries, refreshTrialFraud, vampStatus } from '../src/vamp.js';
 
 // «Сейчас» — 17 октября 12:00 UTC: сентябрь закрыт, октябрь идёт (прошло 16,5 из 31 дня)
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -17,7 +18,7 @@ function report(id: string, patch: Partial<VampReportRow>): VampReportRow {
   return {
     provider: 'stripe', report_id: id, account: 'corp', mid: 'corp', kind: 'fraud', reported_at: ts('2026-09-10T12:00:00Z'),
     payment_id: null, charged_at: null, network: 'visa', country: 'US', payment_method: 'apple_pay', customer_id: null,
-    risk_score: null, reason: null, case_type: null, rdr: false, lost_usd_cents: 0, ...patch,
+    risk_score: null, reason: null, case_type: null, rdr: false, lost_usd_cents: 0, amount_usd_cents: null, refunded: false, ...patch,
   };
 }
 
@@ -141,7 +142,7 @@ describe('Visa VAMP', () => {
 
 describe('события VAMP у провайдеров', () => {
   const charge = {
-    id: 'ch_1', created: 100, customer: 'cus_1', outcome: { risk_score: 67 },
+    id: 'ch_1', created: 100, customer: 'cus_1', outcome: { risk_score: 67 }, amount: 999, currency: 'usd', amount_refunded: 999,
     payment_method_details: { type: 'card', card: { brand: 'visa', network: 'visa', country: 'MX', wallet: { type: 'apple_pay' } } },
   };
 
@@ -149,7 +150,7 @@ describe('события VAMP у провайдеров', () => {
     const efw = { id: 'issfr_1', created: 200, fraud_type: 'unauthorized_use_of_card', charge };
     expect(vampFromFraudWarning(efw as never, 'corp')).toMatchObject({
       report_id: 'issfr_1', kind: 'fraud', reported_at: 200, payment_id: 'ch_1', charged_at: 100, network: 'visa', country: 'MX',
-      payment_method: 'apple_pay', customer_id: 'cus_1', risk_score: 67, reason: 'unauthorized_use_of_card', mid: 'corp',
+      payment_method: 'apple_pay', customer_id: 'cus_1', risk_score: 67, reason: 'unauthorized_use_of_card', mid: 'corp', amount_usd_cents: 999, refunded: true,
     });
   });
 
@@ -218,7 +219,13 @@ describe('события VAMP у провайдеров', () => {
       yield { order_id: 'ord_2', chargebacks: [{ id: '9', created_at: '2026-07-06 10:00:00', type: '1st_chb', reason_code: '10.4' }] };
     };
     const acc = { account: 'sgH2H', publicKey: 'pk', secretKey: 'sk' };
+    // ord_1 — первый платёж триала клиента acc-1: клиент алерта берётся у триала
+    store.upsertTrial({ provider: 'solidgate', account: 'sgH2H', subscription_id: 'sg_1', trial_started_at: from, trial_ended_at: from + 7 * DAY, first_invoice_id: null,
+      first_attempt_succeeded: true, paid_at: from + 7 * DAY, country: null, payment_method: null, card_brand: null, bank: null, customer_id: 'acc-1' });
+    store.upsertAttempt({ provider: 'solidgate', attempt_id: 'ord_1', subscription_id: 'sg_1', attempted_at: from + 7 * DAY, approved: true, reason: null, refunded: false });
     await syncSolidgateVamp(store, acc, from, from + 45 * DAY, alerts as never, chargebacks as never);
+    expect(store.db.prepare("SELECT customer_id FROM vamp_reports WHERE report_id = 'fa_1'").get()).toEqual({ customer_id: 'acc-1' });
+    expect(store.db.prepare("SELECT fraud_flagged, vamp_events FROM trials WHERE subscription_id = 'sg_1'").get()).toEqual({ fraud_flagged: 1, vamp_events: 1 });
     expect(windows).toEqual([[from, from + 30 * DAY], [from + 30 * DAY, from + 45 * DAY]]);
     expect(store.db.prepare('SELECT report_id, kind, network FROM vamp_reports ORDER BY report_id').all()).toEqual([
       { report_id: 'cb_9', kind: 'dispute', network: 'visa' },
@@ -227,5 +234,74 @@ describe('события VAMP у провайдеров', () => {
     windows.length = 0;
     await syncSolidgateVamp(store, acc, from, from + 46 * DAY, alerts as never, chargebacks as never);
     expect(windows).toEqual([[from + 44 * DAY, from + 46 * DAY]]);
+  });
+});
+
+describe('фрод по когортам и что стало после фрод-репорта', () => {
+  const trialAt = ts('2026-09-01T12:00:00Z');
+  function storeWithTrials() {
+    const store = openStore(':memory:');
+    const trial = (id: string, customer: string, paid: boolean) =>
+      store.upsertTrial({
+        provider: 'stripe', account: 'corp', subscription_id: id, trial_started_at: trialAt, trial_ended_at: trialAt + 7 * DAY, first_invoice_id: null,
+        first_attempt_succeeded: paid, paid_at: paid ? trialAt + 7 * DAY : null, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, customer_id: customer,
+      });
+    trial('sub_a', 'cus_a', true); // фрод-репорт Visa и чарджбэк — оба в VAMP
+    trial('sub_b', 'cus_b', true); // фрод-репорт Mastercard — фрод, но не VAMP
+    trial('sub_c', 'cus_c', true); // чисто
+    trial('sub_d', 'cus_d', false); // не оплатил
+    const charge = (id: string, refunded = 0) =>
+      store.upsertPayment({ provider: 'stripe', payment_id: id, account: 'corp', mid: 'corp', paid_at: trialAt + 7 * DAY, amount_usd_cents: 1000, refunded_usd_cents: refunded, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null });
+    charge('ch_a');
+    charge('ch_r', 1000);
+    const at = trialAt + 20 * DAY;
+    store.upsertVampReport(report('issfr_a', { customer_id: 'cus_a', payment_id: 'ch_a', reported_at: at }));
+    store.upsertVampReport(report('du_a', { kind: 'dispute', case_type: 'chargeback', customer_id: 'cus_a', payment_id: 'ch_a', reported_at: at + DAY }));
+    store.upsertVampReport(report('issfr_b', { network: 'mastercard', customer_id: 'cus_b', reported_at: at }));
+    // событие до оформления триала — не его
+    store.upsertVampReport(report('issfr_old', { customer_id: 'cus_c', reported_at: trialAt - DAY }));
+    // исходы фрод-репортов: RDR, рефанд по платежу, рефанд по самому списанию, ничего
+    store.upsertVampReport(report('issfr_rdr', { payment_id: 'ch_rdr', reported_at: at }));
+    store.upsertVampReport(report('du_rdr', { kind: 'dispute', case_type: 'chargeback', rdr: true, payment_id: 'ch_rdr', reported_at: at }));
+    store.upsertVampReport(report('issfr_r', { payment_id: 'ch_r', reported_at: at }));
+    store.upsertVampReport(report('issfr_r2', { payment_id: 'ch_r2', reported_at: at, refunded: true, amount_usd_cents: 500 }));
+    store.upsertVampReport(report('issfr_open', { payment_id: 'ch_open', reported_at: at, amount_usd_cents: 700 }));
+    store.upsertVampReport(report('issfr_open2', { payment_id: 'ch_open2', reported_at: at }));
+    refreshTrialFraud(store.db, 'stripe');
+    return store;
+  }
+
+  it('в строке триала: был ли фрод (любая сеть) и сколько событий VAMP; в конверсии — fraud rate и VAMP на 100 триалов', () => {
+    const store = storeWithTrials();
+    const rows = store.db.prepare('SELECT subscription_id, fraud_flagged, vamp_events FROM trials ORDER BY subscription_id').all();
+    expect(rows).toEqual([
+      { subscription_id: 'sub_a', fraud_flagged: 1, vamp_events: 2 },
+      { subscription_id: 'sub_b', fraud_flagged: 1, vamp_events: 0 },
+      { subscription_id: 'sub_c', fraud_flagged: 0, vamp_events: 0 },
+      { subscription_id: 'sub_d', fraud_flagged: 0, vamp_events: 0 },
+    ]);
+    const metrics = getMetrics(store.db, { ...base, granularity: 'day', from: '2026-09-01', to: '2026-09-01', timeZones: { stripe: 'UTC', solidgate: 'UTC' }, retryWindowDays: 30 });
+    expect(metrics.totals).toMatchObject({ started: 4, paid_retry: 3, fraud: 2, fraud_rate: 2 / 3, vamp_events: 2, vamp_per_100: 50 });
+  });
+
+  it('после фрод-репорта: чарджбэк, RDR, вернули деньги (по платежу или по самому списанию), ничего — с суммами', () => {
+    const outcomes = getVampOutcomes(storeWithTrials().db, { ...base, from: '2026-09-01', to: '2026-09-30' }, t);
+    expect(outcomes.map((r) => [r.outcome, r.count, r.amount, r.unknown_amount])).toEqual([
+      ['chargeback', 1, 1000, 0],
+      ['rdr', 1, 0, 1],
+      ['refunded', 2, 1500, 0],
+      ['no_action', 2, 700, 1],
+    ]);
+    // в выгрузке — исход у каждого фрод-репорта; по строке вкладки — только он
+    const open = exportVampReports(storeWithTrials().db, { ...base, from: '2026-09-01', to: '2026-09-30' }, t, 'no_action');
+    expect(open.rows.map((r) => r[open.columns.indexOf('report_id')])).toEqual(['issfr_open', 'issfr_open2']);
+    expect(open.rows[0][open.columns.indexOf('amount_usd')]).toBe('7.00');
+  });
+
+  it('рефанд, пришедший позже, отмечается у фрод-репорта', () => {
+    const store = storeWithTrials();
+    store.markVampRefunded('stripe', 'ch_open');
+    const outcomes = getVampOutcomes(store.db, { ...base, from: '2026-09-01', to: '2026-09-30' }, t);
+    expect(outcomes.find((r) => r.outcome === 'no_action')!.count).toBe(1);
   });
 });

@@ -54,7 +54,7 @@ const MODES = {
     api: '/api/vamp',
     charts: 'vamp-charts',
     dimensions: ['merchant', 'mid', 'country', 'payment_method'],
-    tabs: [['time', 'Trend'], ['merchant', 'Merchants'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['risk', 'Radar risk'], ['charge_type', 'Charge type']],
+    tabs: [['time', 'Trend'], ['merchant', 'Merchants'], ['outcome', 'After report'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['risk', 'Radar risk'], ['charge_type', 'Charge type']],
     hints: {
       time: "A report counts in the month it reached Stripe or Solidgate (UTC); Visa dates it by when the bank reported it, so around month boundaries counts can differ by 10–15%. Visa's official figures come next month: Stripe → VAMP → Visa data",
     },
@@ -120,6 +120,7 @@ const TAB_TIPS = {
   cancel_reason: 'Почему отменили подписку',
   risk: 'Radar risk score списания — только у Stripe',
   merchant: 'Мерчант Visa: аккаунты Stripe одного бизнеса Visa считает вместе — пороги у мерчанта целиком',
+  outcome: 'Что стало со списанием после фрод-репорта: чарджбэк, RDR, вернули деньги или ничего',
   charge_type: 'Первый платёж после триала или продление',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
@@ -436,6 +437,7 @@ function renderKpis(t, range) {
     ['Approval rate', pct(t.approval_rate), `${num(t.approved)} of ${num(t.attempts)} attempts`, 'Доля успешных попыток списания первого платежа'],
     ['Decline rate', pct(t.decline_rate), `${num(t.attempts - t.approved)} declines`, 'Доля отклонённых попыток списания первого платежа'],
     ['Refund rate', pct(t.refund_rate), `${num(t.refunded)} of ${num(t.paid_retry)} paid`, 'Доля оплативших, кому вернули деньги'],
+    ['Fraud rate', pct(t.fraud_rate), `${num(t.fraud)} of ${num(t.paid_retry)} paid · ${decimal(t.vamp_per_100)} VAMP / 100 trials`, 'Доля оплативших, по чьим списаниям потом пришёл фрод-репорт или чарджбэк (любая сеть). У свежих когорт растёт: банки сообщают о фроде неделями'],
   ]);
 }
 
@@ -602,6 +604,21 @@ const CONVERSION_COLUMNS = [
     sort: (p) => p.refund_rate,
     cell: (p) => pendingCell(pct(p.refund_rate), p.final_retry, `${num(p.refunded)} of ${num(p.paid_retry)} paid`),
   },
+  // Фрод по когорте: репорты и чарджбэки приходят неделями и месяцами — у свежих когорт цифры ещё растут
+  {
+    key: 'fraud_rate',
+    title: 'Fraud rate',
+    tip: 'Доля оплативших, по чьим списаниям потом пришёл фрод-репорт или чарджбэк. У свежих когорт растёт',
+    sort: (p) => p.fraud_rate,
+    cell: (p) => rateCell(p.fraud_rate, p.fraud, true, `${num(p.fraud)} of ${num(p.paid_retry)} paid`),
+  },
+  {
+    key: 'vamp_per_100',
+    title: 'VAMP / 100 trials',
+    tip: 'Событий Visa VAMP (фрод-репорты и чарджбэки без RDR) на 100 оформленных триалов — вклад этого трафика в VAMP count',
+    sort: (p) => p.vamp_per_100,
+    cell: (p) => `<td title="${num(p.vamp_events)} VAMP events">${decimal(p.vamp_per_100)}</td>`,
+  },
 ];
 const TURNOVER_COLUMNS = [
   { key: 'gross', title: 'Gross volume', tip: 'Сумма успешных списаний', sort: (p) => p.gross, cell: (p) => `<td>${usd(p.gross)}</td>` },
@@ -684,6 +701,27 @@ const VAMP_COLUMNS = [
   { key: 'visa_sales', title: 'Visa sales', tip: 'Успешные Visa-списания', sort: (p) => p.visa_sales, cell: (p) => `<td>${hasSales() ? num(p.visa_sales) : '—'}</td>` },
   { key: 'rdr', title: 'RDR', tip: 'Visa-диспуты, закрытые через RDR, — в VAMP не идут', sort: (p) => p.rdr, cell: (p) => `<td title="${usd(p.rdr_lost)} lost">${num(p.rdr)}</td>` },
 ];
+// После фрод-репорта: что стало со списанием
+const OUTCOME_NAMES = { chargeback: 'Became a chargeback', rdr: 'Resolved by RDR', refunded: 'Refunded', no_action: 'No action' };
+const OUTCOME_TIPS = {
+  chargeback: 'Банк всё равно открыл чарджбэк: в VAMP два события вместо одного, плюс сумма и комиссия за диспут',
+  rdr: 'Диспут закрыт через RDR: в VAMP не идёт, но деньги списаны',
+  refunded: 'Деньги вернули — чарджбэка по этому списанию уже не будет',
+  no_action: 'Ни возврата, ни диспута: ещё может стать чарджбэком',
+};
+const OUTCOME_COLUMNS = [
+  { key: 'outcome', title: 'After the fraud report', tip: 'Что стало со списанием после фрод-репорта Visa', text: true, sort: (r) => r.outcome, cell: (r) => `<td data-tip="${esc(OUTCOME_TIPS[r.outcome])}">${OUTCOME_NAMES[r.outcome]}</td>` },
+  { key: 'count', title: 'Fraud reports', tip: 'Фрод-репорты Visa за месяц', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
+  { key: 'share', title: 'Share', tip: 'Доля от всех фрод-репортов месяца', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
+  {
+    key: 'amount',
+    title: 'Amount',
+    tip: 'Сумма этих списаний в долларах',
+    sort: (r) => r.amount,
+    cell: (r) => `<td${r.unknown_amount ? ` title="${num(r.unknown_amount)} charges without a known USD amount"` : ''}>${usd(r.amount)}</td>`,
+  },
+];
+
 const STATUS_COLUMN = { key: 'status', title: 'Status', tip: 'Excessive — оба порога сразу: ratio ≥ 1,5% и count ≥ 1 500', text: true, sort: (p) => p.status, cell: (p) => `<td>${statusBadge(p.status)}</td>` };
 const VAMP_SHARE_COLUMN = { key: 'share', title: 'Share', tip: 'Доля в VAMP count месяца', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
 
@@ -813,17 +851,24 @@ function renderView(data) {
     return;
   }
   if (kind() === 'vamp') {
+    const month = `${monthName(data.month.from)}${data.month.final ? '' : ', to date'}`;
+    if (state.view === 'outcome') {
+      renderTable(OUTCOME_COLUMNS, data.outcomes, { empty: 'No Visa fraud reports for this month' });
+      const open = data.outcomes.find((r) => r.outcome === 'no_action');
+      $('hint').textContent = `${month}. ${open?.count ? `${num(open.count)} fraud reports (${usd(open.amount)}) have neither a refund nor a dispute — they can still become chargebacks` : 'Every fraud report was refunded or disputed'}`;
+      return;
+    }
     if (isTime) {
       const status = data.series.some((p) => p.status) ? [STATUS_COLUMN] : [];
-      const month = { ...periodColumn('Month'), cell: (p) => `<td>${monthLabel(p)}</td>` }; // VAMP — всегда по месяцам
-      renderTable([month, ...status, ...VAMP_COLUMNS], data.series);
+      const monthColumn = { ...periodColumn('Month'), cell: (p) => `<td>${monthLabel(p)}</td>` }; // VAMP — всегда по месяцам
+      renderTable([monthColumn, ...status, ...VAMP_COLUMNS], data.series);
       renderVampChart(data);
     } else {
       // у мерчантов главное — статус (если выборка не сужена фильтрами); у остальных разрезов — доля в count
       const [count, ...rest] = VAMP_COLUMNS;
       const columns = data.breakdown.some((r) => r.status) ? [valueColumn(), STATUS_COLUMN, ...VAMP_COLUMNS] : [valueColumn(), count, VAMP_SHARE_COLUMN, ...rest];
       renderTable(columns, data.breakdown, { link: dimensions().includes(state.view), limit: true, empty: 'No Visa fraud reports or chargebacks for this month' });
-      $('hint').textContent = `${monthName(data.month.from)}${data.month.final ? '' : ', to date'}. Thresholds apply to a whole Visa merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
+      $('hint').textContent = `${month}. Thresholds apply to a whole Visa merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
     }
     return;
   }
@@ -1357,6 +1402,7 @@ async function exportCsv(patch = {}, button = $('export')) {
 function rowPatch(r) {
   if (state.view === 'time') return { period: 'custom', from: r.period, to: r.period_end };
   if (state.view === 'decline_reason' || state.view === 'cancel_reason') return { reason: r.reason };
+  if (state.view === 'outcome') return { reason: r.outcome }; // исход после фрод-репорта
   return { [state.view]: r.value ?? 'none' };
 }
 

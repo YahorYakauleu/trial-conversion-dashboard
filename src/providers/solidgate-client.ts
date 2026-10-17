@@ -78,6 +78,7 @@ export interface SgFraudAlert {
   created_at: string; // когда пришёл в Solidgate
   order_id: string;
   card_scheme?: string | null; // VISA, MASTERCARD…
+  fraud_amount_usd?: number | null; // в центах
   fraud_type?: string | null;
   reason_code_description?: string | null;
 }

@@ -3,6 +3,7 @@ import { toAlpha2 } from '../countries.js';
 import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import type { ToUsd } from '../fx.js';
 import { DAY, dayKey } from '../metrics.js';
+import { refreshTrialFraud } from '../vamp.js';
 import {
   listCardOrders,
   listChargebacks,
@@ -199,7 +200,10 @@ export async function syncSolidgateAccount(
       // MID у подписки один: карту проверяют и все списания проводят через один и тот же MID
       if (order.subscription_id) store.setCardDetails('solidgate', order.subscription_id, { ...orderCardDetails(order), mid: order.mid ?? null });
       if (order.error_code) store.setAttemptReason('solidgate', order.order_id, order.error_code);
-      if ((order.refunded_amount ?? 0) > 0) store.markRefunded('solidgate', order.order_id);
+      if ((order.refunded_amount ?? 0) > 0) {
+        store.markRefunded('solidgate', order.order_id);
+        store.markVampRefunded('solidgate', order.order_id);
+      }
       const payment = await paymentFromOrder(order, acc.account, cfg.toUsd);
       if (payment) store.upsertPayment(payment);
     }
@@ -279,6 +283,7 @@ export function vampFromFraudAlert(alert: SgFraudAlert, account: string): VampRe
     payment_id: alert.order_id, charged_at: null, network: alert.card_scheme ? alert.card_scheme.toLowerCase() : null,
     country: null, payment_method: null, customer_id: null, risk_score: null,
     reason: alert.reason_code_description || alert.fraud_type || null, case_type: null, rdr: false, lost_usd_cents: 0,
+    amount_usd_cents: alert.fraud_amount_usd ?? null, refunded: false,
   };
 }
 
@@ -292,11 +297,15 @@ export function vampFromChargebacks(order: SgChargebackOrder, account: string): 
     case_type: /retrieval|inquiry/i.test(cb.type ?? '') ? 'inquiry' : 'chargeback',
     rdr: /rdr/i.test(cb.type ?? ''),
     lost_usd_cents: 0,
+    amount_usd_cents: null, // сумма и рефанд — из платежа дашборда
+    refunded: false,
   }));
 }
 
-// Первый раз — с HISTORY_FROM, дальше — с прошлого раза с запасом в сутки; окнами по 30 дней
+// Первый раз — с HISTORY_FROM, дальше — с прошлого раза с запасом в сутки; окнами по 30 дней.
+// Версия набора полей: 2 — сумма и клиент у фрод-алерта; загруженное раньше один раз проходится заново
 const VAMP_WINDOW = 30 * DAY;
+const VAMP_VERSION = 2;
 export async function syncSolidgateVamp(
   store: Store,
   acc: SolidgateAccount,
@@ -305,11 +314,17 @@ export async function syncSolidgateVamp(
   alerts = listFraudAlerts,
   chargebacks = listChargebacks,
 ): Promise<void> {
-  const cursor = store.getState('solidgate', acc.account, 'vamp_cursor');
+  const current = (store.getState('solidgate', acc.account, 'vamp_version') ?? 0) >= VAMP_VERSION;
+  const cursor = current ? store.getState('solidgate', acc.account, 'vamp_cursor') : null;
   for (let from = cursor === null ? historyFrom : cursor - DAY; from < now; from += VAMP_WINDOW) {
     const to = Math.min(from + VAMP_WINDOW, now);
-    for await (const alert of alerts(acc, from, to)) store.upsertVampReport(vampFromFraudAlert(alert, acc.account));
+    for await (const alert of alerts(acc, from, to)) {
+      // клиента у алерта нет — берём у триала, если это первый платёж после него
+      store.upsertVampReport({ ...vampFromFraudAlert(alert, acc.account), customer_id: store.customerByAttempt('solidgate', alert.order_id) });
+    }
     for await (const order of chargebacks(acc, from, to)) vampFromChargebacks(order, acc.account).forEach((row) => store.upsertVampReport(row));
   }
+  store.setState('solidgate', acc.account, 'vamp_version', VAMP_VERSION);
   store.setState('solidgate', acc.account, 'vamp_cursor', now);
+  refreshTrialFraud(store.db, 'solidgate');
 }
