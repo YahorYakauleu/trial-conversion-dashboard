@@ -705,7 +705,16 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'No d
       .join('') || `<tr><td colspan="${columns.length + 1}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
   $('show-all').textContent = `Show all (${num(rows.length)})`;
+  fitTable();
 }
+
+// Своя прокрутка у таблицы — только если она не помещается по ширине: иначе шапка прилипает к верху экрана (см. .scroll-x)
+function fitTable() {
+  const wrap = $('thead').closest('.table-wrap');
+  wrap.classList.remove('scroll-x');
+  wrap.classList.toggle('scroll-x', wrap.querySelector('table').offsetWidth > wrap.clientWidth);
+}
+window.addEventListener('resize', fitTable);
 
 function renderView(data) {
   const isTime = state.view === 'time';
