@@ -171,6 +171,34 @@ describe('server', () => {
     expect((await csv.text()).trim().split('\r\n')).toHaveLength(3); // заголовок и два отменённых
   });
 
+  it('/api/retries: итоги, отдача по номеру попытки, по дням и кодам; выгрузка строки', async () => {
+    const store = openStore(':memory:');
+    const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    const end = started + 7 * 86_400;
+    store.upsertTrial({
+      provider: 'stripe', account: 'corp', subscription_id: 's1', trial_started_at: started, trial_ended_at: end, first_invoice_id: 'in_1',
+      first_attempt_succeeded: false, paid_at: end + 3 * 86_400, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null,
+    });
+    store.upsertAttempt({ provider: 'stripe', attempt_id: 'ch_1', subscription_id: 's1', attempted_at: end, approved: false, reason: 'insufficient_funds', refunded: false });
+    store.upsertAttempt({ provider: 'stripe', attempt_id: 'ch_2', subscription_id: 's1', attempted_at: end + 3 * 86_400, approved: true, reason: null, refunded: false });
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const period = 'period=custom&from=2026-09-10&to=2026-09-10';
+    const get = async (q: string) => (await fetch(`${url}/api/retries?${period}&${q}`, { headers: auth })).json();
+
+    const trend = await get('');
+    expect(trend.totals).toMatchObject({ first_declined: 1, retries: 1, recovered: 1, recovery_rate: 1 });
+    expect(trend.curve.map((r: { attempt: number; approved: number }) => [r.attempt, r.approved])).toEqual([[1, 0], [2, 1]]);
+    expect((await get('view=day')).days).toMatchObject([{ day: 3, retries: 1, approved: 1 }]);
+    expect((await get('view=decline_code')).codes).toMatchObject([{ code: 'insufficient_funds', declines: 1, next_approved: 1 }]);
+    expect((await get('view=payment_method')).breakdown).toMatchObject([{ value: 'apple_pay', retries: 1 }]);
+    const csv = await fetch(`${url}/api/export?mode=retries&view=attempt&attempt=2&${period}`, { headers: auth });
+    expect(csv.headers.get('content-disposition')).toContain('vpn-retry-attempts_');
+    expect((await csv.text()).trim().split('\r\n')).toHaveLength(2);
+  });
+
   it('/api/vamp: месяцы, итог месяца по мерчантам, разбивки; значения фильтра и выгрузка', async () => {
     const store = openStore(':memory:');
     const at = Date.parse('2026-09-10T12:00:00Z') / 1000;

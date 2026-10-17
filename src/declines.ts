@@ -72,3 +72,14 @@ export function declineCodes(label: string): { codes: string[]; withoutCode: boo
   if (label === UNKNOWN.label) return { codes: [], withoutCode: true };
   return { codes: GROUPS.find((g) => g.label === label)?.codes ?? [label], withoutCode: false };
 }
+
+// Отказы, после которых повтор бесполезен: банк закрыл или заблокировал карту, отозвал разрешение на списания,
+// Stripe сам блокирует повторы по карте, карта в блок-листе. На сентябрьских когортах после них ~0,4% успешных повторов
+export const NO_RETRY_CODES = [
+  ...GROUPS.find((g) => g.label === 'Do not retry')!.codes,
+  ...GROUPS.find((g) => g.label === 'Lost or stolen card')!.codes,
+  'invalid_account',
+  'incorrect_number',
+  'invalid_number',
+  'blocklist',
+];

@@ -3,6 +3,7 @@ import type { Db } from './db.js';
 import { declineCodes, declineLabel } from './declines.js';
 import { cohortCte, ordersCte, type EsimOptions } from './esim.js';
 import { DAY, trialFilter, type RangeOptions } from './metrics.js';
+import { isNoRetry, listRetryAttempts } from './retries.js';
 import { paymentFilter, type TurnoverOptions } from './turnover.js';
 import { listVampReports, type Outcome, type VampOptions, type VampRules } from './vamp.js';
 
@@ -131,6 +132,23 @@ export function exportPayments(db: Db, o: TurnoverOptions): ExportTable {
         text(p.country), text(p.payment_method), text(p.card_brand), text(p.bank), stripeLink(provider, account, 'payments', p.payment_id as string),
       ];
     }),
+    truncated,
+  };
+}
+
+// Ретраи: попытки списания первого платежа — все или только с этим номером, днём после первой попытки, кодом отказа
+export function exportRetryAttempts(db: Db, o: RangeOptions, only: { attempt?: number; day?: number; code?: string | null }): ExportTable {
+  const { rows, truncated } = limited(listRetryAttempts(db, o, only, EXPORT_LIMIT + 1));
+  return {
+    columns: [
+      'provider', 'account', 'subscription_id', 'customer_id', 'attempt_id', 'attempt_number', 'attempted_utc', 'days_after_first_attempt',
+      'approved', 'decline_code', 'decline_reason', 'no_retry_code', 'after_no_retry_decline', 'payment_link', 'subscription_link',
+    ],
+    rows: rows.map((a) => [
+      a.provider, a.account, a.subscription_id, text(a.customer_id), a.attempt_id, a.n, utc(a.attempted_at), a.day, yesNo(a.approved),
+      a.approved ? '' : text(a.reason), a.approved ? '' : declineLabel(a.reason), a.approved ? '' : yesNo(isNoRetry(a.reason)), yesNo(a.after_no_retry),
+      stripeLink(a.provider, a.account, 'payments', a.attempt_id), stripeLink(a.provider, a.account, 'subscriptions', a.subscription_id),
+    ]),
     truncated,
   };
 }

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createAuth } from './auth.js';
 import { getCancellationBreakdown, getCancellationReasons, getCancellations } from './cancellations.js';
+import { getRetries, getRetryBreakdown, getRetryCodes, getRetryCurve, getRetryDays } from './retries.js';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
 import {
@@ -35,6 +36,7 @@ import {
   exportDeclinedAttempts,
   exportOrders,
   exportPayments,
+  exportRetryAttempts,
   exportTrials,
   exportVampReports,
   toCsv,
@@ -192,6 +194,28 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
+  // Ретраи первого платежа: те же параметры, что у /api/metrics; view=time|attempt|day|decline_code|<измерение>
+  app.get('/api/retries', (req, res) => {
+    const { now, provider, granularity, range, meta } = common(req.query);
+    const view = (['time', 'attempt', 'day', 'decline_code', ...DIMENSIONS] as const).find((v) => v === req.query.view) ?? 'time';
+    const filters: Filters = parseFilters(req.query, DIMENSIONS);
+    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+    const data = cached({ api: 'retries', provider, granularity, range, view, filters }, () => {
+      const dimension = DIMENSIONS.find((d) => d === view);
+      const breakdown = dimension ? getRetryBreakdown(store.db, options, dimension) : null;
+      const trend = view === 'time' || !breakdown ? getRetries(store.db, { ...options, granularity }) : null;
+      return {
+        totals: breakdown?.totals ?? trend!.totals,
+        series: view === 'time' ? trend!.series : [],
+        breakdown: breakdown?.breakdown ?? [],
+        curve: view === 'time' || view === 'attempt' ? getRetryCurve(store.db, options) : [],
+        days: view === 'day' ? getRetryDays(store.db, options) : [],
+        codes: view === 'decline_code' ? getRetryCodes(store.db, options) : [],
+      };
+    });
+    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
+  });
+
   // Visa VAMP: календарные месяцы UTC — период расширяется до начала месяца; view=time|<измерение>|outcome (что стало после фрод-репорта).
   // Карточки, график по дням и разбивки — за последний месяц периода (VAMP считается помесячно)
   const vampScope = (range: { from: string; to: string }) => ({ months: { from: monthStart(range.from), to: range.to }, latest: { from: monthStart(range.to), to: range.to } });
@@ -279,7 +303,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       return { dimension, filters };
     };
     const compute = (): { value: string | null; count: number }[] => {
-      if (mode === 'conversion' || mode === 'cancellations') {
+      if (mode === 'conversion' || mode === 'cancellations' || mode === 'retries') {
         const { dimension, filters } = facet(DIMENSIONS);
         const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
         return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
@@ -329,6 +353,17 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       if (mode === 'cancellations') {
         const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
         return ['vpn-cancelled-trials', exportTrials(store.db, o, { reason: view === 'cancel_reason' ? reason : null })];
+      }
+      if (mode === 'retries') {
+        // строка вкладки: номер попытки, день после первой, код отказа ('none' — без кода)
+        const int = (value: unknown) => (typeof value === 'string' && /^\d{1,3}$/.test(value) ? Number(value) : undefined);
+        const only = {
+          attempt: view === 'attempt' ? int(req.query.attempt) : undefined,
+          day: view === 'day' ? int(req.query.day) : undefined,
+          code: view === 'decline_code' && reason ? (reason === 'none' ? null : reason) : undefined,
+        };
+        const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
+        return ['vpn-retry-attempts', exportRetryAttempts(store.db, o, only)];
       }
       if (mode === 'vamp') {
         // строка разреза — в пределах последнего месяца, как на экране; строка месяца — её даты (period=custom)

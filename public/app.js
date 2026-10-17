@@ -1,5 +1,5 @@
 // Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
-// данные — /api/metrics (конверсия), /api/cancellations (отмены), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
+// данные — /api/metrics (конверсия), /api/cancellations (отмены), /api/retries (ретраи), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
 
 const DAY_MS = 86_400_000;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -43,6 +43,23 @@ const MODES = {
     hints: {
       time: 'Trials by start date: how many were cancelled before the trial ended, and how soon. A cancellation counts when it was requested, even if access lasts until the period end',
       cancel_reason: 'Cancellations during the trial and within 30 days after it. Stripe and Solidgate reasons are grouped — hover a reason for details',
+    },
+  },
+  retries: {
+    product: 'vpn',
+    kind: 'retries',
+    label: 'Retries',
+    tip: 'Повторные попытки списать первый платёж после триала: сколько их, когда и после каких отказов они проходят',
+    title: 'Payment retries',
+    api: '/api/retries',
+    charts: 'retry-charts',
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
+    tabs: [['time', 'Trend'], ['attempt', 'Attempt number'], ['day', 'Days after decline'], ['decline_code', 'Decline codes'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
+    hints: {
+      time: 'Trials by start date whose first payment attempt was declined, and the retries made for them. Retries are scheduled by Stripe Billing and Solidgate, not by our backend',
+      attempt: 'How often each attempt succeeds — where retries stop paying off. Recoveries so far: share of all recoveries made by this attempt or earlier',
+      day: 'Retries by days since the first (declined) attempt — when recoveries still come',
+      decline_code: 'What happened after a decline with this code: was it retried and did the next or any later attempt succeed. «No retry» — the bank or Stripe says retrying will not help',
     },
   },
   vamp: {
@@ -121,6 +138,9 @@ const TAB_TIPS = {
   risk: 'Radar risk score списания — только у Stripe',
   merchant: 'Мерчант Visa: аккаунты Stripe одного бизнеса Visa считает вместе — пороги у мерчанта целиком',
   outcome: 'Что стало со списанием после фрод-репорта: чарджбэк, RDR, вернули деньги или ничего',
+  attempt: 'Отдача от попытки по её номеру',
+  day: 'Повторы по дням после первой попытки',
+  decline_code: 'Что было после отказа с этим кодом',
   charge_type: 'Первый платёж после триала или продление',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
@@ -367,6 +387,7 @@ function render(data) {
   else if (kind() === 'repeat') renderRepeatKpis(data);
   else if (kind() === 'overview') renderOverviewKpis(data);
   else if (kind() === 'cancellations') renderCancelKpis(data);
+  else if (kind() === 'retries') renderRetryKpis(data);
   else if (kind() === 'vamp') renderVampKpis(data);
   else renderKpis(data.totals, data.range);
   renderTabs();
@@ -489,6 +510,17 @@ function renderVampKpis({ month: m, thresholds: t }) {
     ['Fraud reports (TC40)', num(m.fraud), 'Visa early fraud warnings', 'Банк сообщил Visa о мошенничестве по списанию (у Stripe — early fraud warning). Идут в VAMP, даже если деньги вернули'],
     ['Chargebacks (TC15)', num(m.disputes), 'Visa, not resolved by RDR', 'Visa-чарджбэки, не закрытые через RDR. Запросы документов (inquiry) не считаются'],
     ['RDR, excluded', num(m.rdr), `${usd(m.rdr_lost)} lost`, 'Visa-диспуты, закрытые через RDR: в VAMP не идут, но деньги списаны'],
+  ]);
+}
+
+// Ретраи: первый платёж после триала; «≈» — у когорт, где окно ретраев ещё не закрылось
+function renderRetryKpis({ totals: t }) {
+  kpiCards([
+    ['First attempt declined', num(t.first_declined), 'trials sent to retries', 'Триалы, у которых первая попытка списания отклонена — их и повторяют'],
+    ['Recovery rate', approxPct(t.recovery_rate, t.final), `${num(t.recovered)} of ${num(t.first_declined)}`, 'Доля таких триалов, оплативших на повторе в течение 30 дней после конца триала'],
+    ['Retries', num(t.retries), `${pct(t.retry_success)} succeeded`, 'Повторные попытки списания и доля прошедших'],
+    ['Retries per recovery', decimal(t.retries_per_recovery), 'retries spent per recovered trial', 'Сколько повторов уходит на одно восстановление'],
+    ['After a no-retry decline', num(t.no_retry_retries), `${pct(t.no_retry_share)} of retries · ${num(t.no_retry_recovered)} succeeded`, 'Повторы после отказа «не повторять»: карта украдена или закрыта, банк отозвал разрешение, Stripe сам блокирует повтор. Почти никогда не проходят'],
   ]);
 }
 
@@ -650,6 +682,51 @@ const REASON_COLUMNS = [
   { key: 'avg_attempts', title: 'Avg. attempts', tip: 'Попыток на такой триал в среднем', sort: (r) => r.avg_attempts, cell: (r) => `<td>${decimal(r.avg_attempts)}</td>` },
   { key: 'avg_days_to_pay', title: 'Days to recover', tip: 'Дней от первого отказа до оплаты — у восстановленных', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td>${decimal(r.avg_days_to_pay)}</td>` },
 ];
+// Ретраи: колонки динамики и разрезов, отдача по номеру попытки, по дням, по кодам отказа
+const RETRY_COLUMNS = [
+  { key: 'first_declined', title: 'First declined', tip: 'Триалы с отклонённой первой попыткой', sort: (p) => p.first_declined, cell: (p) => `<td>${num(p.first_declined)}</td>` },
+  { key: 'retries', title: 'Retries', tip: 'Повторные попытки', sort: (p) => p.retries, cell: (p) => `<td>${num(p.retries)}</td>` },
+  { key: 'recovery_rate', title: 'Recovery rate', tip: 'Оплатили на повторе в течение 30 дней после конца триала', sort: (p) => p.recovery_rate, cell: (p) => rateCell(p.recovery_rate, p.recovered, p.final) },
+  { key: 'retry_success', title: 'Retry success', tip: 'Доля повторов, которые прошли', sort: (p) => p.retry_success, cell: (p) => pendingCell(pct(p.retry_success), p.final) },
+  { key: 'retries_per_recovery', title: 'Retries per recovery', tip: 'Повторов на одно восстановление', sort: (p) => p.retries_per_recovery, cell: (p) => pendingCell(decimal(p.retries_per_recovery), p.final) },
+  {
+    key: 'no_retry_retries',
+    title: 'After no-retry decline',
+    tip: 'Повторы после отказа «не повторять» и их доля среди всех повторов',
+    sort: (p) => p.no_retry_retries,
+    cell: (p) => (p.retries ? `<td title="${num(p.no_retry_recovered)} succeeded">${pct(p.no_retry_share)}<span class="n">${num(p.no_retry_retries)}</span></td>` : '<td>—</td>'),
+  },
+];
+const ordinal = (n) => (n === 1 ? 'First attempt' : n >= 10 ? 'Attempt 10+' : `Attempt ${n}`);
+const CURVE_COLUMNS = [
+  { key: 'attempt', title: 'Attempt', tip: 'Номер попытки: первая — списание в конце триала, дальше — повторы', sort: (r) => r.attempt, cell: (r) => `<td>${ordinal(r.attempt)}</td>` },
+  { key: 'attempts', title: 'Attempts', tip: 'Попыток с этим номером', sort: (r) => r.attempts, cell: (r) => `<td>${num(r.attempts)}</td>` },
+  { key: 'approved', title: 'Succeeded', tip: 'Из них прошли', sort: (r) => r.approved, cell: (r) => `<td>${num(r.approved)}</td>` },
+  { key: 'approval_rate', title: 'Approval rate', tip: 'Доля прошедших среди попыток с этим номером', sort: (r) => r.approval_rate, cell: (r) => `<td>${pct(r.approval_rate)}</td>` },
+  { key: 'recovered_share', title: 'Recoveries so far', tip: 'Доля всех восстановлений, сделанных этой попыткой или раньше', sort: (r) => r.recovered_share, cell: (r) => (r.recovered_share === null ? '<td>—</td>' : shareCell(r.recovered_share)) },
+];
+const DAY_COLUMNS = [
+  { key: 'day', title: 'Days after first attempt', tip: 'Сколько суток прошло от первой попытки', sort: (r) => r.day, cell: (r) => `<td>${r.day >= 31 ? '31+' : `Day ${r.day}`}</td>` },
+  { key: 'retries', title: 'Retries', tip: 'Повторов в этот день', sort: (r) => r.retries, cell: (r) => `<td>${num(r.retries)}</td>` },
+  { key: 'approved', title: 'Succeeded', tip: 'Из них прошли', sort: (r) => r.approved, cell: (r) => `<td>${num(r.approved)}</td>` },
+  { key: 'approval_rate', title: 'Approval rate', tip: 'Доля прошедших', sort: (r) => r.approval_rate, cell: (r) => `<td>${pct(r.approval_rate)}</td>` },
+];
+const CODE_COLUMNS = [
+  {
+    key: 'code',
+    title: 'Decline code',
+    tip: 'Код отказа провайдера; ниже — общая группа',
+    text: true,
+    sort: (r) => r.code,
+    cell: (r) =>
+      `<td data-tip="${esc(r.hint)}">${esc(r.code ?? 'Unknown')}${r.no_retry ? ' <span class="badge excessive">No retry</span>' : ''}<span class="value-id">${esc(r.group)}</span></td>`,
+  },
+  { key: 'declines', title: 'Declines', tip: 'Отказов с этим кодом', sort: (r) => r.declines, cell: (r) => `<td>${num(r.declines)}</td>` },
+  { key: 'retried_share', title: 'Retried', tip: 'Доля отказов, после которых была ещё попытка', sort: (r) => r.retried_share, cell: (r) => rateCell(r.retried_share, r.retried) },
+  { key: 'next_approval', title: 'Next attempt succeeded', tip: 'Прошла ли следующая попытка', sort: (r) => r.next_approval, cell: (r) => rateCell(r.next_approval, r.next_approved) },
+  { key: 'later_approval', title: 'Any later attempt succeeded', tip: 'Прошла ли хоть одна из дальнейших попыток', sort: (r) => r.later_approval, cell: (r) => rateCell(r.later_approval, r.approved_later) },
+];
+
 // Отмены VPN: «≈» — пока не закончились триалы когорты (во время триала) или не прошло окно 30 дней после них
 const CANCEL_COLUMNS = [
   { key: 'started', title: 'Trials', tip: 'Оформлено триалов', sort: (p) => p.started, cell: (p) => `<td>${num(p.started)}</td>` },
@@ -872,6 +949,21 @@ function renderView(data) {
     }
     return;
   }
+  if (kind() === 'retries') {
+    if (isTime) {
+      renderTable([periodColumn(timeHead('Trial start date')), ...RETRY_COLUMNS], data.series);
+      renderRetryChart(data);
+    } else if (state.view === 'attempt') {
+      renderTable(CURVE_COLUMNS, data.curve, { empty: 'No payment attempts for this period' });
+    } else if (state.view === 'day') {
+      renderTable(DAY_COLUMNS, data.days, { empty: 'No retries for this period' });
+    } else if (state.view === 'decline_code') {
+      renderTable(CODE_COLUMNS, data.codes, { limit: true, empty: 'No declines for this period' });
+    } else {
+      renderTable([valueColumn(), ...RETRY_COLUMNS], data.breakdown, breakdown);
+    }
+    return;
+  }
   if (kind() === 'cancellations') {
     if (isTime) {
       renderTable([periodColumn(timeHead('Trial start date')), ...CANCEL_COLUMNS], data.series);
@@ -1078,9 +1170,33 @@ function renderVampChart({ daily, month, thresholds }) {
   });
 }
 
+// Ретраи: approval rate по номеру попытки — где повторы перестают окупаться
+function renderRetryChart({ curve }) {
+  const { muted, grid, common } = chartBase();
+  charts.retryCurve = new Chart($('retry-chart'), {
+    type: 'bar',
+    data: {
+      labels: curve.map((r) => (r.attempt === 1 ? 'First' : r.attempt >= 10 ? '10+' : `#${r.attempt}`)),
+      datasets: [{ label: 'Approval rate', data: curve.map((r) => +((r.approval_rate ?? 0) * 100).toFixed(1)), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 48 }],
+    },
+    options: {
+      ...common,
+      plugins: {
+        legend: { display: false },
+        tooltip: { padding: 10, cornerRadius: 8, callbacks: { title: (items) => ordinal(curve[items[0].dataIndex].attempt), label: (c) => ` ${c.raw}% · ${num(curve[c.dataIndex].approved)} of ${num(curve[c.dataIndex].attempts)}` } },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { color: grid }, ticks: { color: muted } },
+        y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => `${v}%` } },
+      },
+    },
+  });
+}
+
 // Графики своего экрана — при смене темы перерисовываются: цвета берутся из неё
 function renderModeCharts(data) {
   if (kind() === 'cancellations') return renderCancelCharts(data);
+  if (kind() === 'retries') return renderRetryChart(data);
   if (kind() === 'vamp') return renderVampChart(data);
   ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](data.series);
 }
@@ -1403,6 +1519,9 @@ function rowPatch(r) {
   if (state.view === 'time') return { period: 'custom', from: r.period, to: r.period_end };
   if (state.view === 'decline_reason' || state.view === 'cancel_reason') return { reason: r.reason };
   if (state.view === 'outcome') return { reason: r.outcome }; // исход после фрод-репорта
+  if (state.view === 'attempt') return { attempt: r.attempt };
+  if (state.view === 'day') return { day: r.day };
+  if (state.view === 'decline_code') return { reason: r.code ?? 'none' };
   return { [state.view]: r.value ?? 'none' };
 }
 
