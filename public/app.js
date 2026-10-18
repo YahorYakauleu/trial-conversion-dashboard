@@ -1,5 +1,5 @@
 // Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
-// данные — /api/metrics (конверсия), /api/cancellations (отмены), /api/retries (ретраи), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
+// данные — /api/metrics (конверсия), /api/ltv (деньги от триала), /api/cancellations (отмены), /api/retries (ретраи), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
 
 const DAY_MS = 86_400_000;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -28,6 +28,20 @@ const MODES = {
     hints: {
       time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
       decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
+    },
+  },
+  ltv: {
+    product: 'vpn',
+    kind: 'ltv',
+    label: 'LTV',
+    tip: 'Сколько денег приносит триал за 30, 60 и 90 дней с оформления и сколько оплативших продлевают',
+    title: 'Revenue per trial (LTV)',
+    api: '/api/ltv',
+    charts: 'ltv-charts',
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
+    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands']],
+    hints: {
+      time: 'All money from the trial’s customer — trial fee, first period, renewals — within 30/60/90 days of the trial start, net of refunds, in USD. Numbers marked ≈ grow until the window closes',
     },
   },
   cancellations: {
@@ -388,6 +402,7 @@ function render(data) {
   else if (kind() === 'overview') renderOverviewKpis(data);
   else if (kind() === 'cancellations') renderCancelKpis(data);
   else if (kind() === 'retries') renderRetryKpis(data);
+  else if (kind() === 'ltv') renderLtvKpis(data);
   else if (kind() === 'vamp') renderVampKpis(data);
   else renderKpis(data.totals, data.range);
   renderTabs();
@@ -510,6 +525,20 @@ function renderVampKpis({ month: m, thresholds: t }) {
     ['Fraud reports (TC40)', num(m.fraud), 'Visa early fraud warnings', 'Банк сообщил Visa о мошенничестве по списанию (у Stripe — early fraud warning). Идут в VAMP, даже если деньги вернули'],
     ['Chargebacks (TC15)', num(m.disputes), 'Visa, not resolved by RDR', 'Visa-чарджбэки, не закрытые через RDR. Запросы документов (inquiry) не считаются'],
     ['RDR, excluded', num(m.rdr), `${usd(m.rdr_lost)} lost`, 'Visa-диспуты, закрытые через RDR: в VAMP не идут, но деньги списаны'],
+  ]);
+}
+
+// LTV: деньги от триала; «≈» — окно (30/60/90 дней с оформления) у самых свежих триалов ещё не закрылось
+const approxUsd = (cents, final) => (cents === null ? '—' : `${final ? '' : '≈ '}${usdAverage(cents)}`);
+
+function renderLtvKpis({ totals: t }) {
+  kpiCards([
+    ['Trials started', num(t.started), `${pct(t.trial_to_paid)} trial-to-paid`, 'Сколько триалов оформлено и какая доля оплатила первый период'],
+    ['Revenue per trial, 30 days', approxUsd(t.ltv_30_per_trial, t.final_30), 'net of refunds', 'Деньги от триала за 30 дней с оформления: оплата триала, первый период, продления — за вычетом рефандов'],
+    ['Revenue per trial, 60 days', approxUsd(t.ltv_60_per_trial, t.final_60), 'net of refunds', 'То же за 60 дней'],
+    ['Revenue per trial, 90 days', approxUsd(t.ltv_90_per_trial, t.final_90), 'net of refunds', 'То же за 90 дней'],
+    ['Revenue per payer, 90 days', approxUsd(t.ltv_90_per_paid, t.final_90), 'per customer who paid the 1st period', 'Деньги за 90 дней на одного оплатившего первый период'],
+    ['2nd period paid', approxPct(t.renewal_2, t.final_90), `${num(t.renewed_2)} of ${num(t.paid_1)} who paid the 1st`, 'Доля оплативших первый период, кто оплатил и второй — за 90 дней с оформления'],
   ]);
 }
 
@@ -682,6 +711,19 @@ const REASON_COLUMNS = [
   { key: 'avg_attempts', title: 'Avg. attempts', tip: 'Попыток на такой триал в среднем', sort: (r) => r.avg_attempts, cell: (r) => `<td>${decimal(r.avg_attempts)}</td>` },
   { key: 'avg_days_to_pay', title: 'Days to recover', tip: 'Дней от первого отказа до оплаты — у восстановленных', sort: (r) => r.avg_days_to_pay, cell: (r) => `<td>${decimal(r.avg_days_to_pay)}</td>` },
 ];
+// LTV: колонки динамики и разрезов
+const usdCell = (cents, final) => pendingCell(cents === null ? '—' : usdAverage(cents), final);
+const LTV_COLUMNS = [
+  { key: 'started', title: 'Trials', tip: 'Оформлено триалов', sort: (p) => p.started, cell: (p) => `<td>${num(p.started)}</td>` },
+  { key: 'trial_to_paid', title: 'Trial-to-paid', tip: 'Оплатили первый платный период', sort: (p) => p.trial_to_paid, cell: (p) => rateCell(p.trial_to_paid, p.paid) },
+  { key: 'ltv_30_per_trial', title: 'Revenue / trial, 30d', tip: 'Деньги на один триал за 30 дней с оформления', sort: (p) => p.ltv_30_per_trial, cell: (p) => usdCell(p.ltv_30_per_trial, p.final_30) },
+  { key: 'ltv_60_per_trial', title: 'Revenue / trial, 60d', tip: 'Деньги на один триал за 60 дней', sort: (p) => p.ltv_60_per_trial, cell: (p) => usdCell(p.ltv_60_per_trial, p.final_60) },
+  { key: 'ltv_90_per_trial', title: 'Revenue / trial, 90d', tip: 'Деньги на один триал за 90 дней', sort: (p) => p.ltv_90_per_trial, cell: (p) => usdCell(p.ltv_90_per_trial, p.final_90) },
+  { key: 'ltv_90_per_paid', title: 'Revenue / paying, 90d', tip: 'Деньги за 90 дней на одного оплатившего', sort: (p) => p.ltv_90_per_paid, cell: (p) => usdCell(p.ltv_90_per_paid, p.final_90) },
+  { key: 'renewal_2', title: '2nd period', tip: 'Оплатили и второй период — доля оплативших первый', sort: (p) => p.renewal_2, cell: (p) => rateCell(p.renewal_2, p.renewed_2, p.final_90, `${num(p.renewed_2)} of ${num(p.paid_1)}`) },
+  { key: 'renewal_3', title: '3rd period', tip: 'Оплатили три периода и больше — доля оплативших первый', sort: (p) => p.renewal_3, cell: (p) => rateCell(p.renewal_3, p.renewed_3, p.final_90, `${num(p.renewed_3)} of ${num(p.paid_1)}`) },
+];
+
 // Ретраи: колонки динамики и разрезов, отдача по номеру попытки, по дням, по кодам отказа
 const RETRY_COLUMNS = [
   { key: 'first_declined', title: 'First declined', tip: 'Триалы с отклонённой первой попыткой', sort: (p) => p.first_declined, cell: (p) => `<td>${num(p.first_declined)}</td>` },
@@ -949,6 +991,15 @@ function renderView(data) {
     }
     return;
   }
+  if (kind() === 'ltv') {
+    if (isTime) {
+      renderTable([periodColumn(timeHead('Trial start date')), ...LTV_COLUMNS], data.series);
+      renderLtvChart(data);
+    } else {
+      renderTable([valueColumn(), ...LTV_COLUMNS], data.breakdown, breakdown);
+    }
+    return;
+  }
   if (kind() === 'retries') {
     if (isTime) {
       renderTable([periodColumn(timeHead('Trial start date')), ...RETRY_COLUMNS], data.series);
@@ -1170,6 +1221,32 @@ function renderVampChart({ daily, month, thresholds }) {
   });
 }
 
+// LTV: деньги на триал за 30/60/90 дней по когортам; пунктир — окно ещё не закрылось
+function renderLtvChart({ series }) {
+  const { muted, grid, x, common } = chartBase();
+  const line = (label, key, finalKey, color) => ({
+    label, data: series.map((p) => (p[key] === null ? null : +(p[key] / 100).toFixed(2))), borderColor: color, backgroundColor: color,
+    borderWidth: 2, pointRadius: series.length > 31 ? 0 : 3, pointHoverRadius: 5, tension: 0.25, spanGaps: true,
+    segment: { borderDash: (ctx) => (series[ctx.p1DataIndex][finalKey] ? undefined : [5, 4]) },
+  });
+  charts.ltv = new Chart($('ltv-chart'), {
+    type: 'line',
+    data: {
+      labels: chartLabels(series),
+      datasets: [
+        line('90 days', 'ltv_90_per_trial', 'final_90', css('--s-converted')),
+        line('60 days', 'ltv_60_per_trial', 'final_60', css('--s-started')),
+        line('30 days', 'ltv_30_per_trial', 'final_30', css('--s-first')),
+      ],
+    },
+    options: {
+      ...common,
+      plugins: { legend: { display: false }, tooltip: chartTooltip(series, (c) => ` ${c.dataset.label}: ${c.raw === null ? '—' : usdExact.format(c.raw)}`) },
+      scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdExact.format(v) } } },
+    },
+  });
+}
+
 // Ретраи: approval rate по номеру попытки — где повторы перестают окупаться
 function renderRetryChart({ curve }) {
   const { muted, grid, common } = chartBase();
@@ -1197,6 +1274,7 @@ function renderRetryChart({ curve }) {
 function renderModeCharts(data) {
   if (kind() === 'cancellations') return renderCancelCharts(data);
   if (kind() === 'retries') return renderRetryChart(data);
+  if (kind() === 'ltv') return renderLtvChart(data);
   if (kind() === 'vamp') return renderVampChart(data);
   ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](data.series);
 }

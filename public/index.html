@@ -157,6 +157,21 @@
         </div>
       </section>
 
+      <section id="ltv-charts" hidden>
+        <div class="panel">
+          <div class="chart-head">
+            <h2>Revenue per trial by trial start date, $</h2>
+            <div class="legend">
+              <span data-tip="Деньги за 90 дней с оформления"><i style="background: var(--s-converted)"></i>90 days</span>
+              <span data-tip="Деньги за 60 дней с оформления"><i style="background: var(--s-started)"></i>60 days</span>
+              <span data-tip="Деньги за 30 дней с оформления"><i style="background: var(--s-first)"></i>30 days</span>
+              <span data-tip="Окно ещё не закрылось — цифра вырастет"><i class="dashed"></i>≈ not final</span>
+            </div>
+          </div>
+          <div class="chart"><canvas id="ltv-chart" aria-label="Revenue per trial within 30, 60 and 90 days, USD"></canvas></div>
+        </div>
+      </section>
+
       <section id="retry-charts" hidden>
         <div class="panel">
           <div class="chart-head"><h2 data-tip="Доля прошедших попыток по номеру: первая — списание в конце триала, дальше — повторы">Approval rate by attempt number, %</h2></div>

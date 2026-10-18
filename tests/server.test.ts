@@ -2,6 +2,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { openStore } from '../src/db.js';
+import { refreshTrialLtv } from '../src/ltv.js';
 import { createApp } from '../src/server.js';
 import type { Source } from '../src/sync.js';
 
@@ -169,6 +170,28 @@ describe('server', () => {
     const csv = await fetch(`${url}/api/export?mode=cancellations&view=cancel_reason&reason=Requested&${period}`, { headers: auth });
     expect(csv.headers.get('content-disposition')).toBe('attachment; filename="vpn-cancelled-trials_2026-09-10_2026-09-10.csv"');
     expect((await csv.text()).trim().split('\r\n')).toHaveLength(3); // заголовок и два отменённых
+  });
+
+  it('/api/ltv: деньги на триал по когортам и разрезы; выгрузка триалов с LTV', async () => {
+    const store = openStore(':memory:');
+    const started = Date.parse('2026-09-10T12:00:00Z') / 1000;
+    store.upsertTrial({
+      provider: 'stripe', account: 'corp', subscription_id: 's1', trial_started_at: started, trial_ended_at: started + 7 * 86_400, first_invoice_id: 'in_1',
+      first_attempt_succeeded: true, paid_at: started + 7 * 86_400, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, customer_id: 'cus_1',
+    });
+    store.upsertPayment({ provider: 'stripe', payment_id: 'ch_1', account: 'corp', mid: 'corp', paid_at: started + 7 * 86_400, amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, customer_id: 'cus_1' });
+    refreshTrialLtv(store.db, 'stripe', 'corp', Date.now() / 1000);
+    const server = createApp({ store, config, sources: [] }).listen(0);
+    await new Promise((resolve) => server.once('listening', resolve));
+    close = () => server.close();
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const period = 'period=custom&from=2026-09-10&to=2026-09-10';
+    const get = async (q: string) => (await fetch(`${url}/api/ltv?${period}&${q}`, { headers: auth })).json();
+    expect((await get('')).totals).toMatchObject({ started: 1, paid: 1, ltv_30: 999, ltv_30_per_trial: 999, final_30: true });
+    expect((await get('view=country')).breakdown).toMatchObject([{ value: 'US', ltv_90: 999 }]);
+    const csv = await (await fetch(`${url}/api/export?mode=ltv&${period}`, { headers: auth })).text();
+    expect(csv.split('\r\n')[0]).toContain('revenue_30d_usd');
+    expect(csv.split('\r\n')[1]).toContain('9.99');
   });
 
   it('/api/retries: итоги, отдача по номеру попытки, по дням и кодам; выгрузка строки', async () => {

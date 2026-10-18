@@ -2,6 +2,7 @@ import type { SolidgateAccount } from '../config.js';
 import { toAlpha2 } from '../countries.js';
 import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import type { ToUsd } from '../fx.js';
+import { refreshTrialLtv, resetTrialLtv } from '../ltv.js';
 import { DAY, dayKey } from '../metrics.js';
 import { refreshTrialFraud } from '../vamp.js';
 import {
@@ -27,9 +28,9 @@ const SUCCESS = new Set(['approved', 'settle_ok', 'auth_ok', 'refunded']);
 const PENDING = new Set(['created', 'processing', '3ds_verify']);
 // Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк, попытки, причины отказа, рефанды
 const DETAILS_VERSION = 2;
-// Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала.
+// Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала, 3 — клиент у платежа (LTV).
 // База, выгруженная раньше, один раз проходит заказы с HISTORY_FROM (это минуты, поэтому и после бэкфилла тоже).
-const ORDERS_VERSION = 2;
+const ORDERS_VERSION = 3;
 // Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз проходим подписки заново
 const SUBSCRIPTION_FIELDS_VERSION = 2;
 // Деньги списаны: settle_ok, а refunded — списали и потом вернули (сумма возврата — в refunded_amount)
@@ -156,6 +157,7 @@ export async function paymentFromOrder(order: SgCardOrder, account: string, toUs
     amount_usd_cents: amountUsd,
     // возврат — в валюте заказа, переводим той же долей
     refunded_usd_cents: Math.round((amountUsd * Math.min(order.refunded_amount ?? 0, order.amount)) / order.amount),
+    customer_id: order.customer_account_id ?? null,
     ...orderCardDetails(order),
   };
 }
@@ -252,6 +254,7 @@ export async function syncSolidgateAccount(
     const from = store.getState('solidgate', acc.account, progressKey) ?? cfg.historyFrom;
     await inWindows(from, saveOrders('created_at'), progress(progressKey));
     store.setState('solidgate', acc.account, 'orders_version', ORDERS_VERSION);
+    resetTrialLtv(store.db, 'solidgate', acc.account);
   }
 
   // HISTORY_FROM сдвинули раньше начала загруженного — догружаем недостающее начало: отчёт подписок отдаёт
@@ -265,6 +268,7 @@ export async function syncSolidgateAccount(
   store.setState('solidgate', acc.account, 'loaded_from', Math.min(loadedFrom, cfg.historyFrom));
 
   await inWindows((cursor ?? now) - DAY, subscriptionsAndOrders('updated_at'));
+  refreshTrialLtv(store.db, 'solidgate', acc.account, now);
 
   store.setState('solidgate', acc.account, 'cursor', now);
   return items;

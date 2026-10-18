@@ -179,7 +179,7 @@ describe('paymentFromCharge', () => {
   const toUsd = async (amount: number, currency: string) => (currency === 'usd' ? amount : null);
 
   it('успешное списание → платёж в долларах с данными карты; MID — аккаунт', async () => {
-    expect(await paymentFromCharge(charge({}), 'corp', toUsd)).toEqual({
+    expect(await paymentFromCharge(charge({ customer: 'cus_9' }), 'corp', toUsd)).toEqual({
       provider: 'stripe',
       payment_id: 'ch_1',
       account: 'corp',
@@ -187,6 +187,7 @@ describe('paymentFromCharge', () => {
       paid_at: 10_100,
       amount_usd_cents: 766,
       refunded_usd_cents: 0,
+      customer_id: 'cus_9', // клиент — для LTV
       country: 'HU',
       payment_method: 'google_pay',
       card_brand: 'visa',

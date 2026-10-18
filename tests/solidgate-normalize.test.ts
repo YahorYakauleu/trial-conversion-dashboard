@@ -237,7 +237,7 @@ describe('paymentFromOrder', () => {
   const toUsd = async (amount: number, currency: string) => (currency === 'USD' ? amount : currency === 'SAR' ? Math.round(amount / 3.75) : null);
 
   it('списанный заказ → платёж: сумма в валюте процессинга (уже USD), MID и карта из заказа', async () => {
-    expect(await paymentFromOrder(paid({}), 'sgH2H', toUsd)).toEqual({
+    expect(await paymentFromOrder(paid({ customer_account_id: 'acc-1' }), 'sgH2H', toUsd)).toEqual({
       provider: 'solidgate',
       payment_id: 'o1',
       account: 'sgH2H',
@@ -245,6 +245,7 @@ describe('paymentFromOrder', () => {
       paid_at: ts(T_END),
       amount_usd_cents: 1_601,
       refunded_usd_cents: 0,
+      customer_id: 'acc-1', // клиент — для LTV
       country: 'SA',
       payment_method: 'google_pay',
       card_brand: 'visa',

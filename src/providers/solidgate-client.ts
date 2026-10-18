@@ -63,6 +63,7 @@ export interface SgCardOrder {
   processing_currency?: string | null;
   mid?: string | null;
   subscription_id?: string | null;
+  customer_account_id?: string | null; // id аккаунта у нас — клиент платежа (email не берём)
   geo_country?: string | null; // страна по IP, которую передаёт workflow-service (alpha-3)
   payment_method?: string | null; // google-pay, apple-pay, card, token…
   error_code?: string | null; // код отказа, например 3.02

@@ -3,6 +3,7 @@ import { toAlpha2 } from '../countries.js';
 import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import { forEachWindow } from '../days.js';
 import type { ToUsd } from '../fx.js';
+import { refreshTrialLtv, resetTrialLtv } from '../ltv.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 import { refreshTrialFraud } from '../vamp.js';
 
@@ -25,6 +26,11 @@ const SYNC_OVERLAP = HOUR;
 const DETAILS_VERSION = 2;
 // Версия оборота: 1 — успешные списания сохраняются как платежи. База, выгруженная раньше, один раз проходит списания заново.
 const PAYMENTS_VERSION = 1;
+// Клиент у платежа (для LTV): база, загруженная раньше, один раз дописывает его — поиском только успешных списаний,
+// их втрое меньше, чем всех (~70 с на сутки большого аккаунта). У поиска свой, более жёсткий лимит запросов —
+// параллельно не больше трёх суток (при восьми на пустых днях Stripe отвечает rate limit)
+const PAYMENT_CUSTOMERS_VERSION = 1;
+const SEARCH_PARALLEL = 3;
 // Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз
 // проходим подписки без раскрытия клиента и дописываем их
 const SUBSCRIPTION_FIELDS_VERSION = 2;
@@ -119,6 +125,7 @@ export async function paymentFromCharge(charge: Stripe.Charge, account: string, 
     paid_at: charge.created,
     amount_usd_cents: amountUsd,
     refunded_usd_cents: charge.amount > 0 ? Math.round((amountUsd * charge.amount_refunded) / charge.amount) : 0,
+    customer_id: typeof charge.customer === 'string' ? charge.customer : (charge.customer?.id ?? null),
     country: toAlpha2(details?.card?.country),
     payment_method: details?.card?.wallet?.type ?? details?.type ?? null,
     card_brand: details?.card?.brand ?? null,
@@ -340,6 +347,7 @@ export async function syncStripeAccount(
     await chargesPassWithPayments('charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
     store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом и отменой
+    store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION); // платежи уже с клиентом
     store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
@@ -366,6 +374,24 @@ export async function syncStripeAccount(
       (next) => store.setState('stripe', account, 'subscription_fields_day', next),
     );
     store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION);
+  }
+  if (cursor !== null && (store.getState('stripe', account, 'payment_customers_version') ?? 0) < PAYMENT_CUSTOMERS_VERSION) {
+    await forEachWindow(
+      store.getState('stripe', account, 'payment_customers_day') ?? cfg.historyFrom,
+      now,
+      DAY,
+      SEARCH_PARALLEL,
+      async (day) => {
+        for await (const charge of stripe.charges.search({ query: `status:'succeeded' AND created>=${day} AND created<${day + DAY}`, limit: 100 })) {
+          const customer = typeof charge.customer === 'string' ? charge.customer : charge.customer?.id;
+          if (customer) store.setPaymentCustomer('stripe', charge.id, customer);
+        }
+        console.log(`[stripe:${account}] клиенты платежей ${dayKey(day)} готово`);
+      },
+      (next) => store.setState('stripe', account, 'payment_customers_day', next),
+    );
+    store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION);
+    resetTrialLtv(store.db, 'stripe', account);
   }
   if ((store.getState('stripe', account, 'payments_version') ?? 0) < PAYMENTS_VERSION) {
     await chargesPass('payments_charges_day');
@@ -423,6 +449,7 @@ export async function syncStripeAccount(
     if (chargeId) store.markVampRefunded('stripe', chargeId);
     if (charge && charge.amount > 0) store.setPaymentRefundShare('stripe', charge.id, charge.amount_refunded / charge.amount);
   }
+  refreshTrialLtv(store.db, 'stripe', account, now);
 
   store.setState('stripe', account, 'cursor', now);
   return items;

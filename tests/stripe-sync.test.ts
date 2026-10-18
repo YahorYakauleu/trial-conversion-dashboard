@@ -32,7 +32,8 @@ function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; char
     subscriptions: { list: list('subscriptions', data.subs) },
     invoices: { list: list('invoices', data.invoices) },
     events: { list: list('events', data.events) },
-    charges: { list: list('charges', data.charges ?? []) },
+    // поиск успешных списаний — разовый проход за клиентами платежей; в тестах их нет
+    charges: { list: list('charges', data.charges ?? []), search: () => (async function* () {})() },
     refunds: { list: list('refunds', data.refunds ?? []) },
   } as unknown as StripeLike;
   return { client, calls };

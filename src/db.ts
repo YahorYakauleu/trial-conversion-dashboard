@@ -52,11 +52,12 @@ export interface PaymentRow extends CardDetails {
   paid_at: number;
   amount_usd_cents: number;
   refunded_usd_cents: number;
+  customer_id?: string | null; // клиент — чтобы связать продления с триалом (LTV)
 }
 
 // Списание eSIM: у продукта нет подписок — только разовые покупки (PaymentIntent), поэтому храним и отклонённые
 // списания (approved = false, для платёжного здоровья), и то, что купили: направление, пакет, тип заказа, клиента
-export interface EsimChargeRow extends PaymentRow {
+export interface EsimChargeRow extends Omit<PaymentRow, 'customer_id'> {
   approved: boolean;
   reason: string | null; // код отказа
   intent_id: string | null; // PaymentIntent — одна оплата, в ней может быть несколько попыток
@@ -170,6 +171,12 @@ export function openStore(file: string) {
   for (const column of ['fraud_flagged', 'vamp_events']) {
     if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
   }
+  // Деньги от клиента триала за 30/60/90 дней с оформления (центы USD, за вычетом рефандов) и сколько периодов он оплатил
+  // за 90 дней — пересчитываются после загрузки платежей (src/ltv.ts → refreshTrialLtv); ltv_at — когда посчитано
+  for (const column of ['ltv_30', 'ltv_60', 'ltv_90', 'periods_90']) {
+    if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!columns.has('ltv_at')) db.exec('ALTER TABLE trials ADD COLUMN ltv_at INTEGER');
   // Итоги попыток прямо в строке триала: метрики считаются одним проходом по trials, без соединения с attempts
   const withoutAttemptTotals = !columns.has('attempts');
   for (const column of ['attempts', 'approved', 'refunded']) {
@@ -240,7 +247,12 @@ export function openStore(file: string) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS vamp_reports_customer_idx ON vamp_reports (provider, customer_id) WHERE customer_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS vamp_reports_payment_idx ON vamp_reports (provider, payment_id);
-    CREATE INDEX IF NOT EXISTS trials_customer_idx ON trials (provider, customer_id) WHERE customer_id IS NOT NULL;
+  `);
+  // Триалы и платежи клиента по времени — для пересчёта фрода и LTV по триалам (src/vamp.ts, src/ltv.ts).
+  // Частичный индекс по клиенту планировщик в коррелированных подзапросах не выбирал — заменён полным
+  db.exec(`
+    DROP INDEX IF EXISTS trials_customer_idx;
+    CREATE INDEX IF NOT EXISTS trials_customer_started_idx ON trials (provider, customer_id, trial_started_at);
   `);
   // Платежи eSIM — в той же таблице (product = 'esim'), вместе с отклонёнными списаниями (approved = 0);
   // у VPN в payments только успешные списания
@@ -253,6 +265,7 @@ export function openStore(file: string) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS payments_product_paid_idx ON payments (product, paid_at);
     CREATE INDEX IF NOT EXISTS payments_customer_idx ON payments (customer_id) WHERE customer_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS payments_customer_paid_idx ON payments (provider, customer_id, paid_at); -- LTV по триалам
   `);
   // Пересчёт итогов попыток одного триала (или всех — для базы, выгруженной до появления колонок)
   const attemptTotals = `(SELECT COUNT(*), COALESCE(SUM(a.approved), 0), COALESCE(MAX(a.refunded), 0)
@@ -320,10 +333,11 @@ export function openStore(file: string) {
   // Платёж: перевыгрузка обновляет всё, кроме рефанда — он только растёт
   const upsertPaymentStmt = db.prepare(`
     INSERT INTO payments (provider, payment_id, account, mid, paid_at, amount_usd_cents, refunded_usd_cents,
-                          country, payment_method, card_brand, bank)
+                          country, payment_method, card_brand, bank, customer_id)
     VALUES (@provider, @payment_id, @account, @mid, @paid_at, @amount_usd_cents, @refunded_usd_cents,
-            @country, @payment_method, @card_brand, @bank)
+            @country, @payment_method, @card_brand, @bank, @customer_id)
     ON CONFLICT (provider, payment_id) DO UPDATE SET
+      customer_id = COALESCE(excluded.customer_id, payments.customer_id),
       account = excluded.account,
       mid = excluded.mid,
       paid_at = excluded.paid_at,
@@ -438,7 +452,12 @@ export function openStore(file: string) {
     },
 
     upsertPayment(p: PaymentRow): void {
-      upsertPaymentStmt.run({ ...p });
+      upsertPaymentStmt.run({ ...p, customer_id: p.customer_id ?? null });
+    },
+
+    // Клиент у уже загруженного платежа — разовый проход (LTV)
+    setPaymentCustomer(provider: Provider, paymentId: string, customerId: string): void {
+      db.prepare('UPDATE payments SET customer_id = ? WHERE provider = ? AND payment_id = ? AND customer_id IS NULL').run(customerId, provider, paymentId);
     },
 
     upsertVampReport(r: VampReportRow): void {

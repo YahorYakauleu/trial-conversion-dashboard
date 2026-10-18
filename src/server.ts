@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { createAuth } from './auth.js';
 import { getCancellationBreakdown, getCancellationReasons, getCancellations } from './cancellations.js';
+import { getLtv, getLtvBreakdown } from './ltv.js';
 import { getRetries, getRetryBreakdown, getRetryCodes, getRetryCurve, getRetryDays } from './retries.js';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
@@ -194,6 +195,18 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
   });
 
+  // LTV: деньги от триала за 30/60/90 дней по когортам оформления; те же параметры, что у /api/metrics; view=time|<измерение>
+  app.get('/api/ltv', (req, res) => {
+    const { now, provider, granularity, range, meta } = common(req.query);
+    const view = DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
+    const filters: Filters = parseFilters(req.query, DIMENSIONS);
+    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+    const data = cached({ api: 'ltv', provider, granularity, range, view, filters }, () =>
+      view === 'time' ? { ...getLtv(store.db, { ...options, granularity }), breakdown: [] } : { ...getLtvBreakdown(store.db, options, view), series: [] },
+    );
+    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
+  });
+
   // Ретраи первого платежа: те же параметры, что у /api/metrics; view=time|attempt|day|decline_code|<измерение>
   app.get('/api/retries', (req, res) => {
     const { now, provider, granularity, range, meta } = common(req.query);
@@ -303,7 +316,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       return { dimension, filters };
     };
     const compute = (): { value: string | null; count: number }[] => {
-      if (mode === 'conversion' || mode === 'cancellations' || mode === 'retries') {
+      if (mode === 'conversion' || mode === 'cancellations' || mode === 'retries' || mode === 'ltv') {
         const { dimension, filters } = facet(DIMENSIONS);
         const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
         return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
@@ -353,6 +366,10 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       if (mode === 'cancellations') {
         const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
         return ['vpn-cancelled-trials', exportTrials(store.db, o, { reason: view === 'cancel_reason' ? reason : null })];
+      }
+      if (mode === 'ltv') {
+        const o = { ...base, provider: rest.provider, filters: parseFilters(req.query, DIMENSIONS), retryWindowDays: config.retryWindowDays };
+        return ['vpn-trials-ltv', exportTrials(store.db, o)];
       }
       if (mode === 'retries') {
         // строка вкладки: номер попытки, день после первой, код отказа ('none' — без кода)

@@ -62,7 +62,8 @@ export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string
       'provider', 'account', 'subscription_id', 'customer_id', 'first_invoice_id', 'trial_started_utc', 'trial_ended_utc',
       'paid_within_30_days', 'paid_utc', 'paid_on_first_attempt', 'attempts', 'declines', 'refunded',
       'mid', 'card_country', 'payment_method', 'card_brand', 'issuing_bank',
-      'canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code', 'fraud_reported', 'vamp_events', 'subscription_link', 'customer_link',
+      'canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code', 'fraud_reported', 'vamp_events',
+      'revenue_30d_usd', 'revenue_60d_usd', 'revenue_90d_usd', 'periods_paid_90d', 'subscription_link', 'customer_link',
     ],
     rows: rows.map((t) => {
       const [provider, account] = [String(t.provider), String(t.account)];
@@ -78,6 +79,7 @@ export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string
         text(t.mid), text(t.country), text(t.payment_method), text(t.card_brand), text(t.bank),
         utc(canceledAt), cancelDay, when, canceledAt === null ? '' : cancelLabel(t.cancel_reason as string | null), text(t.cancel_reason),
         yesNo(t.fraud_flagged), Number(t.vamp_events),
+        dollars(Number(t.ltv_30)), dollars(Number(t.ltv_60)), dollars(Number(t.ltv_90)), Number(t.periods_90),
         stripeLink(provider, account, 'subscriptions', t.subscription_id as string), stripeLink(provider, account, 'customers', t.customer_id as string | null),
       ];
     }),
