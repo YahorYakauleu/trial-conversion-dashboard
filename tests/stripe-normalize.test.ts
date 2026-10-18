@@ -189,6 +189,7 @@ describe('paymentFromCharge', () => {
       amount_usd_cents: 766,
       refunded_usd_cents: 0,
       customer_id: 'cus_9', // клиент — для LTV
+      fee_usd_cents: 0, // комиссии в проводке нет
       country: 'HU',
       payment_method: 'google_pay',
       card_brand: 'visa',

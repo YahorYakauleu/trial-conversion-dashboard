@@ -154,17 +154,17 @@ describe('события VAMP у провайдеров', () => {
     });
   });
 
-  it('Stripe: диспут — сеть (не бренд), RDR и сколько по нему списано', () => {
+  it('Stripe: диспут — сеть (не бренд), RDR и сколько он стоил (списания минус возвраты по проводкам)', () => {
     const dispute = {
       id: 'du_1', created: 300, reason: 'fraudulent', charge: 'ch_9', payment_method_details: { card: { brand: 'visa', network: 'visa', case_type: 'chargeback' } },
       network_details: { type: 'visa', visa: { rapid_dispute_resolution: true } },
       balance_transactions: [{ amount: -1577, currency: 'usd' }, { amount: 100, currency: 'usd' }],
     };
-    expect(vampFromDispute(dispute as never, 'org')).toMatchObject({ kind: 'dispute', payment_id: 'ch_9', network: 'visa', case_type: 'chargeback', rdr: true, lost_usd_cents: 1577 });
+    expect(vampFromDispute(dispute as never, 'org')).toMatchObject({ kind: 'dispute', payment_id: 'ch_9', network: 'visa', case_type: 'chargeback', rdr: true, lost_usd_cents: 1477 });
     const coBadged = { ...dispute, payment_method_details: { card: { brand: 'visa', network: 'cartes_bancaires', case_type: 'chargeback' } } };
     expect(vampFromDispute(coBadged as never, 'org').network).toBe('cartes_bancaires');
     const plain = { ...dispute, network_details: null };
-    expect(vampFromDispute(plain as never, 'org')).toMatchObject({ rdr: false, lost_usd_cents: 0 });
+    expect(vampFromDispute(plain as never, 'org')).toMatchObject({ rdr: false, lost_usd_cents: 1477 }); // стоимость — у любого диспута
   });
 
   it('Solidgate: фрод-алерт и чарджбэки; сеть чарджбэка — по коду причины', () => {

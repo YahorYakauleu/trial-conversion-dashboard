@@ -7,7 +7,7 @@ import { refreshTrialLtv, resetTrialLtv } from '../ltv.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 import { refreshTrialFraud } from '../vamp.js';
 
-export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds' | 'radar' | 'disputes'>;
+export type StripeLike = Pick<Stripe, 'subscriptions' | 'invoices' | 'events' | 'charges' | 'refunds' | 'radar' | 'disputes' | 'balanceTransactions'>;
 
 interface StripeSyncConfig {
   historyFrom: number;
@@ -31,6 +31,9 @@ const PAYMENTS_VERSION = 1;
 // параллельно не больше трёх суток (при восьми на пустых днях Stripe отвечает rate limit)
 const PAYMENT_CUSTOMERS_VERSION = 1;
 const SEARCH_PARALLEL = 3;
+// Комиссия Stripe у платежа (P&L): база, загруженная раньше, один раз дописывает её — по проводкам баланса типа charge,
+// это быстрее, чем заново проходить списания
+const PAYMENT_FEES_VERSION = 1;
 // Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена, 3 — тип карты): база загружена раньше — один раз
 // проходим подписки (для типа карты — с картой клиента) и дописываем их
 const SUBSCRIPTION_FIELDS_VERSION = 3;
@@ -128,6 +131,7 @@ export async function paymentFromCharge(charge: Stripe.Charge, account: string, 
   const amountUsd = await toUsd(balance.amount, balance.currency, charge.created);
   if (amountUsd === null) return null;
   const details = charge.payment_method_details;
+  const feeUsd = balance.fee ? await toUsd(balance.fee, balance.currency, charge.created) : 0;
   return {
     provider: 'stripe',
     payment_id: charge.id,
@@ -137,6 +141,7 @@ export async function paymentFromCharge(charge: Stripe.Charge, account: string, 
     amount_usd_cents: amountUsd,
     refunded_usd_cents: charge.amount > 0 ? Math.round((amountUsd * charge.amount_refunded) / charge.amount) : 0,
     customer_id: typeof charge.customer === 'string' ? charge.customer : (charge.customer?.id ?? null),
+    fee_usd_cents: feeUsd ?? 0,
     country: toAlpha2(details?.card?.country),
     payment_method: details?.card?.wallet?.type ?? details?.type ?? null,
     card_brand: details?.card?.brand ?? null,
@@ -174,8 +179,8 @@ export function vampFromFraudWarning(efw: Stripe.Radar.EarlyFraudWarning, accoun
   };
 }
 
-// RDR — в network_details, сеть карты — в payment_method_details.card.network (в типах SDK их пока нет);
-// списано по RDR — отрицательные проводки диспута в USD
+// RDR — в network_details, сеть карты — в payment_method_details.card.network (в типах SDK их пока нет).
+// Сколько диспут стоил — сумма его проводок в USD: списание суммы и комиссии минус возврат, если диспут выигран
 type DisputeWithNetwork = Stripe.Dispute & { network_details?: { visa?: { rapid_dispute_resolution?: boolean } | null } | null };
 type DisputeCard = Stripe.Dispute.PaymentMethodDetails.Card & { network?: string | null };
 
@@ -186,14 +191,14 @@ export function vampFromDispute(dispute: DisputeWithNetwork, account: string): V
   return {
     provider: 'stripe', report_id: dispute.id, account, mid: account, kind: 'dispute', reported_at: dispute.created,
     ...charge, network: card?.network ?? card?.brand ?? charge.network, reason: dispute.reason, case_type: card?.case_type ?? null, rdr,
-    lost_usd_cents: rdr ? dispute.balance_transactions.filter((t) => t.currency === 'usd' && t.amount < 0).reduce((sum, t) => sum - t.amount, 0) : 0,
+    lost_usd_cents: -dispute.balance_transactions.filter((t) => t.currency === 'usd').reduce((sum, t) => sum + t.amount, 0),
   };
 }
 
 // Первый раз — с HISTORY_FROM неделями (прогресс сохраняется), дальше — с прошлого раза с запасом в сутки.
-// Версия набора полей: 2 — сумма и рефанд списания; загруженное раньше один раз проходится заново
+// Версия набора полей: 2 — сумма и рефанд списания, 3 — стоимость всех диспутов (не только RDR); загруженное раньше один раз проходится заново
 const VAMP_WINDOW = 7 * DAY;
-const VAMP_VERSION = 2;
+const VAMP_VERSION = 3;
 export async function syncStripeVamp(store: Store, stripe: StripeLike, account: string, historyFrom: number, now: number): Promise<void> {
   const save = async (created: Stripe.RangeQueryParam) => {
     for await (const efw of stripe.radar.earlyFraudWarnings.list({ created, limit: 100, expand: ['data.charge'] })) {
@@ -359,6 +364,7 @@ export async function syncStripeAccount(
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
     store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом и отменой
     store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION); // платежи уже с клиентом
+    store.setState('stripe', account, 'payment_fees_version', PAYMENT_FEES_VERSION); // и с комиссией
     store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
@@ -407,6 +413,24 @@ export async function syncStripeAccount(
     );
     store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION);
     resetTrialLtv(store.db, 'stripe', account);
+  }
+  if (cursor !== null && (store.getState('stripe', account, 'payment_fees_version') ?? 0) < PAYMENT_FEES_VERSION) {
+    await forEachWindow(
+      store.getState('stripe', account, 'payment_fees_day') ?? cfg.historyFrom,
+      now,
+      DAY,
+      PARALLEL,
+      async (day) => {
+        for await (const bt of stripe.balanceTransactions.list({ type: 'charge', created: { gte: day, lt: day + DAY }, limit: 100 })) {
+          const charge = typeof bt.source === 'string' ? bt.source : bt.source?.id;
+          const fee = bt.fee ? await cfg.toUsd(bt.fee, bt.currency, bt.created) : 0;
+          if (charge && fee) store.setPaymentFee('stripe', charge, fee);
+        }
+        console.log(`[stripe:${account}] комиссии ${dayKey(day)} готово`);
+      },
+      (next) => store.setState('stripe', account, 'payment_fees_day', next),
+    );
+    store.setState('stripe', account, 'payment_fees_version', PAYMENT_FEES_VERSION);
   }
   if ((store.getState('stripe', account, 'payments_version') ?? 0) < PAYMENTS_VERSION) {
     await chargesPass('payments_charges_day');
