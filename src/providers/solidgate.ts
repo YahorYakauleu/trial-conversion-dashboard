@@ -28,9 +28,9 @@ const SUCCESS = new Set(['approved', 'settle_ok', 'auth_ok', 'refunded']);
 const PENDING = new Set(['created', 'processing', '3ds_verify']);
 // Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк, попытки, причины отказа, рефанды
 const DETAILS_VERSION = 2;
-// Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала, 3 — клиент у платежа (LTV).
+// Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала, 3 — клиент у платежа (LTV), 4 — тип карты.
 // База, выгруженная раньше, один раз проходит заказы с HISTORY_FROM (это минуты, поэтому и после бэкфилла тоже).
-const ORDERS_VERSION = 3;
+const ORDERS_VERSION = 4;
 // Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз проходим подписки заново
 const SUBSCRIPTION_FIELDS_VERSION = 2;
 // Деньги списаны: settle_ok, а refunded — списали и потом вернули (сумма возврата — в refunded_amount)
@@ -139,6 +139,13 @@ export function orderCardDetails(order: SgCardOrder): CardDetails {
   };
 }
 
+// Тип карты заказа: credit, debit, prepaid
+export function orderFunding(order: SgCardOrder): string | null {
+  const card = Object.values(order.transactions ?? {}).find((t) => t.card)?.card ?? order.card;
+  const value = card?.card_type?.trim().toLowerCase();
+  return value && value !== 'unknown' ? value : null;
+}
+
 // Платный заказ, по которому списали деньги, → платёж для оборота. Заказы на $0 (проверка карты при оформлении триала) — не оборот.
 // Сумму берём в валюте процессинга: Solidgate часто уже перевёл её в USD; иначе — по курсу дня.
 export async function paymentFromOrder(order: SgCardOrder, account: string, toUsd: ToUsd): Promise<PaymentRow | null> {
@@ -201,6 +208,8 @@ export async function syncSolidgateAccount(
     for await (const order of listOrders(acc, from - ORDERS_LOOKBACK, to, filter)) {
       // MID у подписки один: карту проверяют и все списания проводят через один и тот же MID
       if (order.subscription_id) store.setCardDetails('solidgate', order.subscription_id, { ...orderCardDetails(order), mid: order.mid ?? null });
+      const type = orderFunding(order);
+      if (order.subscription_id && type) store.setFunding('solidgate', order.subscription_id, type);
       if (order.error_code) store.setAttemptReason('solidgate', order.order_id, order.error_code);
       if ((order.refunded_amount ?? 0) > 0) {
         store.markRefunded('solidgate', order.order_id);

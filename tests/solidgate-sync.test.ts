@@ -153,7 +153,7 @@ describe('syncSolidgateAccount', () => {
     expect(orderCalls[0]).toEqual({ from: HISTORY_FROM - 3600, to: HISTORY_FROM + DAY, filter: 'created_at' });
     expect(calls.every((c) => c.filter === 'updated_at')).toBe(true); // подписки заново не грузятся
     expect(store.getTrial('solidgate', 'sg_1')?.mid).toBe('mid-1');
-    expect(store.getState('solidgate', 'sgH2H', 'orders_version')).toBe(3);
+    expect(store.getState('solidgate', 'sgH2H', 'orders_version')).toBe(4);
 
     orderCalls.length = 0;
     await syncSolidgateAccount(store, acc, cfg, NOW + 60, list, listOrders);

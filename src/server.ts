@@ -80,6 +80,7 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   country: /^[A-Z]{2}$/,
   payment_method: /^[a-z_]{1,32}$/,
   card_brand: /^[a-z_ ]{1,32}$/,
+  funding: /^[a-z_ ]{1,20}$/, // тип карты
   bank: /^.{1,120}$/,
   destination: /^.{1,80}$/, // eSIM: страна или регион пакета
   package: /^.{1,40}$/, // eSIM: «5 GB · 7 days»

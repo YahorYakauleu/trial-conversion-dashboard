@@ -19,7 +19,7 @@ export type TimeZones = Record<Provider, string>;
 export type Granularity = 'day' | 'week' | 'month';
 export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'custom';
 // Измерения для разбивки и фильтров и их значение в SQL по триалу (алиас t)
-export const DIMENSIONS = ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'] as const;
+export const DIMENSIONS = ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'] as const;
 export type Dimension = (typeof DIMENSIONS)[number];
 export const DIMENSION_SQL: Record<Dimension, string> = {
   // провайдер вместе с аккаунтом: одинаковые имена у Stripe и Solidgate не склеиваются (stripe:corp, solidgate:sgH2H)
@@ -30,6 +30,7 @@ export const DIMENSION_SQL: Record<Dimension, string> = {
   payment_method: 't.payment_method',
   bank: 't.bank',
   card_brand: 't.card_brand',
+  funding: 't.funding', // тип карты: credit, debit, prepaid
 };
 // Фильтр по измерению — список значений, 'none' — «не определено».
 // Значения одного фильтра складываются (ИЛИ), разные фильтры сужают выборку (И).

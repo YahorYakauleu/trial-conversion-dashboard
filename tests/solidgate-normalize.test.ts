@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SgCardOrder, SgSubscription } from '../src/providers/solidgate-client.js';
-import { attemptsFromSolidgate, orderCardDetails, parseSgDate, paymentFromOrder, trialFromSolidgate } from '../src/providers/solidgate.js';
+import { attemptsFromSolidgate, orderCardDetails, orderFunding, parseSgDate, paymentFromOrder, trialFromSolidgate } from '../src/providers/solidgate.js';
 
 const T0 = '2026-10-01 10:00:00';
 const T_END = '2026-10-04 10:00:00'; // 3 дня = 4320 минут
@@ -251,6 +251,12 @@ describe('paymentFromOrder', () => {
       card_brand: 'visa',
       bank: 'AL RAJHI BANK',
     });
+  });
+
+  it('тип карты заказа: из транзакции, в нижнем регистре; UNKNOWN — не знаем', () => {
+    expect(orderFunding(paid({ transactions: [{ card: { card_type: 'DEBIT' } }] }))).toBe('debit');
+    expect(orderFunding(paid({ transactions: [{ card: { card_type: 'UNKNOWN' } }] }))).toBeNull();
+    expect(orderFunding(paid({ transactions: [] }))).toBeNull();
   });
 
   it('процессинг в местной валюте — по курсу; возврат — той же долей', async () => {

@@ -23,6 +23,7 @@ export interface TrialRow {
   // Stripe: cancellation_requested | payment_failed | payment_disputed, Solidgate: код отмены (8.06 и т. п.)
   canceled_at?: number | null;
   cancel_reason?: string | null;
+  funding?: string | null; // тип карты: credit, debit, prepaid
 }
 
 // Одна попытка списания первого платного периода (Stripe charge / Solidgate order)
@@ -161,7 +162,7 @@ export function openStore(file: string) {
   `);
   // Колонки, появившиеся позже, — добавляем в уже существующую базу
   const columns = new Set((db.prepare('PRAGMA table_info(trials)').all() as { name: string }[]).map((c) => c.name));
-  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid', 'customer_id', 'cancel_reason']) {
+  for (const column of ['country', 'payment_method', 'card_brand', 'bank', 'mid', 'customer_id', 'cancel_reason', 'funding']) {
     if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} TEXT`);
   }
   if (!columns.has('mid')) db.exec(`UPDATE trials SET mid = account WHERE provider = 'stripe'`);
@@ -177,6 +178,11 @@ export function openStore(file: string) {
     if (!columns.has(column)) db.exec(`ALTER TABLE trials ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
   }
   if (!columns.has('ltv_at')) db.exec('ALTER TABLE trials ADD COLUMN ltv_at INTEGER');
+  // Сумма первого платежа после триала (цена первого периода в долларах) — появилась позже: LTV один раз пересчитывается целиком
+  if (!columns.has('first_payment')) {
+    db.exec('ALTER TABLE trials ADD COLUMN first_payment INTEGER NOT NULL DEFAULT 0');
+    db.exec('UPDATE trials SET ltv_at = NULL');
+  }
   // Итоги попыток прямо в строке триала: метрики считаются одним проходом по trials, без соединения с attempts
   const withoutAttemptTotals = !columns.has('attempts');
   for (const column of ['attempts', 'approved', 'refunded']) {
@@ -290,10 +296,10 @@ export function openStore(file: string) {
   const upsert = db.prepare(`
     INSERT INTO trials (provider, account, subscription_id, trial_started_at, trial_ended_at,
                         first_invoice_id, first_attempt_succeeded, paid_at, country, payment_method, card_brand, bank, mid, customer_id,
-                        canceled_at, cancel_reason, synced_at)
+                        canceled_at, cancel_reason, funding, synced_at)
     VALUES (@provider, @account, @subscription_id, @trial_started_at, @trial_ended_at,
             @first_invoice_id, @first_attempt_succeeded, @paid_at, @country, @payment_method, @card_brand, @bank, @mid, @customer_id,
-            @canceled_at, @cancel_reason, @synced_at)
+            @canceled_at, @cancel_reason, @funding, @synced_at)
     ON CONFLICT (provider, subscription_id) DO UPDATE SET
       account = excluded.account,
       trial_started_at = excluded.trial_started_at,
@@ -308,6 +314,7 @@ export function openStore(file: string) {
       bank = COALESCE(excluded.bank, trials.bank),
       mid = COALESCE(excluded.mid, trials.mid),
       customer_id = COALESCE(excluded.customer_id, trials.customer_id),
+      funding = COALESCE(excluded.funding, trials.funding),
       -- отмену подписка знает сама и может её снять (пользователь передумал) — берём как есть
       canceled_at = excluded.canceled_at,
       cancel_reason = excluded.cancel_reason,
@@ -319,6 +326,7 @@ export function openStore(file: string) {
                       card_brand = COALESCE(card_brand, @card_brand), bank = COALESCE(bank, @bank), mid = COALESCE(mid, @mid)
     WHERE provider = @provider AND subscription_id = @subscription_id
   `);
+  const setFundingStmt = db.prepare('UPDATE trials SET funding = COALESCE(funding, ?) WHERE provider = ? AND subscription_id = ?');
   // Попытка: результат обновляется, причина и рефанд не стираются
   const upsertAttemptStmt = db.prepare(`
     INSERT INTO attempts (provider, attempt_id, subscription_id, attempted_at, approved, reason, refunded)
@@ -416,6 +424,7 @@ export function openStore(file: string) {
         customer_id: row.customer_id ?? null,
         canceled_at: row.canceled_at ?? null,
         cancel_reason: row.cancel_reason ?? null,
+        funding: row.funding ?? null,
         synced_at: now,
       });
     },
@@ -428,6 +437,11 @@ export function openStore(file: string) {
     // Отмена по свежему состоянию подписки (события Stripe, разовая догрузка) — только у уже известных триалов
     setCancellation(provider: Provider, subscriptionId: string, canceledAt: number | null, reason: string | null): void {
       setCancellationStmt.run(canceledAt, canceledAt === null ? null : reason, provider, subscriptionId);
+    },
+
+    // Тип карты из отдельного источника (заказы Solidgate, разовый проход подписок Stripe) — только если ещё не известен
+    setFunding(provider: Provider, subscriptionId: string, funding: string): void {
+      setFundingStmt.run(funding, provider, subscriptionId);
     },
 
     setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails & { mid: string | null }): void {
@@ -538,6 +552,7 @@ export function openStore(file: string) {
         customer_id: r.customer_id ?? null,
         canceled_at: r.canceled_at ?? null,
         cancel_reason: r.cancel_reason ?? null,
+        funding: r.funding ?? null,
       };
     },
 

@@ -31,9 +31,9 @@ const PAYMENTS_VERSION = 1;
 // параллельно не больше трёх суток (при восьми на пустых днях Stripe отвечает rate limit)
 const PAYMENT_CUSTOMERS_VERSION = 1;
 const SEARCH_PARALLEL = 3;
-// Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз
-// проходим подписки без раскрытия клиента и дописываем их
-const SUBSCRIPTION_FIELDS_VERSION = 2;
+// Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена, 3 — тип карты): база загружена раньше — один раз
+// проходим подписки (для типа карты — с картой клиента) и дописываем их
+const SUBSCRIPTION_FIELDS_VERSION = 3;
 // В basil у charge нет ссылки на инвойс — список списаний запрашиваем в версии API, где она есть
 const CHARGES_API_VERSION = '2024-06-20';
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
@@ -61,6 +61,7 @@ export function trialFromSubscription(sub: Stripe.Subscription, account: string)
     mid: account, // у Stripe MID — сам аккаунт
     customer_id: customerId(sub.customer),
     ...cancellation(sub),
+    funding: funding(sub),
   };
 }
 
@@ -72,13 +73,23 @@ const cancellation = (sub: Stripe.Subscription) => ({
 
 const customerId = (customer: Stripe.Subscription['customer'] | undefined) => (typeof customer === 'string' ? customer : (customer?.id ?? null));
 
-// Карта подписки, иначе карта клиента по умолчанию (если развёрнуты в ответе).
-// Банк Stripe для аккаунтов Toggle не отдаёт (issuer пустой) — останется null.
-function cardDetails(sub: Stripe.Subscription): CardDetails {
+// Карта подписки, иначе карта клиента по умолчанию (если развёрнуты в ответе)
+function defaultCard(sub: Stripe.Subscription) {
   const own = typeof sub.default_payment_method === 'object' ? sub.default_payment_method : null;
   const customer = typeof sub.customer === 'object' && !sub.customer.deleted ? sub.customer : null;
   const customerDefault = customer?.invoice_settings?.default_payment_method;
-  const pm = own ?? (typeof customerDefault === 'object' ? customerDefault : null);
+  return own ?? (typeof customerDefault === 'object' ? customerDefault : null);
+}
+
+// Тип карты: credit, debit, prepaid (unknown — не знаем)
+const funding = (sub: Stripe.Subscription) => {
+  const value = defaultCard(sub)?.card?.funding;
+  return value && value !== 'unknown' ? value : null;
+};
+
+// Банк Stripe для аккаунтов Toggle не отдаёт (issuer пустой) — останется null.
+function cardDetails(sub: Stripe.Subscription): CardDetails {
+  const pm = defaultCard(sub);
   return {
     country: toAlpha2(pm?.card?.country),
     payment_method: pm?.card?.wallet?.type ?? pm?.type ?? null,
@@ -355,23 +366,27 @@ export async function syncStripeAccount(
     await chargesPassWithPayments('details_charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
   }
-  // Один раз для уже загруженных триалов: ID клиента и отмена — подписки без раскрытия клиента, это быстро
+  // Один раз для уже загруженных триалов: ID клиента, отмена и тип карты (подписки с картой клиента)
   if (cursor !== null && (store.getState('stripe', account, 'subscription_fields_version') ?? 0) < SUBSCRIPTION_FIELDS_VERSION) {
+    const progressKey = `subscription_fields_v${SUBSCRIPTION_FIELDS_VERSION}_day`;
     await forEachWindow(
-      store.getState('stripe', account, 'subscription_fields_day') ?? cfg.historyFrom,
+      store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       now, // включая сегодняшние подписки, загруженные до появления ID клиента
       DAY,
       PARALLEL,
       async (day) => {
-        for await (const sub of stripe.subscriptions.list({ status: 'all', created: { gte: day, lt: day + DAY }, limit: 100 })) {
+        const params = { status: 'all' as const, created: { gte: day, lt: day + DAY }, limit: 100, expand: SUBSCRIPTION_EXPAND };
+        for await (const sub of stripe.subscriptions.list(params)) {
           const customer = customerId(sub.customer);
           if (customer) store.setCustomerId('stripe', sub.id, customer);
           const { canceled_at, cancel_reason } = cancellation(sub);
           store.setCancellation('stripe', sub.id, canceled_at, cancel_reason);
+          const type = funding(sub);
+          if (type) store.setFunding('stripe', sub.id, type);
         }
-        console.log(`[stripe:${account}] клиенты и отмены ${dayKey(day)} готово`);
+        console.log(`[stripe:${account}] клиенты, отмены и тип карты ${dayKey(day)} готово`);
       },
-      (next) => store.setState('stripe', account, 'subscription_fields_day', next),
+      (next) => store.setState('stripe', account, progressKey, next),
     );
     store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION);
   }

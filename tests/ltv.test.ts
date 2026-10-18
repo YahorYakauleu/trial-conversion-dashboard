@@ -62,6 +62,7 @@ describe('LTV по когортам триалов', () => {
     const { totals, series } = getLtv(storeWithData().db, { ...o, granularity: 'day' });
     expect(totals).toMatchObject({
       started: 3, paid: 2, paid_1: 2, ltv_90: 3700, ltv_30_per_trial: 2100 / 3, ltv_90_per_trial: 3700 / 3, ltv_90_per_paid: 1850,
+      avg_first_payment: 1000, // первый платёж после триала — $10 у обоих оплативших (оплата триала $1 не в счёт)
       renewed_2: 1, renewed_3: 1, renewal_2: 0.5, renewal_3: 0.5, final_30: true, final_90: true,
     });
     expect(series).toHaveLength(1);

@@ -23,8 +23,8 @@ const MODES = {
     title: 'Trial conversion',
     api: '/api/metrics',
     charts: 'charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['decline_reason', 'Decline reasons']],
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['decline_reason', 'Decline reasons']],
     hints: {
       time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
       decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
@@ -38,8 +38,8 @@ const MODES = {
     title: 'Revenue per trial (LTV)',
     api: '/api/ltv',
     charts: 'ltv-charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands']],
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types']],
     hints: {
       time: 'All money from the trial’s customer — trial fee, first period, renewals — within 30/60/90 days of the trial start, net of refunds, in USD. Numbers marked ≈ grow until the window closes',
     },
@@ -52,8 +52,8 @@ const MODES = {
     title: 'Trial cancellations',
     api: '/api/cancellations',
     charts: 'cancel-charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['cancel_reason', 'Cancellation reasons']],
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['cancel_reason', 'Cancellation reasons']],
     hints: {
       time: 'Trials by start date: how many were cancelled before the trial ended, and how soon. A cancellation counts when it was requested, even if access lasts until the period end',
       cancel_reason: 'Cancellations during the trial and within 30 days after it. Stripe and Solidgate reasons are grouped — hover a reason for details',
@@ -67,8 +67,8 @@ const MODES = {
     title: 'Payment retries',
     api: '/api/retries',
     charts: 'retry-charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand'],
-    tabs: [['time', 'Trend'], ['attempt', 'Attempt number'], ['day', 'Days after decline'], ['decline_code', 'Decline codes'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands']],
+    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['attempt', 'Attempt number'], ['day', 'Days after decline'], ['decline_code', 'Decline codes'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands'], ['funding', 'Card types']],
     hints: {
       time: 'Trials by start date whose first payment attempt was declined, and the retries made for them. Retries are scheduled by Stripe Billing and Solidgate, not by our backend',
       attempt: 'How often each attempt succeeds — where retries stop paying off. Recoveries so far: share of all recoveries made by this attempt or earlier',
@@ -136,7 +136,7 @@ const MODES = {
 const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
-  destination: 'Destination', package: 'Package', risk: 'Radar risk score', charge_type: 'Charge type', merchant: 'Visa merchant',
+  destination: 'Destination', package: 'Package', risk: 'Radar risk score', charge_type: 'Charge type', merchant: 'Visa merchant', funding: 'Card type',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
 const TAB_TIPS = {
@@ -147,6 +147,7 @@ const TAB_TIPS = {
   payment_method: 'Карта, Apple Pay, Google Pay и т. д.',
   bank: 'Банк-эмитент карты — пока только у Solidgate',
   card_brand: 'Платёжная система карты: Visa, Mastercard…',
+  funding: 'Тип карты: дебетовая, кредитная, предоплаченная',
   decline_reason: 'Почему отклонили попытки списания',
   cancel_reason: 'Почему отменили подписку',
   risk: 'Radar risk score списания — только у Stripe',
@@ -279,6 +280,7 @@ function valueName(dimension, value) {
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
   if (dimension === 'charge_type') return CHARGE_TYPES[value] ?? value;
+  if (dimension === 'funding') return value[0].toUpperCase() + value.slice(1);
   return value;
 }
 const CHARGE_TYPES = { first_payment: 'First payment after trial', renewal: 'Renewal or other' };
@@ -535,8 +537,8 @@ function renderLtvKpis({ totals: t }) {
   kpiCards([
     ['Trials started', num(t.started), `${pct(t.trial_to_paid)} trial-to-paid`, 'Сколько триалов оформлено и какая доля оплатила первый период'],
     ['Revenue per trial, 30 days', approxUsd(t.ltv_30_per_trial, t.final_30), 'net of refunds', 'Деньги от триала за 30 дней с оформления: оплата триала, первый период, продления — за вычетом рефандов'],
-    ['Revenue per trial, 60 days', approxUsd(t.ltv_60_per_trial, t.final_60), 'net of refunds', 'То же за 60 дней'],
     ['Revenue per trial, 90 days', approxUsd(t.ltv_90_per_trial, t.final_90), 'net of refunds', 'То же за 90 дней'],
+    ['Avg. first payment', usdAverage(t.avg_first_payment), 'price of the 1st period, USD', 'Средняя сумма первого платежа после триала — цена первого периода в долларах. Ниже там, где региональные цены ниже'],
     ['Revenue per payer, 90 days', approxUsd(t.ltv_90_per_paid, t.final_90), 'per customer who paid the 1st period', 'Деньги за 90 дней на одного оплатившего первый период'],
     ['2nd period paid', approxPct(t.renewal_2, t.final_90), `${num(t.renewed_2)} of ${num(t.paid_1)} who paid the 1st`, 'Доля оплативших первый период, кто оплатил и второй — за 90 дней с оформления'],
   ]);
@@ -719,6 +721,7 @@ const LTV_COLUMNS = [
   { key: 'ltv_30_per_trial', title: 'Revenue / trial, 30d', tip: 'Деньги на один триал за 30 дней с оформления', sort: (p) => p.ltv_30_per_trial, cell: (p) => usdCell(p.ltv_30_per_trial, p.final_30) },
   { key: 'ltv_60_per_trial', title: 'Revenue / trial, 60d', tip: 'Деньги на один триал за 60 дней', sort: (p) => p.ltv_60_per_trial, cell: (p) => usdCell(p.ltv_60_per_trial, p.final_60) },
   { key: 'ltv_90_per_trial', title: 'Revenue / trial, 90d', tip: 'Деньги на один триал за 90 дней', sort: (p) => p.ltv_90_per_trial, cell: (p) => usdCell(p.ltv_90_per_trial, p.final_90) },
+  { key: 'avg_first_payment', title: 'Avg. first payment', tip: 'Средняя цена первого периода в долларах — по первому платежу после триала', sort: (p) => p.avg_first_payment, cell: (p) => `<td>${usdAverage(p.avg_first_payment)}</td>` },
   { key: 'ltv_90_per_paid', title: 'Revenue / paying, 90d', tip: 'Деньги за 90 дней на одного оплатившего', sort: (p) => p.ltv_90_per_paid, cell: (p) => usdCell(p.ltv_90_per_paid, p.final_90) },
   { key: 'renewal_2', title: '2nd period', tip: 'Оплатили и второй период — доля оплативших первый', sort: (p) => p.renewal_2, cell: (p) => rateCell(p.renewal_2, p.renewed_2, p.final_90, `${num(p.renewed_2)} of ${num(p.paid_1)}`) },
   { key: 'renewal_3', title: '3rd period', tip: 'Оплатили три периода и больше — доля оплативших первый', sort: (p) => p.renewal_3, cell: (p) => rateCell(p.renewal_3, p.renewed_3, p.final_90, `${num(p.renewed_3)} of ${num(p.paid_1)}`) },

@@ -45,6 +45,7 @@ export interface SgCard {
   country?: string | null; // alpha-3
   brand?: string | null;
   bank?: string | null;
+  card_type?: string | null; // DEBIT, CREDIT, PREPAID…
 }
 
 export interface SgTransaction {

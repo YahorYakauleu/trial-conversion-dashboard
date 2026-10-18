@@ -37,6 +37,7 @@ const trial: TrialRow = {
   customer_id: 'cus_1', // клиент — строкой или развёрнутым объектом
   canceled_at: null,
   cancel_reason: null,
+  funding: null, // тип карты — из карты клиента, если развёрнута
 };
 
 describe('trialFromSubscription', () => {

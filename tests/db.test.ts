@@ -32,6 +32,7 @@ describe('Store', () => {
       customer_id: 'cus_1',
       canceled_at: null,
       cancel_reason: null,
+      funding: null,
     });
     expect(store.countTrials()).toBe(1);
   });
