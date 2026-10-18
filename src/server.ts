@@ -316,7 +316,8 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       if (dimension) delete filters[dimension];
       return { dimension, filters };
     };
-    const compute = (): { value: string | null; count: number }[] => {
+    // keep — значение остаётся в списке и с нулём (у eSIM: были только неоплаченные заказы — их можно выбрать и разобрать отказы)
+    const compute = (): { value: string | null; count: number; keep?: boolean }[] => {
       if (mode === 'conversion' || mode === 'cancellations' || mode === 'retries' || mode === 'ltv') {
         const { dimension, filters } = facet(DIMENSIONS);
         const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
@@ -333,7 +334,10 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       }
       if (mode === 'esim_overview') {
         const { dimension, filters } = facet(OVERVIEW_DIMENSIONS);
-        return dimension ? getOverviewBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.orders })) : [];
+        // оплаченные заказы — как в карточке Orders
+        return dimension
+          ? getOverviewBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.paid_orders, keep: r.orders > 0 }))
+          : [];
       }
       if (mode === 'esim_repeat') {
         const { dimension, filters } = facet(REPEAT_DIMENSIONS);
@@ -343,7 +347,8 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     };
     const values = cached({ api: 'values', mode, provider, range, query: req.query }, () =>
       compute()
-        .filter((v) => v.count > 0)
+        .filter((v) => v.count > 0 || v.keep)
+        .map(({ value, count }) => ({ value, count }))
         .sort((a, b) => b.count - a.count),
     );
     res.json({ values });

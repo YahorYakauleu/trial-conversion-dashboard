@@ -289,7 +289,9 @@ describe('server', () => {
     expect((await get('/api/esim/overview?view=decline_reason')).reasons).toEqual([]); // единственный заказ оплачен
     expect((await get('/api/esim/repeat')).totals).toMatchObject({ customers: 1, repeat_30: 0 });
     const values = async (q: string) => (await (await fetch(`${url}/api/values?${q}`, { headers: auth })).json()).values;
-    expect(await values('mode=esim_overview&dimension=destination')).toEqual([{ value: 'Spain', count: 1 }]); // заказы
+    // в Японию — только неоплаченный заказ: в списке остаётся, с нулём
+    store.upsertEsimCharge({ ...esim, customer_id: 'cus_2', destination: 'Japan', payment_id: 'ch_3', intent_id: 'pi_2', paid_at: at + 120, amount_usd_cents: 500, approved: false, reason: 'insufficient_funds' });
+    expect(await values('mode=esim_overview&dimension=destination')).toEqual([{ value: 'Spain', count: 1 }, { value: 'Japan', count: 0 }]); // оплаченные заказы, как в Orders
     expect(await values('mode=esim_repeat&dimension=destination&destination=Japan')).toEqual([{ value: 'Spain', count: 1 }]); // клиенты
 
     // без ключа eSIM нет: эндпоинты — 404, оборот — всегда VPN
