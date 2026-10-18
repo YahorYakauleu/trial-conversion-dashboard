@@ -888,7 +888,14 @@ const OVERVIEW_COLUMNS = [
     sort: (p) => p.payment_success_rate,
     cell: (p) => rateCell(p.payment_success_rate, p.paid_orders, true, `${num(p.paid_orders)} of ${num(p.orders - p.fraud_blocked)} orders`),
   },
-  { key: 'lost_revenue', title: 'Lost revenue', tip: 'Сумма заказов настоящих покупателей, которые не удалось оплатить', sort: (p) => p.lost_revenue, cell: (p) => `<td>${usdAverage(p.lost_revenue)}</td>` },
+  {
+    key: 'lost_revenue',
+    title: 'Lost revenue',
+    tip: 'Сумма заказов настоящих покупателей, которые не удалось оплатить; рядом — сколько таких заказов',
+    sort: (p) => p.lost_revenue,
+    // неоплаченные — без отсечённых антифродом, как в карточке
+    cell: (p) => `<td>${usdAverage(p.lost_revenue)}<span class="n">${num(p.orders - p.paid_orders - p.fraud_blocked)}</span></td>`,
+  },
   { key: 'fraud_blocked', title: 'Blocked as fraud', tip: 'Заказы, которые отсёк антифрод: перебор карт и подозрительные оплаты', sort: (p) => p.fraud_blocked, cell: (p) => `<td class="muted">${num(p.fraud_blocked)}</td>` },
 ];
 const OVERVIEW_REASON_COLUMNS = [
