@@ -935,16 +935,37 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'No d
       .join('') || `<tr><td colspan="${columns.length + 1}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
   $('show-all').textContent = `Show all (${num(rows.length)})`;
-  fitTable();
+  buildFloatHead();
 }
 
-// Своя прокрутка у таблицы — только если она не помещается по ширине: иначе шапка прилипает к верху экрана (см. .scroll-x)
-function fitTable() {
-  const wrap = $('thead').closest('.table-wrap');
-  wrap.classList.remove('scroll-x');
-  wrap.classList.toggle('scroll-x', wrap.querySelector('table').offsetWidth > wrap.clientWidth);
+// Шапка таблицы при прокрутке страницы. У таблицы своя прокрутка вбок, а с ней CSS sticky не работает, поэтому —
+// копия шапки, закреплённая у верха экрана, пока настоящая за его краем, а таблица ещё видна.
+// Колонки — той же ширины, что у настоящей, сдвиг вбок — вместе с таблицей
+const floatHead = $('float-head');
+const tableWrap = $('thead').closest('.table-wrap');
+
+function placeFloatHead() {
+  const { top, bottom, left } = tableWrap.getBoundingClientRect();
+  floatHead.hidden = !(top < 0 && bottom > $('thead').offsetHeight);
+  if (floatHead.hidden) return;
+  floatHead.style.left = `${left}px`;
+  floatHead.style.width = `${tableWrap.clientWidth}px`;
+  floatHead.firstElementChild.style.transform = `translateX(${-tableWrap.scrollLeft}px)`;
 }
-window.addEventListener('resize', fitTable);
+
+function buildFloatHead() {
+  const copy = floatHead.firstElementChild;
+  copy.querySelector('thead').innerHTML = $('thead').innerHTML;
+  copy.querySelectorAll('button').forEach((b) => (b.tabIndex = -1)); // с клавиатуры — настоящая шапка
+  copy.style.width = `${tableWrap.querySelector('table').offsetWidth}px`;
+  const widths = [...$('thead').querySelectorAll('th')].map((th) => th.getBoundingClientRect().width);
+  copy.querySelectorAll('th').forEach((th, i) => (th.style.width = `${widths[i]}px`));
+  placeFloatHead();
+}
+
+window.addEventListener('scroll', placeFloatHead, { passive: true });
+tableWrap.addEventListener('scroll', placeFloatHead, { passive: true });
+window.addEventListener('resize', buildFloatHead);
 
 function renderView(data) {
   const isTime = state.view === 'time';
@@ -1548,7 +1569,8 @@ $('chips').addEventListener('click', (event) => {
   load();
 });
 
-$('thead').addEventListener('click', (event) => {
+// Сортировка — кликом по заголовку, и в самой таблице, и в закреплённой копии шапки
+function sortByHeader(event) {
   const key = event.target.closest('[data-sort]')?.dataset.sort;
   if (!key || !table) return;
   const current = state.sort ?? defaultSort();
@@ -1557,7 +1579,9 @@ $('thead').addEventListener('click', (event) => {
   state.sort = current?.key === key ? { key, dir: current.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: column.text ? 'asc' : 'desc' };
   saveUrl();
   renderTable(table.columns, table.rows, table);
-});
+}
+$('thead').addEventListener('click', sortByHeader);
+floatHead.addEventListener('click', sortByHeader);
 
 $('rows').addEventListener('click', (event) => {
   const exportButton = event.target.closest('.row-export');

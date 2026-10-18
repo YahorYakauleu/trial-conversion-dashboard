@@ -273,16 +273,14 @@ tbody tr:hover .row-export, .row-export:focus-visible { opacity: 1; }
 .legend i.dashed { background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 7px); }
 .chart { position: relative; height: 260px; }
 .chart.small { height: 170px; }
-/* Шапка прилипает к верху экрана, пока листаешь таблицу. Внутри блока с прокруткой sticky держится за сам блок,
-   поэтому, если таблица не помещается по ширине (.scroll-x, узкий экран), она становится окном не выше экрана
-   со своей прокруткой — шапка прилипает к его верху */
-.table-wrap { margin: -4px -16px -16px; }
-.table-wrap.scroll-x { overflow: auto; max-height: calc(100dvh - 24px); }
+/* Таблица листается вместе со страницей; своя прокрутка у неё — только вбок, если не помещается по ширине.
+   Шапку при прокрутке страницы держит её копия, закреплённая у верха экрана (.float-head) */
+.table-wrap { overflow-x: auto; margin: -4px -16px -16px; }
+.float-head { position: fixed; top: 0; z-index: 5; overflow: hidden; background: var(--surface-solid); box-shadow: 0 1px 0 var(--border), var(--shadow); }
+.float-head table { table-layout: fixed; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 th, td { padding: 10px 16px; text-align: right; white-space: nowrap; border-top: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
-.table-wrap th { position: sticky; top: 0; z-index: 1; background: var(--surface-solid); box-shadow: inset 0 -1px 0 var(--border); }
-.table-wrap tbody tr:first-child td { border-top: 0; }
 th:first-child, td:first-child { text-align: left; }
 td:first-child { font-weight: 500; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 td .n { color: var(--muted); margin-left: 6px; }
