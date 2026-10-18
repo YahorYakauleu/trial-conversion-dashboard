@@ -8,25 +8,17 @@ import { bucketDay, bucketSql, DAY, DIMENSION_SQL, finality, trialFilter, type D
 // или закрыта, банк отозвал разрешение, Stripe сам блокирует повтор) повтор почти никогда не проходит — такие повторы
 // считаются отдельно.
 
-const NO_RETRY = `(${NO_RETRY_CODES.map((c) => `'${c}'`).join(', ')})`;
-
-// Попытки триалов периода: номер попытки, дни от первой, был ли раньше отказ «не повторять», что стало дальше.
-// key — группа (SQL по триалу t)
+// Попытки триалов периода: номер попытки, дни от первой, был ли раньше отказ «не повторять», что стало дальше —
+// посчитаны при записи попытки (db.ts). key — группа (SQL по триалу t)
 function attemptsCte(o: RangeOptions, key: string) {
   const filter = trialFilter(o);
   return {
     sql: `WITH x AS (
       SELECT ${key} AS key, a.provider, a.subscription_id, a.attempt_id, a.attempted_at, a.approved, a.reason,
              t.trial_started_at, t.trial_ended_at, t.account, t.customer_id,
-             ROW_NUMBER() OVER w AS n,
-             (a.attempted_at - MIN(a.attempted_at) OVER (PARTITION BY a.provider, a.subscription_id)) / ${DAY} AS day,
-             COALESCE(MAX(CASE WHEN a.approved = 0 AND a.reason IN ${NO_RETRY} THEN 1 ELSE 0 END)
-                      OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS after_no_retry,
-             LEAD(a.approved) OVER w AS next_approved,
-             COALESCE(MAX(a.approved) OVER (w ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING), 0) AS approved_later
+             a.n, (a.attempted_at - a.first_at) / ${DAY} AS day, a.after_no_retry, a.next_approved, a.approved_later
       FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
-      WHERE ${filter.sql}
-      WINDOW w AS (PARTITION BY a.provider, a.subscription_id ORDER BY a.attempted_at, a.attempt_id))`,
+      WHERE ${filter.sql})`,
     params: filter.params as Record<string, string | number>,
   };
 }

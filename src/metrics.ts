@@ -300,8 +300,8 @@ export function getDeclineReasons(db: Db, o: RangeOptions): ReasonRow[] {
   const rows = db
     .prepare(
       `WITH ranked AS (
-         SELECT a.reason, a.approved, a.attempted_at, t.paid_at, t.trial_ended_at, t.attempts,
-                ROW_NUMBER() OVER (PARTITION BY a.provider, a.subscription_id ORDER BY a.attempted_at, a.attempt_id) AS n
+         -- номер попытки посчитан при её записи (db.ts)
+         SELECT a.reason, a.approved, a.attempted_at, t.paid_at, t.trial_ended_at, t.attempts, a.n
          FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
          WHERE ${filter.sql}
        )

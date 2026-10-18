@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { NO_RETRY_CODES } from './declines.js';
 
 export type Provider = 'stripe' | 'solidgate';
 export type RunKind = 'backfill' | 'daily';
@@ -272,6 +273,8 @@ export function openStore(file: string) {
     CREATE INDEX IF NOT EXISTS payments_product_paid_idx ON payments (product, paid_at);
     CREATE INDEX IF NOT EXISTS payments_customer_idx ON payments (customer_id) WHERE customer_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS payments_customer_paid_idx ON payments (provider, customer_id, paid_at); -- LTV по триалам
+    -- покрывающий для Visa-продаж VAMP: счёт по месяцам и мерчантам без чтения таблицы
+    CREATE INDEX IF NOT EXISTS payments_sales_idx ON payments (product, card_brand, paid_at, provider, mid);
   `);
   // Пересчёт итогов попыток одного триала (или всех — для базы, выгруженной до появления колонок)
   const attemptTotals = `(SELECT COUNT(*), COALESCE(SUM(a.approved), 0), COALESCE(MAX(a.refunded), 0)
@@ -283,6 +286,34 @@ export function openStore(file: string) {
   const refreshAttemptTotals = db.prepare(
     `UPDATE trials SET (attempts, approved, refunded) = ${attemptTotals} WHERE provider = ? AND subscription_id = ?`,
   );
+
+  // Порядок попыток подписки — хранится у попытки, чтобы экраны не нумеровали попытки при каждом запросе (Retries,
+  // причины отказа): номер попытки, время первой, был ли раньше отказ «не повторять», прошла ли следующая и любая дальнейшая.
+  // Пересчитывается при записи попытки — для её подписки; база без этих колонок пересчитывается целиком один раз
+  const attemptColumns = new Set((db.prepare('PRAGMA table_info(attempts)').all() as { name: string }[]).map((c) => c.name));
+  const withoutSequence = !attemptColumns.has('n');
+  if (withoutSequence) {
+    for (const column of ['n', 'first_at', 'next_approved']) db.exec(`ALTER TABLE attempts ADD COLUMN ${column} INTEGER`);
+    for (const column of ['after_no_retry', 'approved_later']) db.exec(`ALTER TABLE attempts ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+  }
+  const sequence = (where: string) => `
+    WITH s AS (
+      SELECT provider, attempt_id,
+             ROW_NUMBER() OVER w AS n,
+             MIN(attempted_at) OVER (PARTITION BY provider, subscription_id) AS first_at,
+             COALESCE(MAX(CASE WHEN approved = 0 AND reason IN (${NO_RETRY_CODES.map((c) => `'${c}'`).join(', ')}) THEN 1 ELSE 0 END)
+                      OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS after_no_retry,
+             LEAD(approved) OVER w AS next_approved,
+             COALESCE(MAX(approved) OVER (w ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING), 0) AS approved_later
+      FROM attempts WHERE ${where}
+      WINDOW w AS (PARTITION BY provider, subscription_id ORDER BY attempted_at, attempt_id))
+    UPDATE attempts SET n = s.n, first_at = s.first_at, after_no_retry = s.after_no_retry, next_approved = s.next_approved, approved_later = s.approved_later
+    FROM s WHERE attempts.provider = s.provider AND attempts.attempt_id = s.attempt_id`;
+  if (withoutSequence) db.exec(sequence('1 = 1'));
+  // Покрывающий индекс: экраны с попытками (Retries, причины отказа) читают их из индекса, не трогая таблицу
+  db.exec(`CREATE INDEX IF NOT EXISTS attempts_sequence_idx ON attempts
+             (provider, subscription_id, n, approved, reason, attempted_at, first_at, after_no_retry, next_approved, approved_later, attempt_id)`);
+  const refreshSequence = db.prepare(sequence('provider = @provider AND subscription_id = @subscription_id'));
 
   for (const [table, column, expression] of READABLE_DATES) {
     // table_xinfo, а не table_info: вычисляемые колонки table_info не показывает
@@ -451,11 +482,15 @@ export function openStore(file: string) {
     upsertAttempt(a: AttemptRow): void {
       upsertAttemptStmt.run({ ...a, approved: Number(a.approved), refunded: Number(a.refunded) });
       refreshAttemptTotals.run(a.provider, a.subscription_id);
+      refreshSequence.run({ provider: a.provider, subscription_id: a.subscription_id });
     },
 
     // Причина отказа из отдельного источника (заказы Solidgate) и рефанды (Stripe refunds) — по id попытки
     setAttemptReason(provider: Provider, attemptId: string, reason: string): void {
-      db.prepare('UPDATE attempts SET reason = COALESCE(reason, ?) WHERE provider = ? AND attempt_id = ?').run(reason, provider, attemptId);
+      const r = db
+        .prepare('UPDATE attempts SET reason = COALESCE(reason, ?) WHERE provider = ? AND attempt_id = ? RETURNING subscription_id')
+        .get(reason, provider, attemptId) as { subscription_id: string } | undefined;
+      if (r) refreshSequence.run({ provider, subscription_id: r.subscription_id }); // причина могла оказаться «не повторять»
     },
 
     markRefunded(provider: Provider, attemptId: string): void {

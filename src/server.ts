@@ -72,6 +72,7 @@ const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
 const MAX_FILTER_VALUES = 100;
 // «Сегодня» и окончательность цифр зависят от текущего времени — кэш живёт не дольше этого
 const CACHE_TTL_MS = 5 * 60_000;
+const SYNC_CACHE_TTL_MS = 2 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
 type AnyDimension = Dimension | TurnoverDimension | OverviewDimension | VampDimension;
 const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
@@ -125,13 +126,14 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   app.use(express.static(PUBLIC_DIR));
 
   // Данные меняет только синк, поэтому посчитанный ответ отдаётся из памяти до следующего синка.
-  // Пока синк идёт, база меняется на ходу — тогда считаем каждый раз.
+  // Пока синк идёт, база меняется на ходу — ответ живёт недолго (SYNC_CACHE_TTL_MS): иначе долгая загрузка
+  // заставляла бы пересчитывать экран на каждом переключении вкладки
   const cache = new Map<string, { at: number; version: number; data: unknown }>();
   const cached = <T>(key: object, compute: () => T): T => {
-    if (isSyncRunning()) return compute();
     const id = JSON.stringify(key);
     const hit = cache.get(id);
-    if (hit && hit.version === store.dataVersion() && Date.now() - hit.at < CACHE_TTL_MS) return hit.data as T;
+    const ttl = isSyncRunning() ? SYNC_CACHE_TTL_MS : CACHE_TTL_MS;
+    if (hit && hit.version === store.dataVersion() && Date.now() - hit.at < ttl) return hit.data as T;
     if (cache.size > 500) cache.clear();
     const data = compute();
     cache.set(id, { at: Date.now(), version: store.dataVersion(), data });
