@@ -104,4 +104,20 @@ describe('eSIM: списания', () => {
     await syncEsimAccount(store, client, cfg, NOW + 60);
     expect(calls.filter((c) => c.method === 'charges').every((c) => c.created.gte! >= NOW - 3600)).toBe(true);
   });
+
+  it('история, загруженная до банков, один раз проходится заново — банк дописывается в одном написании', async () => {
+    const store = openStore(':memory:');
+    store.setState('stripe', 'esim', 'cursor', NOW - 60);
+    const old = await esimChargeRow(charge() as never, toUsd);
+    store.upsertEsimCharge(old!);
+    const withBank = charge({ payment_method_details: { type: 'card', card: { country: 'ES', brand: 'visa', issuer: 'Banco Santander, S.A.' } } });
+    const { client, calls } = fakeStripe({ charges: [withBank] });
+    await syncEsimAccount(store, client, cfg, NOW);
+
+    expect(store.db.prepare('SELECT bank FROM payments').get()).toEqual({ bank: 'BANCO SANTANDER SA' });
+    expect(calls.filter((c) => c.method === 'charges' && c.created.gte === undefined)).toHaveLength(1);
+    calls.length = 0;
+    await syncEsimAccount(store, client, cfg, NOW + 60);
+    expect(calls.some((c) => c.method === 'charges' && c.created.gte === undefined)).toBe(false); // второй раз — нет
+  });
 });

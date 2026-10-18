@@ -6,7 +6,7 @@ import { bucketDay, bucketSql, DAY, dimensionFilterSql, periodSql, type Granular
 // Метрики eSIM: у продукта нет подписок — каждая покупка пакета или пополнение отдельный заказ (PaymentIntent),
 // в котором может быть несколько попыток списания (повторное нажатие, другая карта). Наружу — только заказы:
 // попытки путают. Списания лежат в payments с product = 'esim', отклонённые тоже.
-export const OVERVIEW_DIMENSIONS = ['destination', 'package', 'country', 'payment_method', 'card_brand'] as const;
+export const OVERVIEW_DIMENSIONS = ['destination', 'package', 'country', 'payment_method', 'bank', 'card_brand'] as const;
 export type OverviewDimension = (typeof OVERVIEW_DIMENSIONS)[number];
 // Удержание — когорты клиентов по первой покупке; разрезы — по ней же
 export const REPEAT_DIMENSIONS = OVERVIEW_DIMENSIONS;
@@ -85,7 +85,7 @@ export function ordersCte(o: EsimOptions, key: string) {
              SUM(CASE WHEN c.n = 1 THEN c.amount_usd_cents ELSE 0 END) AS amount,
              -- для выгрузки: кто, когда и что покупал (разрезы — по первой попытке), сколько попыток, какие списания
              MAX(c.customer_id) AS customer_id, MIN(c.paid_at) AS started_at, COUNT(*) AS attempts, GROUP_CONCAT(c.payment_id, ' ') AS charge_ids,
-             ${['destination', 'package', 'order_type', 'country', 'payment_method', 'card_brand'].map((d) => `MAX(CASE WHEN c.n = 1 THEN c.${d} END) AS ${d}`).join(', ')}
+             ${['destination', 'package', 'order_type', 'country', 'payment_method', 'bank', 'card_brand'].map((d) => `MAX(CASE WHEN c.n = 1 THEN c.${d} END) AS ${d}`).join(', ')}
       FROM c GROUP BY c.order_id
     )`;
   return { sql, params: { ...period.params, ...dims.params } };

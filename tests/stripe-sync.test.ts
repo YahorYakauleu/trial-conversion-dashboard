@@ -16,7 +16,7 @@ type Range = { gte?: number; lt?: number };
 type Call = { method: string; params: { created: Range; [key: string]: unknown }; options?: { apiVersion?: string } };
 type Item = { created: number; type?: string };
 
-function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; charges?: Item[]; refunds?: Item[] }) {
+function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; charges?: Item[]; refunds?: Item[]; searched?: object[] }) {
   const calls: Call[] = [];
   const inRange = (created: number, r: Range) =>
     (r.gte === undefined || created >= r.gte) && (r.lt === undefined || created < r.lt);
@@ -32,8 +32,16 @@ function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; char
     subscriptions: { list: list('subscriptions', data.subs) },
     invoices: { list: list('invoices', data.invoices) },
     events: { list: list('events', data.events) },
-    // поиск успешных списаний — разовый проход за клиентами платежей; в тестах их нет
-    charges: { list: list('charges', data.charges ?? []), search: () => (async function* () {})() },
+    // поиск успешных списаний — разовый проход за клиентами и банками платежей; отдаёт одно и то же на любые сутки
+    charges: {
+      list: list('charges', data.charges ?? []),
+      search: () => {
+        calls.push({ method: 'search', params: { created: {} } });
+        return (async function* () {
+          yield* data.searched ?? [];
+        })();
+      },
+    },
     refunds: { list: list('refunds', data.refunds ?? []) },
   } as unknown as StripeLike;
   return { client, calls };
@@ -144,7 +152,7 @@ describe('syncStripeAccount', () => {
   it('события по чужим подпискам и инвойсам без подписки пропускаются', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'org', 'cursor', NOW - DAY);
-    store.setState('stripe', 'org', 'subscription_fields_version', 3);
+    store.setState('stripe', 'org', 'subscription_fields_version', 4);
     const foreign = { created: NOW - 3600, data: { object: invoice({ parent: { subscription_details: { subscription: 'sub_x' } } }) } };
     const orphan = { created: NOW - 3600, data: { object: invoice({ parent: null }) } };
     const items = await syncStripeAccount(
@@ -191,7 +199,7 @@ describe('syncStripeAccount', () => {
   it('база до версии 2: один раз проходит подписки (с картой клиента) и списания, инвойсы не трогает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 3600);
-    store.setState('stripe', 'corp', 'subscription_fields_version', 3);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 4);
     store.setState('stripe', 'corp', 'loaded_from', HISTORY_FROM);
     store.setState('stripe', 'corp', 'country_done', 1); // старый флаг ничего не значит
     const withCard = {
@@ -216,17 +224,18 @@ describe('syncStripeAccount', () => {
     expect(calls.filter((c) => c.method === 'subscriptions').every((c) => isWindow(c, HOUR))).toBe(true); // второй раз — только свежие
   });
 
-  it('база без ID клиентов и типа карты: один раз проходит подписки с картой клиента и дописывает их, сохранённое не трогает', async () => {
+  it('база без ID клиентов, типа карты и банка: один раз проходит подписки с картой клиента и дописывает их, сохранённое не трогает', async () => {
     const store = openStore(':memory:');
     store.upsertTrial(trialFromSubscription(subscription as never, 'corp')!); // загружен раньше — без клиента
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.setState('stripe', 'corp', 'loaded_from', HISTORY_FROM);
-    const customer = { id: 'cus_9', invoice_settings: { default_payment_method: { type: 'card', card: { funding: 'debit', brand: 'visa' } } } };
+    const card = { funding: 'debit', brand: 'visa', issuer: 'Al Rajhi Banking and Investment Corp.' };
+    const customer = { id: 'cus_9', invoice_settings: { default_payment_method: { type: 'card', card } } };
     const { client, calls } = fakeStripe({ subs: [{ ...subscription, customer } as Item], invoices: [], events: [] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
-    expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ customer_id: 'cus_9', funding: 'debit' });
+    expect(store.getTrial('stripe', 'sub_1')).toMatchObject({ customer_id: 'cus_9', funding: 'debit', bank: 'AL RAJHI BANKING AND INVESTMENT CORP' });
     expect(calls.some((c) => c.method === 'subscriptions' && isWindow(c, DAY) && c.params.expand)).toBe(true);
     store.setCustomerId('stripe', 'sub_1', 'cus_other');
     expect(store.getTrial('stripe', 'sub_1')?.customer_id).toBe('cus_9');
@@ -238,7 +247,7 @@ describe('syncStripeAccount', () => {
   it('повторный синк сразу после предыдущего читает только последний час, а не сутки', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'subscription_fields_version', 3);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 4);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
@@ -279,7 +288,7 @@ describe('syncStripeAccount', () => {
   it('оборот: база без платежей один раз проходит списания с HISTORY_FROM; рефанд позже обновляет возвращённую сумму', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'subscription_fields_version', 3);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 4);
     store.setState('stripe', 'corp', 'details_version', 2);
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], charges: [paidCharge({})] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
@@ -301,7 +310,7 @@ describe('syncStripeAccount', () => {
     const store = openStore(':memory:');
     const loadedFrom = TODAY - 20 * DAY; // база выгружена с этого дня
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'subscription_fields_version', 3);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 4);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_old', trial_start: loadedFrom + 3600, trial_end: loadedFrom + 3600 + 7 * DAY } as never, 'corp')! });
@@ -324,10 +333,39 @@ describe('syncStripeAccount', () => {
     expect(calls.some((c) => isWindow(c, DAY))).toBe(false); // второй раз — только свежее
   });
 
+  it('платежи без банка: один раз проходит поиском успешные списания с HISTORY_FROM и дописывает банк, известное не трогает', async () => {
+    const store = openStore(':memory:');
+    for (const [key, value] of Object.entries({ cursor: NOW - 60, subscription_fields_version: 4, details_version: 2, payments_version: 1, loaded_from: HISTORY_FROM })) {
+      store.setState('stripe', 'corp', key, value);
+    }
+    // прошлая версия прохода (только клиенты) закончилась вчера — новая начинает с начала истории
+    store.setState('stripe', 'corp', 'payment_customers_version', 1);
+    store.setState('stripe', 'corp', 'payment_customers_day', TODAY);
+    const payment = { provider: 'stripe' as const, account: 'corp', mid: 'corp', paid_at: TODAY - 5 * DAY, amount_usd_cents: 1199, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa' };
+    store.upsertPayment({ ...payment, payment_id: 'ch_9', bank: null, customer_id: 'cus_1' });
+    store.upsertPayment({ ...payment, payment_id: 'ch_known', bank: 'CAPITEC BANK LTD' });
+    const searched = [
+      { id: 'ch_9', customer: 'cus_1', payment_method_details: { card: { issuer: 'Revolut Ltd.' } } },
+      { id: 'ch_known', customer: { id: 'cus_2' }, payment_method_details: { card: { issuer: 'Capitec Bank' } } },
+    ];
+    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], searched });
+    await syncStripeAccount(store, client, 'corp', cfg, NOW);
+
+    expect(store.db.prepare('SELECT payment_id, customer_id, bank FROM payments ORDER BY payment_id').all().map((r) => ({ ...r }))).toEqual([
+      { payment_id: 'ch_9', customer_id: 'cus_1', bank: 'REVOLUT LTD' },
+      { payment_id: 'ch_known', customer_id: 'cus_2', bank: 'CAPITEC BANK LTD' },
+    ]);
+    expect(calls.filter((c) => c.method === 'search')).toHaveLength((TODAY - HISTORY_FROM) / DAY + 1); // все сутки, включая сегодня
+    expect(store.getState('stripe', 'corp', 'payment_customers_version')).toBe(2);
+    calls.length = 0;
+    await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);
+    expect(calls.some((c) => c.method === 'search')).toBe(false); // второй раз — нет
+  });
+
   it('старая база без записи о начале истории и тот же HISTORY_FROM — ничего не догружает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    store.setState('stripe', 'corp', 'subscription_fields_version', 3);
+    store.setState('stripe', 'corp', 'subscription_fields_version', 4);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_1', trial_start: HISTORY_FROM + 4 * 3600, trial_end: HISTORY_FROM + 7 * DAY } as never, 'corp')! });

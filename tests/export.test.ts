@@ -103,7 +103,7 @@ describe('выгрузка списком', () => {
     expect(exportOrders(store.db, o, { reason: 'Transaction not allowed' }).rows.map((r) => r[0])).toEqual(['pi_b']);
 
     const customers = exportCustomers(store.db, o);
-    expect(customers.rows.map((r) => [r[0], r[2], r[8]])).toEqual([['A', 'pi_a', 'not yet']]); // 30 дней ещё не прошло
+    expect(customers.rows.map((r) => [r[0], r[2], r[customers.columns.indexOf('returned_within_30_days')]])).toEqual([['A', 'pi_a', 'not yet']]); // 30 дней ещё не прошло
   });
 
   it('CSV: BOM, кавычки и запятые экранируются', () => {

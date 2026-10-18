@@ -17,7 +17,7 @@ export interface TrialRow {
   country: string | null; // страна карты, двухбуквенный код (US, GB, …)
   payment_method: string | null; // apple_pay, google_pay, card, paypal…
   card_brand: string | null; // visa, mastercard…
-  bank: string | null; // банк-эмитент (есть только у Solidgate)
+  bank: string | null; // банк-эмитент — в одном написании (bankName)
   mid: string | null; // Stripe — аккаунт; Solidgate — MID, на котором оформлен триал (через него идут и все списания)
   customer_id?: string | null; // Stripe — клиент (cus_…), Solidgate — customer_account_id (id аккаунта у нас) — для выгрузки
   // Отмена подписки: когда попросили отменить (в том числе «в конце периода») и почему —
@@ -123,6 +123,12 @@ const READABLE_DATES: [table: string, column: string, expression: string][] = [
 export type Store = ReturnType<typeof openStore>;
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
+
+// Один банк провайдеры пишут по-разному: «Al Rajhi Banking and Investment Corp.» у Stripe, «AL RAJHI BANKING AND INVESTMENT CORP»
+// у Solidgate, «ABN AMRO BANK N.V» и «ABN AMRO BANK NV». Храним одно написание: заглавными, без точек и запятых
+export function bankName(raw: string | null | undefined): string | null {
+  return raw?.toUpperCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim() || null;
+}
 
 export function openStore(file: string) {
   const db = new DatabaseSync(file);
@@ -315,6 +321,10 @@ export function openStore(file: string) {
              (provider, subscription_id, n, approved, reason, attempted_at, first_at, after_no_retry, next_approved, approved_later, attempt_id)`);
   const refreshSequence = db.prepare(sequence('provider = @provider AND subscription_id = @subscription_id'));
 
+  // Банки, записанные до появления общего написания, — приводим к нему (проверка всех строк — доли секунды)
+  db.function('bank_name', { deterministic: true }, (raw) => bankName(raw as string | null));
+  for (const table of ['trials', 'payments']) db.exec(`UPDATE ${table} SET bank = bank_name(bank) WHERE bank IS NOT bank_name(bank)`);
+
   for (const [table, column, expression] of READABLE_DATES) {
     // table_xinfo, а не table_info: вычисляемые колонки table_info не показывает
     const existing = (db.prepare(`PRAGMA table_xinfo(${table})`).all() as { name: string }[]).some((c) => c.name === column);
@@ -450,7 +460,7 @@ export function openStore(file: string) {
         country: row.country,
         payment_method: row.payment_method,
         card_brand: row.card_brand,
-        bank: row.bank,
+        bank: bankName(row.bank),
         mid: row.mid ?? null,
         customer_id: row.customer_id ?? null,
         canceled_at: row.canceled_at ?? null,
@@ -476,7 +486,7 @@ export function openStore(file: string) {
     },
 
     setCardDetails(provider: Provider, subscriptionId: string, details: CardDetails & { mid: string | null }): void {
-      updateCardDetails.run({ provider, subscription_id: subscriptionId, ...details });
+      updateCardDetails.run({ provider, subscription_id: subscriptionId, ...details, bank: bankName(details.bank) });
     },
 
     upsertAttempt(a: AttemptRow): void {
@@ -501,12 +511,17 @@ export function openStore(file: string) {
     },
 
     upsertPayment(p: PaymentRow): void {
-      upsertPaymentStmt.run({ ...p, customer_id: p.customer_id ?? null });
+      upsertPaymentStmt.run({ ...p, customer_id: p.customer_id ?? null, bank: bankName(p.bank) });
     },
 
-    // Клиент у уже загруженного платежа — разовый проход (LTV)
-    setPaymentCustomer(provider: Provider, paymentId: string, customerId: string): void {
-      db.prepare('UPDATE payments SET customer_id = ? WHERE provider = ? AND payment_id = ? AND customer_id IS NULL').run(customerId, provider, paymentId);
+    // Клиент и банк у уже загруженного платежа — разовые проходы (LTV, банк Stripe): только пустые, известные не трогаем
+    setPaymentDetails(provider: Provider, paymentId: string, details: { customer_id: string | null; bank: string | null }): void {
+      db.prepare('UPDATE payments SET customer_id = COALESCE(customer_id, ?), bank = COALESCE(bank, ?) WHERE provider = ? AND payment_id = ?').run(
+        details.customer_id,
+        bankName(details.bank),
+        provider,
+        paymentId,
+      );
     },
 
     upsertVampReport(r: VampReportRow): void {
@@ -530,7 +545,7 @@ export function openStore(file: string) {
     },
 
     upsertEsimCharge(c: EsimChargeRow): void {
-      upsertEsimChargeStmt.run({ ...c, approved: Number(c.approved) });
+      upsertEsimChargeStmt.run({ ...c, approved: Number(c.approved), bank: bankName(c.bank) });
     },
 
     // Рефанд, пришедший позже платежа: доля возвращённой суммы (Stripe refunds)

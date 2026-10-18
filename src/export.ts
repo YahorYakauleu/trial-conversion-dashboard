@@ -191,7 +191,7 @@ export function exportOrders(db: Db, o: EsimOptions, unpaid: { reason: string | 
   return {
     columns: [
       'order_id', 'customer_id', 'started_utc', 'status', 'new_customer', 'order_type', 'destination', 'package', 'amount_usd', 'revenue_usd',
-      'attempts', 'decline_reason', 'decline_code', 'card_country', 'payment_method', 'card_brand', 'charge_ids', 'order_link', 'customer_link',
+      'attempts', 'decline_reason', 'decline_code', 'card_country', 'payment_method', 'card_brand', 'issuing_bank', 'charge_ids', 'order_link', 'customer_link',
     ],
     rows: rows.map((r) => {
       const status = r.paid ? 'paid' : r.fraud ? 'blocked as fraud' : 'not paid';
@@ -199,7 +199,7 @@ export function exportOrders(db: Db, o: EsimOptions, unpaid: { reason: string | 
         text(r.order_id), text(r.customer_id), utc(r.started_at as number), status, r.paid ? yesNo(r.first_purchase) : '', text(r.order_type),
         text(r.destination), text(r.package), dollars(r.amount as number), dollars(r.revenue as number), text(r.attempts),
         r.paid ? '' : declineLabel(r.last_reason as string | null), r.paid ? '' : text(r.last_reason),
-        text(r.country), text(r.payment_method), text(r.card_brand), text(r.charge_ids),
+        text(r.country), text(r.payment_method), text(r.card_brand), text(r.bank), text(r.charge_ids),
         stripeLink('stripe', 'esim', 'payments', r.order_id as string), stripeLink('stripe', 'esim', 'customers', r.customer_id as string | null),
       ];
     }),
@@ -215,7 +215,7 @@ export function exportCustomers(db: Db, o: EsimOptions): ExportTable {
   const { rows, truncated } = limited(all);
   return {
     columns: [
-      'customer_id', 'first_purchase_utc', 'first_order_id', 'destination', 'package', 'card_country', 'payment_method', 'card_brand',
+      'customer_id', 'first_purchase_utc', 'first_order_id', 'destination', 'package', 'card_country', 'payment_method', 'card_brand', 'issuing_bank',
       'returned_within_30_days', 'second_purchase_utc', 'revenue_90_days_usd', 'customer_link',
     ],
     rows: rows.map((c) => {
@@ -224,7 +224,7 @@ export function exportCustomers(db: Db, o: EsimOptions): ExportTable {
       // ещё не прошло 30 дней и снова не покупал — пока неизвестно
       const returned = second !== null && second < first + 30 * DAY ? 'yes' : o.now < first + 30 * DAY ? 'not yet' : 'no';
       return [
-        text(c.customer_id), utc(first), text(c.intent_id ?? c.payment_id), text(c.destination), text(c.package), text(c.country), text(c.payment_method), text(c.card_brand),
+        text(c.customer_id), utc(first), text(c.intent_id ?? c.payment_id), text(c.destination), text(c.package), text(c.country), text(c.payment_method), text(c.card_brand), text(c.bank),
         returned, utc(second), dollars(c.revenue_90 as number), stripeLink('stripe', 'esim', 'customers', c.customer_id as string),
       ];
     }),

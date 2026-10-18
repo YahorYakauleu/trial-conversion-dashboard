@@ -13,6 +13,9 @@ export const ESIM_ACCOUNT = 'esim';
 const PARALLEL = 8;
 const HOUR = 3_600;
 const SYNC_OVERLAP = HOUR; // списание может появиться в списке с задержкой — инкремент берёт с запасом
+// Версия данных списания: 1 — банк карты (Stripe отдаёт его с 16 октября 2026, у старых карт тоже).
+// История, загруженная раньше, один раз проходится заново — она небольшая
+const DETAILS_VERSION = 1;
 
 export interface EsimSyncConfig {
   toUsd: ToUsd;
@@ -58,8 +61,8 @@ export async function esimChargeRow(charge: Stripe.Charge, toUsd: ToUsd): Promis
   };
 }
 
-// Без курсора — вся история аккаунта одним проходом: он небольшой (десятки списаний в сутки), а без начала истории
-// клиенты, купившие до HISTORY_FROM, считались бы новыми. Дальше — инкремент с (курсор − 1 час):
+// Без курсора (или со старой версией данных) — вся история аккаунта одним проходом: он небольшой (десятки списаний
+// в сутки), а без начала истории клиенты, купившие до HISTORY_FROM, считались бы новыми. Дальше — инкремент с (курсор − 1 час):
 // новые списания, холды intro-пакетов, захваченные позже, и рефанды
 export async function syncEsimAccount(store: Store, stripe: StripeLike, cfg: EsimSyncConfig, now: number): Promise<number> {
   const today = startOfUtcDay(now);
@@ -73,9 +76,10 @@ export async function syncEsimAccount(store: Store, stripe: StripeLike, cfg: Esi
   };
   const listCharges = (created: Stripe.RangeQueryParam) => stripe.charges.list({ created, limit: 100, expand: ['data.balance_transaction'] });
 
-  if (cursor === null) {
+  if (cursor === null || (store.getState('stripe', ESIM_ACCOUNT, 'details_version') ?? 0) < DETAILS_VERSION) {
     for await (const charge of listCharges({ lt: today })) await save(charge);
     console.log(`[stripe:${ESIM_ACCOUNT}] вся история до ${dayKey(today)}: ${items} списаний`);
+    store.setState('stripe', ESIM_ACCOUNT, 'details_version', DETAILS_VERSION);
   }
 
   const since = (cursor ?? today) - SYNC_OVERLAP;

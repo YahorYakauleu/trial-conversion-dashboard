@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { openStore, type TrialRow } from '../src/db.js';
+import { bankName, openStore, type TrialRow } from '../src/db.js';
 
 const row: TrialRow = {
   provider: 'stripe',
@@ -60,8 +60,32 @@ describe('Store', () => {
       country: 'US',
       payment_method: 'apple_pay',
       card_brand: 'visa',
-      bank: 'Revolut',
+      bank: 'REVOLUT',
     });
+  });
+
+  it('банк — в одном написании: заглавными, без точек и запятых; записанный раньше приводится к нему при открытии', () => {
+    expect(bankName('Al Rajhi Banking and Investment Corp.')).toBe(bankName('AL RAJHI BANKING AND INVESTMENT CORP'));
+    expect(bankName('Banco de Crédito Social Cooperativo, S.A.')).toBe('BANCO DE CRÉDITO SOCIAL COOPERATIVO SA');
+    expect(bankName('DANSKE BANK  A/S ')).toBe('DANSKE BANK A/S');
+    expect([bankName(null), bankName(' . ')]).toEqual([null, null]);
+
+    const store = openStore(':memory:');
+    store.upsertTrial({ ...row, bank: 'ABN AMRO Bank N.V.' });
+    const payment = { provider: 'stripe' as const, account: 'corp', mid: 'corp', paid_at: 1_000, amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa' };
+    store.upsertPayment({ ...payment, payment_id: 'ch_1', bank: 'Revolut Ltd.' });
+    store.setPaymentDetails('stripe', 'ch_1', { customer_id: 'cus_1', bank: 'Other bank' }); // известный банк не трогаем
+    expect(store.db.prepare('SELECT customer_id, bank FROM payments').get()).toEqual({ customer_id: 'cus_1', bank: 'REVOLUT LTD' });
+
+    // строки, записанные до общего написания (в обход store), — при следующем открытии базы
+    const file = `/tmp/trial-dashboard-banks-${process.pid}.sqlite`;
+    const old = openStore(file);
+    old.db.prepare("INSERT INTO payments (provider, payment_id, account, paid_at, amount_usd_cents, bank) VALUES ('stripe', 'ch_2', 'corp', 1, 1, 'Revolut Ltd.')").run();
+    old.db.close();
+    const reopened = openStore(file);
+    expect(reopened.db.prepare('SELECT bank FROM payments').get()).toEqual({ bank: 'REVOLUT LTD' });
+    reopened.db.close();
+    for (const suffix of ['', '-wal', '-shm']) rmSync(`${file}${suffix}`, { force: true });
   });
 
   it('попытки: upsert идемпотентен, причина и рефанд не стираются, поиск триала по первому инвойсу', () => {
@@ -124,7 +148,7 @@ describe('Store', () => {
     legacy.close();
     const store = openStore(file);
     store.upsertTrial({ ...row, bank: 'Capitec' });
-    expect(store.getTrial('stripe', 'sub_1')?.bank).toBe('Capitec');
+    expect(store.getTrial('stripe', 'sub_1')?.bank).toBe('CAPITEC');
     expect(({ ...(store.db.prepare('SELECT trial_started_utc FROM trials').get() as object) })).toEqual({ trial_started_utc: '1970-01-01 00:16:40' });
     store.db.close();
     rmSync(file, { force: true });

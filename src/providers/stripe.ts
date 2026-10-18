@@ -26,14 +26,14 @@ const SYNC_OVERLAP = HOUR;
 const DETAILS_VERSION = 2;
 // Версия оборота: 1 — успешные списания сохраняются как платежи. База, выгруженная раньше, один раз проходит списания заново.
 const PAYMENTS_VERSION = 1;
-// Клиент у платежа (для LTV): база, загруженная раньше, один раз дописывает его — поиском только успешных списаний,
-// их втрое меньше, чем всех (~70 с на сутки большого аккаунта). У поиска свой, более жёсткий лимит запросов —
-// параллельно не больше трёх суток (при восьми на пустых днях Stripe отвечает rate limit)
-const PAYMENT_CUSTOMERS_VERSION = 1;
+// Клиент у платежа (1 — для LTV, 2 — ещё и банк): база, загруженная раньше, один раз дописывает их — поиском только
+// успешных списаний, их втрое меньше, чем всех (~70 с на сутки большого аккаунта). У поиска свой, более жёсткий лимит
+// запросов — параллельно не больше трёх суток (при восьми на пустых днях Stripe отвечает rate limit)
+const PAYMENT_CUSTOMERS_VERSION = 2;
 const SEARCH_PARALLEL = 3;
-// Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена, 3 — тип карты): база загружена раньше — один раз
-// проходим подписки (для типа карты — с картой клиента) и дописываем их
-const SUBSCRIPTION_FIELDS_VERSION = 3;
+// Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена, 3 — тип карты, 4 — банк): база загружена раньше —
+// один раз проходим подписки (для карты — с картой клиента) и дописываем их
+const SUBSCRIPTION_FIELDS_VERSION = 4;
 // В basil у charge нет ссылки на инвойс — список списаний запрашиваем в версии API, где она есть
 const CHARGES_API_VERSION = '2024-06-20';
 // Инвойс продления создаётся в момент окончания триала; запас — на задержки Stripe.
@@ -87,7 +87,7 @@ const funding = (sub: Stripe.Subscription) => {
   return value && value !== 'unknown' ? value : null;
 };
 
-// Банк Stripe для аккаунтов Toggle не отдаёт (issuer пустой) — останется null.
+// Банк (issuer) Stripe отдаёт с 16 октября 2026, у старых карт тоже — загруженное раньше дописывают разовые проходы
 function cardDetails(sub: Stripe.Subscription): CardDetails {
   const pm = defaultCard(sub);
   return {
@@ -357,8 +357,8 @@ export async function syncStripeAccount(
     await invoicesPass('invoices_day');
     await chargesPassWithPayments('charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
-    store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом и отменой
-    store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION); // платежи уже с клиентом
+    store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом, отменой, типом карты и банком
+    store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION); // платежи уже с клиентом и банком
     store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
@@ -366,7 +366,7 @@ export async function syncStripeAccount(
     await chargesPassWithPayments('details_charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
   }
-  // Один раз для уже загруженных триалов: ID клиента, отмена и тип карты (подписки с картой клиента)
+  // Один раз для уже загруженных триалов: ID клиента, отмена, тип карты и банк (подписки с картой клиента)
   if (cursor !== null && (store.getState('stripe', account, 'subscription_fields_version') ?? 0) < SUBSCRIPTION_FIELDS_VERSION) {
     const progressKey = `subscription_fields_v${SUBSCRIPTION_FIELDS_VERSION}_day`;
     await forEachWindow(
@@ -383,27 +383,29 @@ export async function syncStripeAccount(
           store.setCancellation('stripe', sub.id, canceled_at, cancel_reason);
           const type = funding(sub);
           if (type) store.setFunding('stripe', sub.id, type);
+          store.setCardDetails('stripe', sub.id, { ...cardDetails(sub), mid: account }); // только пустые поля — банк
         }
-        console.log(`[stripe:${account}] клиенты, отмены и тип карты ${dayKey(day)} готово`);
+        console.log(`[stripe:${account}] клиенты, отмены, тип карты и банк ${dayKey(day)} готово`);
       },
       (next) => store.setState('stripe', account, progressKey, next),
     );
     store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION);
   }
   if (cursor !== null && (store.getState('stripe', account, 'payment_customers_version') ?? 0) < PAYMENT_CUSTOMERS_VERSION) {
+    const progressKey = `payment_customers_v${PAYMENT_CUSTOMERS_VERSION}_day`;
     await forEachWindow(
-      store.getState('stripe', account, 'payment_customers_day') ?? cfg.historyFrom,
+      store.getState('stripe', account, progressKey) ?? cfg.historyFrom,
       now,
       DAY,
       SEARCH_PARALLEL,
       async (day) => {
         for await (const charge of stripe.charges.search({ query: `status:'succeeded' AND created>=${day} AND created<${day + DAY}`, limit: 100 })) {
-          const customer = typeof charge.customer === 'string' ? charge.customer : charge.customer?.id;
-          if (customer) store.setPaymentCustomer('stripe', charge.id, customer);
+          const customer = typeof charge.customer === 'string' ? charge.customer : (charge.customer?.id ?? null);
+          store.setPaymentDetails('stripe', charge.id, { customer_id: customer, bank: charge.payment_method_details?.card?.issuer ?? null });
         }
-        console.log(`[stripe:${account}] клиенты платежей ${dayKey(day)} готово`);
+        console.log(`[stripe:${account}] клиенты и банки платежей ${dayKey(day)} готово`);
       },
-      (next) => store.setState('stripe', account, 'payment_customers_day', next),
+      (next) => store.setState('stripe', account, progressKey, next),
     );
     store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION);
     resetTrialLtv(store.db, 'stripe', account);
