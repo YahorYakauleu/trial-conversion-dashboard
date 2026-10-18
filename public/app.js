@@ -210,7 +210,6 @@ const state = {
   filters: Object.fromEntries(MODES[initialMode].dimensions.filter((d) => params.getAll(d).length).map((d) => [d, params.getAll(d)])),
   sort: parseSort(params.get('sort')),
   showAll: false,
-  compare: pick(params.get('compare'), ['off', 'prev'], 'off'), // сравнение карточек с прошлым периодом той же длины
 };
 const product = () => MODES[state.mode].product;
 const kind = () => MODES[state.mode].kind;
@@ -293,7 +292,6 @@ function query() {
     q.set('to', state.to);
   }
   for (const [dimension, values] of Object.entries(state.filters)) for (const value of values) q.append(dimension, value);
-  if (state.compare !== 'off') q.set('compare', state.compare);
   return q;
 }
 
@@ -322,7 +320,6 @@ async function load(kind = 'data') {
     if (res.status === 401) return location.assign('/login');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     lastData = await res.json();
-    compareData = await loadCompare(lastData);
     if (seq !== loadSeq) return;
     render(lastData);
     if (lastData.sync_running) pollTimer = setTimeout(() => load('silent'), 10_000);
@@ -371,8 +368,7 @@ function markControls() {
     .map(([v, m]) => `<button data-v="${v}" class="${v === state.mode ? 'on' : ''}" data-tip="${m.tip}">${m.label}</button>`)
     .join('');
   $('provider-group').hidden = product() !== 'vpn';
-  $('compare-group').hidden = !COMPARE[kind()]; // у VAMP — месяцы, сравнивать по-другому
-  for (const id of ['provider', 'granularity', 'compare']) {
+  for (const id of ['provider', 'granularity']) {
     document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
   }
 }
@@ -464,78 +460,11 @@ function renderHeader(data) {
     .join('');
 }
 
-// Карточка: название, значение, подпись и пояснение по-русски для подсказки; при сравнении — изменение к прошлому периоду
+// Карточка: название, значение, подпись и пояснение по-русски для подсказки
 function kpiCards(cards) {
-  const deltas = compareDeltas();
   $('kpis').innerHTML = cards
-    .map(
-      ([label, value, sub, tip], i) =>
-        `<div class="kpi"><div class="label" data-tip="${esc(tip)}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div>${deltas[i] ?? ''}</div>`,
-    )
+    .map(([label, value, sub, tip]) => `<div class="kpi"><div class="label" data-tip="${esc(tip)}">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`)
     .join('');
-}
-
-// --- сравнение с прошлым периодом той же длины (Compare → Previous period)
-// По карточкам экрана, в их порядке: поле итогов, тип (count — штуки, rate — доля, money — центы, number — число),
-// знаменатель доли (для проверки значимости) и какое направление — к лучшему (up / down; null — нейтрально)
-const COMPARE = {
-  conversion: [['started', 'count', null, 'up'], ['rate_retry', 'rate', 'started', 'up'], ['rate_first', 'rate', 'started', 'up'], ['approval_rate', 'rate', 'attempts', 'up'], ['decline_rate', 'rate', 'attempts', 'down'], ['refund_rate', 'rate', 'paid_retry', 'down'], ['fraud_rate', 'rate', 'paid_retry', 'down']],
-  ltv: [['started', 'count', null, 'up'], ['ltv_30_per_trial', 'money', null, 'up'], ['ltv_90_per_trial', 'money', null, 'up'], ['avg_first_payment', 'money', null, null], ['ltv_90_per_paid', 'money', null, 'up'], ['renewal_2', 'rate', 'paid_1', 'up']],
-  cancellations: [['started', 'count', null, 'up'], ['trial_cancellation_rate', 'rate', 'started', 'down'], ['day0_share', 'rate', 'canceled_in_trial', null], ['avg_cancel_day', 'number', null, null], ['post_trial_cancellation_rate', 'rate', 'started', 'down']],
-  retries: [['first_declined', 'count', null, 'down'], ['recovery_rate', 'rate', 'first_declined', 'up'], ['retries', 'count', null, null], ['retries_per_recovery', 'number', null, 'down'], ['no_retry_retries', 'count', null, 'down']],
-  turnover: [['gross', 'money', null, 'up'], ['refunded', 'money', null, 'down'], ['disputes', 'money', null, 'down'], ['net', 'money', null, 'up'], ['fees', 'money', null, 'down'], ['net_after_fees', 'money', null, 'up']],
-  overview: [['revenue', 'money', null, 'up'], ['paid_orders', 'count', null, 'up'], ['new_customers', 'count', null, 'up'], ['payment_success_rate', 'rate', 'orders', 'up'], ['lost_revenue', 'money', null, 'down'], ['fraud_blocked', 'count', null, 'down']],
-  repeat: [['customers', 'count', null, 'up'], ['repeat_rate_30', 'rate', 'customers', 'up'], ['revenue_per_customer_90', 'money', null, 'up']],
-};
-let compareData = null; // итоги прошлого периода и его даты
-
-const shiftDay = (day, n) => new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
-
-// Прошлый период той же длины — тем же запросом (итоги считаются и для вкладок-разрезов); раньше начала истории — не сравниваем
-async function loadCompare(data) {
-  if (state.compare === 'off' || !COMPARE[kind()]) return null;
-  const length = Math.round((Date.parse(data.range.to) - Date.parse(data.range.from)) / DAY_MS) + 1;
-  const to = shiftDay(data.range.from, -1);
-  const from = shiftDay(to, -(length - 1));
-  if (from < data.history_from) return { from, to, totals: null };
-  const q = query();
-  q.set('period', 'custom');
-  q.set('from', from);
-  q.set('to', to);
-  q.set('granularity', 'month');
-  const res = await api(`${MODES[state.mode].api}?${q}`);
-  return res.ok ? { from, to, totals: (await res.json()).totals } : null;
-}
-
-// Значимость изменения: доля — z-тест двух долей, количество — разница двух пуассоновских счётчиков; |z| ≥ 1,96 — значимо (95%)
-function significant(type, cur, prev, base) {
-  if (type === 'rate') {
-    const [n1, n2] = [lastData.totals[base], compareData.totals[base]];
-    if (!n1 || !n2) return false;
-    const pooled = (cur * n1 + prev * n2) / (n1 + n2);
-    const se = Math.sqrt(pooled * (1 - pooled) * (1 / n1 + 1 / n2));
-    return se > 0 && Math.abs(cur - prev) / se >= 1.96;
-  }
-  if (type === 'count') return cur + prev > 0 && Math.abs(cur - prev) / Math.sqrt(cur + prev) >= 1.96;
-  return true; // деньги и средние — без проверки: красим по направлению
-}
-
-function compareDeltas() {
-  const spec = COMPARE[kind()];
-  if (!spec || !compareData || !lastData?.totals) return [];
-  const period = `${shortDay(compareData.from)} — ${shortDay(compareData.to)}`;
-  if (!compareData.totals) return spec.map(() => `<div class="delta" data-tip="Прошлый период раньше начала истории — сравнить не с чем">vs ${period}: no data</div>`);
-  return spec.map(([key, type, base, better]) => {
-    const [cur, prev] = [lastData.totals[key], compareData.totals[key]];
-    if (cur === null || cur === undefined || prev === null || prev === undefined) return '';
-    const diff = cur - prev;
-    const text = type === 'rate' ? `${diff >= 0 ? '+' : '−'}${Math.abs(diff * 100).toFixed(1)} pp` : prev === 0 ? '—' : `${diff >= 0 ? '+' : '−'}${Math.abs((diff / prev) * 100).toFixed(0)}%`;
-    const was = type === 'rate' ? pct(prev) : type === 'money' ? usdAverage(prev) : type === 'number' ? decimal(prev) : num(prev);
-    const sig = diff !== 0 && significant(type, cur, prev, base);
-    const cls = !better || !sig ? '' : (diff > 0) === (better === 'up') ? 'good' : 'bad';
-    const tip = `Было ${was} за ${period}.${type === 'rate' || type === 'count' ? (sig ? ' Изменение статистически значимо (95%)' : ' Изменение в пределах случайного шума') : ''}`;
-    return `<div class="delta ${cls}" data-tip="${esc(tip)}">${diff > 0 ? '▲' : diff < 0 ? '▼' : '='} ${text} vs ${period}</div>`;
-  });
 }
 
 function renderKpis(t, range) {
@@ -1581,7 +1510,7 @@ $('product').addEventListener('click', (event) => {
   if (value && value !== product()) switchMode(Object.keys(MODES).find((m) => MODES[m].product === value));
 });
 
-for (const id of ['provider', 'granularity', 'compare']) {
+for (const id of ['provider', 'granularity']) {
   $(id).addEventListener('click', (event) => {
     const value = event.target.closest('button')?.dataset.v;
     if (!value || value === state[id]) return;
