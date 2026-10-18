@@ -422,22 +422,10 @@ describe('оборот', () => {
 
   it('итоги и ряд по дням: оборот, рефанды, нетто, средний чек; пустые дни — нули', () => {
     const { totals, series } = getTurnover(seeded().db, { ...range, granularity: 'day' });
-    expect(totals).toEqual({ payments: 3, gross: 5_000, refunded: 1_000, disputes: 0, fees: 0, net: 4_000, net_after_fees: 4_000, average: 1_667 });
+    expect(totals).toEqual({ payments: 3, gross: 5_000, refunded: 1_000, net: 4_000, average: 1_667 });
     expect(series).toHaveLength(7);
     expect(series[0]).toMatchObject({ period: '2026-10-05', payments: 2, gross: 4_000, net: 3_000 });
     expect(series[1]).toMatchObject({ period: '2026-10-06', payments: 0, gross: 0, average: null });
-  });
-
-  it('P&L: диспуты (по дню исходного платежа) и комиссии Stripe вычитаются из оборота', () => {
-    const store = seeded();
-    store.upsertPayment(payment('a', '2026-10-05T10:00:00Z', { amount_usd_cents: 3_000, refunded_usd_cents: 1_000, fee_usd_cents: 240 }));
-    store.upsertVampReport({
-      provider: 'stripe', report_id: 'du_1', account: 'corp', mid: 'corp', kind: 'dispute', reported_at: ts('2026-10-20T10:00:00Z'), payment_id: 'b',
-      charged_at: null, network: 'visa', country: 'GB', payment_method: 'google_pay', customer_id: null, risk_score: null, reason: 'fraudulent',
-      case_type: 'chargeback', rdr: true, lost_usd_cents: 1_500, amount_usd_cents: null, refunded: false,
-    });
-    const { totals } = getTurnover(store.db, { ...range, granularity: 'day' });
-    expect(totals).toMatchObject({ gross: 5_000, refunded: 1_000, disputes: 1_500, fees: 240, net: 2_500, net_after_fees: 2_260 });
   });
 
   it('сутки по часовому поясу дашборда и группировка по неделям', () => {

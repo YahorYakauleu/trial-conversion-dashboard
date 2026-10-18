@@ -16,7 +16,7 @@ type Range = { gte?: number; lt?: number };
 type Call = { method: string; params: { created: Range; [key: string]: unknown }; options?: { apiVersion?: string } };
 type Item = { created: number; type?: string };
 
-function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; charges?: Item[]; refunds?: Item[]; balance?: Item[] }) {
+function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; charges?: Item[]; refunds?: Item[] }) {
   const calls: Call[] = [];
   const inRange = (created: number, r: Range) =>
     (r.gte === undefined || created >= r.gte) && (r.lt === undefined || created < r.lt);
@@ -34,7 +34,6 @@ function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; char
     events: { list: list('events', data.events) },
     // поиск успешных списаний — разовый проход за клиентами платежей; в тестах их нет
     charges: { list: list('charges', data.charges ?? []), search: () => (async function* () {})() },
-    balanceTransactions: { list: list('balanceTransactions', data.balance ?? []) }, // разовый проход за комиссиями
     refunds: { list: list('refunds', data.refunds ?? []) },
   } as unknown as StripeLike;
   return { client, calls };
@@ -325,30 +324,12 @@ describe('syncStripeAccount', () => {
     expect(calls.some((c) => isWindow(c, DAY))).toBe(false); // второй раз — только свежее
   });
 
-  it('комиссии: база без них один раз проходит проводки баланса типа charge и дописывает комиссию платежам', async () => {
-    const store = openStore(':memory:');
-    store.setState('stripe', 'corp', 'cursor', NOW - 60);
-    for (const [key, value] of [['subscription_fields_version', 3], ['details_version', 2], ['payments_version', 1], ['loaded_from', HISTORY_FROM]] as const) {
-      store.setState('stripe', 'corp', key, value);
-    }
-    store.upsertPayment({ provider: 'stripe', payment_id: 'ch_1', account: 'corp', mid: 'corp', paid_at: HISTORY_FROM + DAY, amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa', bank: null });
-    const balance = [{ created: HISTORY_FROM + DAY, type: 'charge', source: 'ch_1', fee: 87, currency: 'usd' }];
-    const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], balance: balance as Item[] });
-    await syncStripeAccount(store, client, 'corp', cfg, NOW);
-    expect(store.db.prepare("SELECT fee_usd_cents FROM payments WHERE payment_id = 'ch_1'").get()).toEqual({ fee_usd_cents: 87 });
-    expect(calls.filter((c) => c.method === 'balanceTransactions').every((c) => c.params.type === 'charge')).toBe(true);
-    calls.length = 0;
-    await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);
-    expect(calls.filter((c) => c.method === 'balanceTransactions')).toEqual([]); // второй раз — нет
-  });
-
   it('старая база без записи о начале истории и тот же HISTORY_FROM — ничего не догружает', async () => {
     const store = openStore(':memory:');
     store.setState('stripe', 'corp', 'cursor', NOW - 60);
     store.setState('stripe', 'corp', 'subscription_fields_version', 3);
     store.setState('stripe', 'corp', 'details_version', 2);
     store.setState('stripe', 'corp', 'payments_version', 1);
-    store.setState('stripe', 'corp', 'payment_fees_version', 1); // комиссии уже загружены
     store.upsertTrial({ ...trialFromSubscription({ id: 'sub_1', trial_start: HISTORY_FROM + 4 * 3600, trial_end: HISTORY_FROM + 7 * DAY } as never, 'corp')! });
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [] });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);

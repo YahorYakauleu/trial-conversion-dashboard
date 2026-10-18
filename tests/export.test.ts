@@ -78,7 +78,7 @@ describe('выгрузка списком', () => {
 
   it('VPN, оборот: платежи периода в долларах', () => {
     const table = exportPayments(vpnStore().db, { provider: 'all', filters: {}, from: '2026-09-19', to: '2026-09-19', timeZones });
-    expect(table.rows).toEqual([['stripe', 'corp', 'corp', 'ch_2', '2026-09-19 12:00:00', '9.99', '0.00', '0.00', '0.00', 'US', 'apple_pay', 'visa', '', 'https://dashboard.stripe.com/acct_1TM4VlLTzrJvLtxV/payments/ch_2']]);
+    expect(table.rows).toEqual([['stripe', 'corp', 'corp', 'ch_2', '2026-09-19 12:00:00', '9.99', '0.00', 'US', 'apple_pay', 'visa', '', 'https://dashboard.stripe.com/acct_1TM4VlLTzrJvLtxV/payments/ch_2']]);
   });
 
   it('eSIM: заказы со статусом и новыми клиентами; неоплаченные по причине; новые клиенты когорты', () => {

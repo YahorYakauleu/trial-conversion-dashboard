@@ -122,22 +122,15 @@ export function exportPayments(db: Db, o: TurnoverOptions): ExportTable {
   const filter = paymentFilter(o);
   type Row = Record<string, string | number | null>;
   const all = db
-    .prepare(
-      `SELECT p.*, (SELECT SUM(v.lost_usd_cents) FROM vamp_reports v WHERE v.provider = p.provider AND v.payment_id = p.payment_id AND v.kind = 'dispute') AS dispute_lost
-       FROM payments p WHERE ${filter.sql} ORDER BY p.paid_at, p.payment_id LIMIT ${EXPORT_LIMIT + 1}`,
-    )
+    .prepare(`SELECT p.* FROM payments p WHERE ${filter.sql} ORDER BY p.paid_at, p.payment_id LIMIT ${EXPORT_LIMIT + 1}`)
     .all(filter.params) as Row[];
   const { rows, truncated } = limited(all);
   return {
-    columns: [
-      'provider', 'account', 'mid', 'payment_id', 'paid_utc', 'amount_usd', 'refunded_usd', 'dispute_lost_usd', 'stripe_fee_usd',
-      'card_country', 'payment_method', 'card_brand', 'issuing_bank', 'payment_link',
-    ],
+    columns: ['provider', 'account', 'mid', 'payment_id', 'paid_utc', 'amount_usd', 'refunded_usd', 'card_country', 'payment_method', 'card_brand', 'issuing_bank', 'payment_link'],
     rows: rows.map((p) => {
       const [provider, account] = [String(p.provider), String(p.account)];
       return [
         provider, account, text(p.mid), text(p.payment_id), utc(p.paid_at as number), dollars(p.amount_usd_cents as number), dollars(p.refunded_usd_cents as number),
-        dollars((p.dispute_lost as number | null) ?? 0), dollars(p.fee_usd_cents as number),
         text(p.country), text(p.payment_method), text(p.card_brand), text(p.bank), stripeLink(provider, account, 'payments', p.payment_id as string),
       ];
     }),

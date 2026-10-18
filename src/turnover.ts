@@ -12,8 +12,6 @@ import {
 import { addDays } from './time.js';
 
 // Оборот VPN — все успешные платежи по дате платежа (не по когортам триалов). Суммы — в центах USD.
-// P&L: из оборота вычитаются рефанды и диспуты (Net volume, как у Stripe), затем комиссии Stripe (Net after fees).
-// Рефанд и диспут относятся к дню исходного платежа; комиссий Solidgate в отчётах нет.
 // У eSIM свой экран (src/esim.ts): его платежи лежат в той же таблице с product = 'esim'
 export const TURNOVER_DIMENSIONS = ['mid', 'country', 'payment_method', 'bank', 'card_brand'] as const;
 export type TurnoverDimension = (typeof TURNOVER_DIMENSIONS)[number];
@@ -32,13 +30,10 @@ interface Sums {
   payments: number;
   gross: number; // оборот
   refunded: number; // из него возвращено
-  disputes: number; // стоимость диспутов по этим платежам: сумма и комиссия, у выигранных — только комиссия
-  fees: number; // комиссии Stripe
 }
 
 export interface TurnoverTotals extends Sums {
-  net: number; // оборот за вычетом рефандов и диспутов
-  net_after_fees: number; // и за вычетом комиссий
+  net: number; // оборот за вычетом рефандов
   average: number | null; // средний чек
 }
 
@@ -60,18 +55,11 @@ export interface TurnoverOptions {
   timeZones: TimeZones;
 }
 
-const zero = (): Sums => ({ payments: 0, gross: 0, refunded: 0, disputes: 0, fees: 0 });
-const add = (a: Sums, b: Sums): Sums => ({
-  payments: a.payments + b.payments,
-  gross: a.gross + b.gross,
-  refunded: a.refunded + b.refunded,
-  disputes: a.disputes + b.disputes,
-  fees: a.fees + b.fees,
-});
+const zero = (): Sums => ({ payments: 0, gross: 0, refunded: 0 });
+const add = (a: Sums, b: Sums): Sums => ({ payments: a.payments + b.payments, gross: a.gross + b.gross, refunded: a.refunded + b.refunded });
 const withTotals = <T extends Sums>(s: T): T & TurnoverTotals => ({
   ...s,
-  net: s.gross - s.refunded - s.disputes,
-  net_after_fees: s.gross - s.refunded - s.disputes - s.fees,
+  net: s.gross - s.refunded,
   average: s.payments === 0 ? null : Math.round(s.gross / s.payments),
 });
 
@@ -87,12 +75,8 @@ function sums(db: Db, o: TurnoverOptions, key: string) {
   const filter = paymentFilter(o);
   return db
     .prepare(
-      `SELECT ${key} AS key, COUNT(*) AS payments, SUM(p.amount_usd_cents) AS gross, SUM(p.refunded_usd_cents) AS refunded,
-              COALESCE(SUM(d.lost), 0) AS disputes, SUM(p.fee_usd_cents) AS fees
-       FROM payments p
-       LEFT JOIN (SELECT provider, payment_id, SUM(lost_usd_cents) AS lost FROM vamp_reports WHERE kind = 'dispute' GROUP BY provider, payment_id) d
-         ON d.provider = p.provider AND d.payment_id = p.payment_id
-       WHERE ${filter.sql} GROUP BY key`,
+      `SELECT ${key} AS key, COUNT(*) AS payments, SUM(p.amount_usd_cents) AS gross, SUM(p.refunded_usd_cents) AS refunded
+       FROM payments p WHERE ${filter.sql} GROUP BY key`,
     )
     .all(filter.params) as unknown as (Sums & { key: string | number | null })[];
 }

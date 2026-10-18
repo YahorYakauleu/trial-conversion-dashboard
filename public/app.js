@@ -481,12 +481,11 @@ function renderKpis(t, range) {
 
 function renderTurnoverKpis(t, range) {
   kpiCards([
-    ['Gross volume', usd(t.gross), `${fullDay(range.from)} — ${fullDay(range.to)} · ${num(t.payments)} payments`, 'Сумма всех успешных списаний, в долларах'],
+    ['Gross volume', usd(t.gross), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Сумма всех успешных списаний, в долларах'],
+    ['Net volume', usd(t.net), 'gross − refunds', 'Оборот за вычетом рефандов'],
     ['Refunds', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} of gross` : '—', 'Сколько денег вернули клиентам'],
-    ['Disputes', usd(t.disputes), t.gross ? `${pct(t.disputes / t.gross)} of gross` : '—', 'Сколько стоили диспуты по этим платежам: сумма и комиссия (по выигранным — только комиссия), включая RDR'],
-    ['Net volume', usd(t.net), 'gross − refunds − disputes', 'Оборот за вычетом рефандов и диспутов — как Net volume в Stripe'],
-    ['Stripe fees', usd(t.fees), t.gross ? `${pct(t.fees / t.gross)} of gross` : '—', 'Комиссии Stripe за обработку платежей. Комиссий Solidgate в отчётах нет'],
-    ['Net after fees', usd(t.net_after_fees), 'what stays with us', 'Оборот за вычетом рефандов, диспутов и комиссий Stripe'],
+    ['Successful payments', num(t.payments), 'successful charges', 'Число успешных списаний'],
+    ['Avg. transaction value', usdAverage(t.average), 'gross ÷ payments', 'Средний чек: оборот ÷ число платежей'],
   ]);
 }
 
@@ -689,10 +688,7 @@ const TURNOVER_COLUMNS = [
   { key: 'payments', title: 'Payments', tip: 'Число успешных списаний', sort: (p) => p.payments, cell: (p) => `<td>${num(p.payments)}</td>` },
   { key: 'average', title: 'Avg. transaction', tip: 'Средний чек: оборот ÷ число платежей', sort: (p) => p.average, cell: (p) => `<td>${usdAverage(p.average)}</td>` },
   { key: 'refunded', title: 'Refunds', tip: 'Сколько денег вернули клиентам', sort: (p) => p.refunded, cell: (p) => `<td>${usd(p.refunded)}</td>` },
-  { key: 'disputes', title: 'Disputes', tip: 'Стоимость диспутов по этим платежам: сумма и комиссия, включая RDR', sort: (p) => p.disputes, cell: (p) => `<td>${usd(p.disputes)}</td>` },
-  { key: 'net', title: 'Net volume', tip: 'Оборот за вычетом рефандов и диспутов', sort: (p) => p.net, cell: (p) => `<td>${usd(p.net)}</td>` },
-  { key: 'fees', title: 'Stripe fees', tip: 'Комиссии Stripe (у Solidgate их в отчётах нет)', sort: (p) => p.fees, cell: (p) => `<td>${usd(p.fees)}</td>` },
-  { key: 'net_after_fees', title: 'Net after fees', tip: 'Оборот за вычетом рефандов, диспутов и комиссий', sort: (p) => p.net_after_fees, cell: (p) => `<td>${usd(p.net_after_fees)}</td>` },
+  { key: 'net', title: 'Net volume', tip: 'Оборот за вычетом рефандов', sort: (p) => p.net, cell: (p) => `<td>${usd(p.net)}</td>` },
 ];
 const SHARE_COLUMN = { key: 'share', title: 'Share of gross', tip: 'Доля в обороте за период', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
 const REASON_COLUMNS = [

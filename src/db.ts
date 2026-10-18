@@ -54,7 +54,6 @@ export interface PaymentRow extends CardDetails {
   amount_usd_cents: number;
   refunded_usd_cents: number;
   customer_id?: string | null; // клиент — чтобы связать продления с триалом (LTV)
-  fee_usd_cents?: number; // комиссия Stripe (у Solidgate её в отчётах нет — 0)
 }
 
 // Списание eSIM: у продукта нет подписок — только разовые покупки (PaymentIntent), поэтому храним и отклонённые
@@ -91,7 +90,7 @@ export interface VampReportRow {
   reason: string | null; // тип фрода или причина диспута
   case_type: string | null; // у диспута: chargeback | inquiry
   rdr: boolean; // диспут закрыт через Visa RDR — в VAMP не считается
-  lost_usd_cents: number; // сколько диспут стоил: списанная сумма и комиссия за вычетом возвратов (выигранный — только комиссия)
+  lost_usd_cents: number; // сколько списано по RDR-диспуту
   amount_usd_cents: number | null; // сумма списания в долларах, если известна (у платежей дашборда — из payments)
   refunded: boolean; // по списанию вернули деньги (на момент загрузки; рефанды потом дописываются)
 }
@@ -266,7 +265,6 @@ export function openStore(file: string) {
   const paymentColumns = new Set((db.prepare('PRAGMA table_info(payments)').all() as { name: string }[]).map((c) => c.name));
   if (!paymentColumns.has('product')) db.exec(`ALTER TABLE payments ADD COLUMN product TEXT NOT NULL DEFAULT 'vpn'`);
   if (!paymentColumns.has('approved')) db.exec('ALTER TABLE payments ADD COLUMN approved INTEGER NOT NULL DEFAULT 1');
-  if (!paymentColumns.has('fee_usd_cents')) db.exec('ALTER TABLE payments ADD COLUMN fee_usd_cents INTEGER NOT NULL DEFAULT 0');
   for (const column of ['reason', 'intent_id', 'customer_id', 'destination', 'package', 'order_type']) {
     if (!paymentColumns.has(column)) db.exec(`ALTER TABLE payments ADD COLUMN ${column} TEXT`);
   }
@@ -343,12 +341,11 @@ export function openStore(file: string) {
   // Платёж: перевыгрузка обновляет всё, кроме рефанда — он только растёт
   const upsertPaymentStmt = db.prepare(`
     INSERT INTO payments (provider, payment_id, account, mid, paid_at, amount_usd_cents, refunded_usd_cents,
-                          country, payment_method, card_brand, bank, customer_id, fee_usd_cents)
+                          country, payment_method, card_brand, bank, customer_id)
     VALUES (@provider, @payment_id, @account, @mid, @paid_at, @amount_usd_cents, @refunded_usd_cents,
-            @country, @payment_method, @card_brand, @bank, @customer_id, @fee_usd_cents)
+            @country, @payment_method, @card_brand, @bank, @customer_id)
     ON CONFLICT (provider, payment_id) DO UPDATE SET
       customer_id = COALESCE(excluded.customer_id, payments.customer_id),
-      fee_usd_cents = MAX(excluded.fee_usd_cents, payments.fee_usd_cents),
       account = excluded.account,
       mid = excluded.mid,
       paid_at = excluded.paid_at,
@@ -469,12 +466,7 @@ export function openStore(file: string) {
     },
 
     upsertPayment(p: PaymentRow): void {
-      upsertPaymentStmt.run({ ...p, customer_id: p.customer_id ?? null, fee_usd_cents: p.fee_usd_cents ?? 0 });
-    },
-
-    // Комиссия у уже загруженного платежа — разовый проход по проводкам баланса Stripe
-    setPaymentFee(provider: Provider, paymentId: string, feeUsdCents: number): void {
-      db.prepare('UPDATE payments SET fee_usd_cents = ? WHERE provider = ? AND payment_id = ?').run(feeUsdCents, provider, paymentId);
+      upsertPaymentStmt.run({ ...p, customer_id: p.customer_id ?? null });
     },
 
     // Клиент у уже загруженного платежа — разовый проход (LTV)

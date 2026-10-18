@@ -341,7 +341,7 @@ describe('server', () => {
 
     const all = await get('');
     expect(all).toMatchObject({ view: 'time', range: { from: '2026-09-10', to: '2026-09-10' }, sync_running: false, breakdown: [] });
-    expect(all.totals).toEqual({ payments: 2, gross: 4_000, refunded: 0, disputes: 0, fees: 0, net: 4_000, net_after_fees: 4_000, average: 2_000 });
+    expect(all.totals).toEqual({ payments: 2, gross: 4_000, refunded: 0, net: 4_000, average: 2_000 });
     expect(all.series).toHaveLength(1);
 
     const byMid = await get('view=mid');
