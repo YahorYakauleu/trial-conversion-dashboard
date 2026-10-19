@@ -15,9 +15,13 @@ const store = openStore(path.join(config.dataDir, 'dashboard.sqlite'));
 store.failStaleRuns();
 const sources = buildSources(config);
 
-createApp({ store, config, sources }).listen(config.port, () => {
+const server = createApp({ store, config, sources }).listen(config.port, () => {
   console.log(`Дашборд: http://localhost:${config.port}`);
 });
+// Прокси Render держит соединение с приложением открытым дольше, чем Node (5 с по умолчанию): запрос, отправленный
+// в соединение, которое Node как раз закрыл, прокси отдаёт как 502. Держим соединения дольше прокси
+server.keepAliveTimeout = 120_000;
+server.headersTimeout = 121_000;
 
 cron.schedule(config.syncCron, () => void runSync(store, sources), { timezone: 'UTC' });
 

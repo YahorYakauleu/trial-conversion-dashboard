@@ -1,6 +1,24 @@
 import { mondayOf, type Granularity } from './metrics.js';
 import { addDays } from './time.js';
 
+// Окно, упёршееся в лимит запросов провайдера (HTTP 429), повторяем целиком после паузы: повторная запись тех же
+// объектов безвредна. Stripe сам 429 не повторяет, а разовые проходы по всей истории делают тысячи запросов подряд
+export const RATE_LIMIT_PAUSES_MS = [5_000, 15_000, 30_000, 60_000, 120_000];
+const isRateLimit = (error: unknown) => (error as { statusCode?: number } | null)?.statusCode === 429;
+
+async function retryRateLimited(fn: (windowStart: number) => Promise<void>, windowStart: number): Promise<void> {
+  for (const pause of RATE_LIMIT_PAUSES_MS) {
+    try {
+      return await fn(windowStart);
+    } catch (error) {
+      if (!isRateLimit(error)) throw error;
+      console.warn(`лимит запросов провайдера — повторяю окно через ${pause / 1000} с`);
+      await new Promise((resolve) => setTimeout(resolve, pause));
+    }
+  }
+  return fn(windowStart);
+}
+
 // Обходит окна [from, to) длиной step пачками по `parallel` штук одновременно.
 // После каждой пачки сообщает, с какого момента продолжать, — чтобы прерванная выгрузка возобновлялась.
 export async function forEachWindow(
@@ -14,7 +32,7 @@ export async function forEachWindow(
   for (let start = from; start < to; start += parallel * step) {
     const windows: number[] = [];
     for (let w = start; w < Math.min(start + parallel * step, to); w += step) windows.push(w);
-    await Promise.all(windows.map(fn));
+    await Promise.all(windows.map((w) => retryRateLimited(fn, w)));
     onProgress?.(windows.at(-1)! + step);
   }
 }
