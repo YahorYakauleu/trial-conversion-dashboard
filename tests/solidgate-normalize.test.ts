@@ -230,7 +230,7 @@ describe('paymentFromOrder', () => {
     processing_currency: 'USD',
     mid: 'mid-uuid',
     payment_method: 'google-pay',
-    transactions: [{ card: { country: 'SAU', brand: 'VISA', bank: 'AL RAJHI BANK' } }],
+    transactions: [{ card: { country: 'SAU', brand: 'VISA', bank: 'AL RAJHI BANK', card_type: 'DEBIT' } }],
     ...p,
   });
   // курс для теста: 1 USD = 3.75 SAR
@@ -250,6 +250,7 @@ describe('paymentFromOrder', () => {
       payment_method: 'google_pay',
       card_brand: 'visa',
       bank: 'AL RAJHI BANK',
+      funding: 'debit', // тип карты — знаменатель Card types во VAMP
     });
   });
 

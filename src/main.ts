@@ -3,6 +3,7 @@ import path from 'node:path';
 import cron from 'node-cron';
 import { loadConfig, loadEnvFile } from './config.js';
 import { nowSec, openStore } from './db.js';
+import { refreshPaymentNumbers } from './ltv.js';
 import { createApp } from './server.js';
 import { buildSources, needsStartupSync, runSync } from './sync.js';
 
@@ -13,6 +14,7 @@ if (!cron.validate(config.syncCron)) throw new Error(`SYNC_CRON: неверно�
 mkdirSync(config.dataDir, { recursive: true });
 const store = openStore(path.join(config.dataDir, 'dashboard.sqlite'));
 store.failStaleRuns();
+refreshPaymentNumbers(store.db, nowSec()); // номера платежей для VAMP — сразу, не дожидаясь синка (первый раз — секунды)
 const sources = buildSources(config);
 
 const server = createApp({ store, config, sources }).listen(config.port, () => {

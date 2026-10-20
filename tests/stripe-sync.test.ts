@@ -35,8 +35,8 @@ function fakeStripe(data: { subs: Item[]; invoices: Item[]; events: Item[]; char
     // поиск успешных списаний — разовый проход за клиентами и банками платежей; отдаёт одно и то же на любые сутки
     charges: {
       list: list('charges', data.charges ?? []),
-      search: () => {
-        calls.push({ method: 'search', params: { created: {} } });
+      search: (params: Record<string, unknown>) => {
+        calls.push({ method: 'search', params: { ...params, created: {} } });
         return (async function* () {
           yield* data.searched ?? [];
         })();
@@ -280,7 +280,7 @@ describe('syncStripeAccount', () => {
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
 
     expect(payments(store)).toEqual([{ payment_id: 'ch_9', mid: 'corp', amount_usd_cents: 1199, refunded_usd_cents: 0 }]);
-    expect(calls.find((c) => c.method === 'charges')!.params.expand).toEqual(['data.balance_transaction']);
+    expect(calls.find((c) => c.method === 'charges')!.params.expand).toEqual(['data.balance_transaction', 'data.customer']);
     expect(calls.filter((c) => c.method === 'charges' && isWindow(c, DAY))).toHaveLength((TODAY - HISTORY_FROM) / DAY);
     expect(store.getState('stripe', 'corp', 'payments_version')).toBe(1);
   });
@@ -333,30 +333,34 @@ describe('syncStripeAccount', () => {
     expect(calls.some((c) => isWindow(c, DAY))).toBe(false); // второй раз — только свежее
   });
 
-  it('платежи без банка: один раз проходит поиском успешные списания с HISTORY_FROM и дописывает банк, известное не трогает', async () => {
+  it('платежи без банка, типа карты и трафика: один раз проходит поиском успешные списания с HISTORY_FROM и дописывает их, известное не трогает', async () => {
     const store = openStore(':memory:');
     for (const [key, value] of Object.entries({ cursor: NOW - 60, subscription_fields_version: 4, details_version: 2, payments_version: 1, loaded_from: HISTORY_FROM })) {
       store.setState('stripe', 'corp', key, value);
     }
-    // прошлая версия прохода (только клиенты) закончилась вчера — новая начинает с начала истории
-    store.setState('stripe', 'corp', 'payment_customers_version', 1);
-    store.setState('stripe', 'corp', 'payment_customers_day', TODAY);
+    // прошлая версия прохода (клиенты и банки) закончилась вчера — новая начинает с начала истории
+    store.setState('stripe', 'corp', 'payment_customers_version', 2);
+    store.setState('stripe', 'corp', 'payment_customers_v2_day', TODAY);
     const payment = { provider: 'stripe' as const, account: 'corp', mid: 'corp', paid_at: TODAY - 5 * DAY, amount_usd_cents: 1199, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa' };
     store.upsertPayment({ ...payment, payment_id: 'ch_9', bank: null, customer_id: 'cus_1' });
     store.upsertPayment({ ...payment, payment_id: 'ch_known', bank: 'CAPITEC BANK LTD' });
+    const customer = { id: 'cus_2', object: 'customer', metadata: { utm_source: 'voluum', campaign_id: 'c1', campaign_name: 'Movie Streaming', url: 'https://www.vpntoggle.app/' } };
     const searched = [
-      { id: 'ch_9', customer: 'cus_1', payment_method_details: { card: { issuer: 'Revolut Ltd.' } } },
-      { id: 'ch_known', customer: { id: 'cus_2' }, payment_method_details: { card: { issuer: 'Capitec Bank' } } },
+      { id: 'ch_9', customer: 'cus_1', payment_method_details: { card: { issuer: 'Revolut Ltd.', funding: 'debit' } } },
+      { id: 'ch_known', customer, payment_method_details: { card: { issuer: 'Capitec Bank', funding: 'unknown' } } },
     ];
     const { client, calls } = fakeStripe({ subs: [], invoices: [], events: [], searched });
     await syncStripeAccount(store, client, 'corp', cfg, NOW);
 
-    expect(store.db.prepare('SELECT payment_id, customer_id, bank FROM payments ORDER BY payment_id').all().map((r) => ({ ...r }))).toEqual([
-      { payment_id: 'ch_9', customer_id: 'cus_1', bank: 'REVOLUT LTD' },
-      { payment_id: 'ch_known', customer_id: 'cus_2', bank: 'CAPITEC BANK LTD' },
+    const rows = store.db.prepare('SELECT payment_id, customer_id, bank, funding, utm_source, campaign_id, landing_domain FROM payments ORDER BY payment_id').all();
+    expect(rows.map((r) => ({ ...r }))).toEqual([
+      { payment_id: 'ch_9', customer_id: 'cus_1', bank: 'REVOLUT LTD', funding: 'debit', utm_source: null, campaign_id: null, landing_domain: null },
+      { payment_id: 'ch_known', customer_id: 'cus_2', bank: 'CAPITEC BANK LTD', funding: null, utm_source: 'voluum', campaign_id: 'c1', landing_domain: 'vpntoggle.app' },
     ]);
-    expect(calls.filter((c) => c.method === 'search')).toHaveLength((TODAY - HISTORY_FROM) / DAY + 1); // все сутки, включая сегодня
-    expect(store.getState('stripe', 'corp', 'payment_customers_version')).toBe(2);
+    const searches = calls.filter((c) => c.method === 'search');
+    expect(searches).toHaveLength((TODAY - HISTORY_FROM) / DAY + 1); // все сутки, включая сегодня
+    expect(searches[0].params.expand).toEqual(['data.customer']); // клиент — ради трафика в metadata
+    expect(store.getState('stripe', 'corp', 'payment_customers_version')).toBe(3);
     calls.length = 0;
     await syncStripeAccount(store, client, 'corp', cfg, NOW + 60);
     expect(calls.some((c) => c.method === 'search')).toBe(false); // второй раз — нет

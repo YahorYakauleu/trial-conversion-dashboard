@@ -1,9 +1,9 @@
 import Stripe from 'stripe';
 import { toAlpha2 } from '../countries.js';
-import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
+import type { AttemptRow, Attribution, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import { forEachWindow } from '../days.js';
 import type { ToUsd } from '../fx.js';
-import { refreshTrialLtv, resetTrialLtv } from '../ltv.js';
+import { refreshPaymentNumbers, refreshTrialLtv, resetPaymentNumbers, resetTrialLtv } from '../ltv.js';
 import { DAY, dayKey, startOfUtcDay } from '../metrics.js';
 import { refreshTrialFraud } from '../vamp.js';
 
@@ -26,10 +26,11 @@ const SYNC_OVERLAP = HOUR;
 const DETAILS_VERSION = 2;
 // Версия оборота: 1 — успешные списания сохраняются как платежи. База, выгруженная раньше, один раз проходит списания заново.
 const PAYMENTS_VERSION = 1;
-// Клиент у платежа (1 — для LTV, 2 — ещё и банк): база, загруженная раньше, один раз дописывает их — поиском только
-// успешных списаний, их втрое меньше, чем всех (~70 с на сутки большого аккаунта). У поиска свой, более жёсткий лимит
-// запросов — параллельно не больше трёх суток (при восьми на пустых днях Stripe отвечает rate limit)
-const PAYMENT_CUSTOMERS_VERSION = 2;
+// Клиент у платежа (1 — для LTV, 2 — ещё и банк, 3 — тип карты и трафик клиента для VAMP): база, загруженная раньше,
+// один раз дописывает их — поиском только успешных списаний, их втрое меньше, чем всех (~70 с на сутки большого
+// аккаунта). У поиска свой, более жёсткий лимит запросов — параллельно не больше трёх суток (при восьми на пустых днях
+// Stripe отвечает rate limit)
+const PAYMENT_CUSTOMERS_VERSION = 3;
 const SEARCH_PARALLEL = 3;
 // Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена, 3 — тип карты, 4 — банк): база загружена раньше —
 // один раз проходим подписки (для карты — с картой клиента) и дописываем их
@@ -82,10 +83,31 @@ function defaultCard(sub: Stripe.Subscription) {
 }
 
 // Тип карты: credit, debit, prepaid (unknown — не знаем)
-const funding = (sub: Stripe.Subscription) => {
-  const value = defaultCard(sub)?.card?.funding;
-  return value && value !== 'unknown' ? value : null;
-};
+const cardFunding = (card: { funding?: string | null } | null | undefined) => (card?.funding && card.funding !== 'unknown' ? card.funding : null);
+const funding = (sub: Stripe.Subscription) => cardFunding(defaultCard(sub)?.card);
+
+// Откуда пришёл клиент — metadata, которую ставит workflow-service при оформлении (если клиент развёрнут в ответе).
+// IP, id пользователя и полный url не берём: от url — только домен лендинга
+export function attribution(customer: string | Stripe.Customer | Stripe.DeletedCustomer | null | undefined): Required<Attribution> {
+  const metadata = typeof customer === 'object' && customer && !customer.deleted ? customer.metadata : {};
+  const text = (value: string | undefined) => value?.trim() || null;
+  return {
+    utm_source: text(metadata.utm_source)?.toLowerCase() ?? null,
+    campaign_id: text(metadata.campaign_id),
+    campaign_name: text(metadata.campaign_name),
+    landing_domain: landingDomain(metadata.url),
+  };
+}
+
+export function landingDomain(url: string | undefined): string | null {
+  const value = url?.trim();
+  if (!value) return null;
+  try {
+    return new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).hostname.toLowerCase().replace(/^www\./, '') || null;
+  } catch {
+    return null;
+  }
+}
 
 // Банк (issuer) Stripe отдаёт с 16 октября 2026, у старых карт тоже — загруженное раньше дописывают разовые проходы
 function cardDetails(sub: Stripe.Subscription): CardDetails {
@@ -141,6 +163,8 @@ export async function paymentFromCharge(charge: Stripe.Charge, account: string, 
     payment_method: details?.card?.wallet?.type ?? details?.type ?? null,
     card_brand: details?.card?.brand ?? null,
     bank: details?.card?.issuer ?? null,
+    funding: cardFunding(details?.card),
+    ...attribution(charge.customer),
   };
 }
 
@@ -164,6 +188,10 @@ function vampCharge(charge: string | Stripe.Charge | null) {
     // сумма — если списание в долларах (иначе её даст платёж дашборда); вернули ли деньги — на момент загрузки
     amount_usd_cents: full?.currency === 'usd' ? full.amount : null,
     refunded: (full?.amount_refunded ?? 0) > 0,
+    // карта и трафик — прямо из списания: есть и у списаний раньше истории дашборда
+    bank: details?.card?.issuer ?? null,
+    funding: cardFunding(details?.card),
+    ...attribution(customer),
   };
 }
 
@@ -191,15 +219,17 @@ export function vampFromDispute(dispute: DisputeWithNetwork, account: string): V
 }
 
 // Первый раз — с HISTORY_FROM неделями (прогресс сохраняется), дальше — с прошлого раза с запасом в сутки.
-// Версия набора полей: 2 — сумма и рефанд списания; загруженное раньше один раз проходится заново
+// Версия набора полей: 2 — сумма и рефанд списания, 4 — банк, тип карты и трафик клиента; загруженное раньше один раз
+// проходится заново. 3 занята отменённым изменением (P&L): у базы на проде она уже записана вместе с прогрессом
 const VAMP_WINDOW = 7 * DAY;
-const VAMP_VERSION = 2;
+const VAMP_VERSION = 4;
+const VAMP_EXPAND = ['data.charge', 'data.charge.customer'];
 export async function syncStripeVamp(store: Store, stripe: StripeLike, account: string, historyFrom: number, now: number): Promise<void> {
   const save = async (created: Stripe.RangeQueryParam) => {
-    for await (const efw of stripe.radar.earlyFraudWarnings.list({ created, limit: 100, expand: ['data.charge'] })) {
+    for await (const efw of stripe.radar.earlyFraudWarnings.list({ created, limit: 100, expand: VAMP_EXPAND })) {
       store.upsertVampReport(vampFromFraudWarning(efw, account));
     }
-    for await (const dispute of stripe.disputes.list({ created, limit: 100, expand: ['data.charge'] })) store.upsertVampReport(vampFromDispute(dispute, account));
+    for await (const dispute of stripe.disputes.list({ created, limit: 100, expand: VAMP_EXPAND })) store.upsertVampReport(vampFromDispute(dispute, account));
   };
   const current = (store.getState('stripe', account, 'vamp_version') ?? 0) >= VAMP_VERSION;
   const cursor = current ? store.getState('stripe', account, 'vamp_cursor') : null;
@@ -315,7 +345,7 @@ export async function syncStripeAccount(
   };
   const listCharges = (created: Stripe.RangeQueryParam) =>
     stripe.charges.list(
-      { created, limit: 100, expand: ['data.balance_transaction'] },
+      { created, limit: 100, expand: ['data.balance_transaction', 'data.customer'] }, // клиент — ради трафика (metadata)
       { apiVersion: CHARGES_API_VERSION },
     ) as AsyncIterable<LegacyCharge>;
 
@@ -358,7 +388,7 @@ export async function syncStripeAccount(
     await chargesPassWithPayments('charges_day');
     store.setState('stripe', account, 'details_version', DETAILS_VERSION);
     store.setState('stripe', account, 'subscription_fields_version', SUBSCRIPTION_FIELDS_VERSION); // подписки уже с клиентом, отменой, типом карты и банком
-    store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION); // платежи уже с клиентом и банком
+    store.setState('stripe', account, 'payment_customers_version', PAYMENT_CUSTOMERS_VERSION); // платежи уже с клиентом, картой и трафиком
     store.setState('stripe', account, 'loaded_from', cfg.historyFrom);
   } else if ((store.getState('stripe', account, 'details_version') ?? 0) < DETAILS_VERSION) {
     // База выгружена раньше: один раз догружаем данные карты (подписки) и попытки (списания), инвойсы уже есть
@@ -399,11 +429,13 @@ export async function syncStripeAccount(
       DAY,
       SEARCH_PARALLEL,
       async (day) => {
-        for await (const charge of stripe.charges.search({ query: `status:'succeeded' AND created>=${day} AND created<${day + DAY}`, limit: 100 })) {
+        const query = `status:'succeeded' AND created>=${day} AND created<${day + DAY}`;
+        for await (const charge of stripe.charges.search({ query, limit: 100, expand: ['data.customer'] })) {
           const customer = typeof charge.customer === 'string' ? charge.customer : (charge.customer?.id ?? null);
-          store.setPaymentDetails('stripe', charge.id, { customer_id: customer, bank: charge.payment_method_details?.card?.issuer ?? null });
+          const card = charge.payment_method_details?.card;
+          store.setPaymentDetails('stripe', charge.id, { customer_id: customer, bank: card?.issuer ?? null, funding: cardFunding(card), ...attribution(charge.customer) });
         }
-        console.log(`[stripe:${account}] клиенты и банки платежей ${dayKey(day)} готово`);
+        console.log(`[stripe:${account}] клиенты, карты и трафик платежей ${dayKey(day)} готово`);
       },
       (next) => store.setState('stripe', account, progressKey, next),
     );
@@ -426,6 +458,7 @@ export async function syncStripeAccount(
     const lastTrialEnd = store.lastTrialEnd('stripe', account, gapEnd) ?? gapEnd;
     await invoicesPass(key('invoices'), Math.min(today, lastTrialEnd + DAY));
     await chargesPass(key('charges'), Math.min(today, lastTrialEnd + cfg.retryWindowDays * DAY + DAY));
+    resetPaymentNumbers(store.db, 'stripe', account); // у старых платежей появились триалы
   }
   store.setState('stripe', account, 'loaded_from', Math.min(loadedFrom, cfg.historyFrom));
 
@@ -467,6 +500,7 @@ export async function syncStripeAccount(
     if (charge && charge.amount > 0) store.setPaymentRefundShare('stripe', charge.id, charge.amount_refunded / charge.amount);
   }
   refreshTrialLtv(store.db, 'stripe', account, now);
+  refreshPaymentNumbers(store.db, now);
 
   store.setState('stripe', account, 'cursor', now);
   return items;

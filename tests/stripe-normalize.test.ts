@@ -1,7 +1,7 @@
 import type Stripe from 'stripe';
 import { describe, expect, it } from 'vitest';
 import type { TrialRow } from '../src/db.js';
-import { applyInvoice, attemptFromCharge, chargeInvoiceId, invoiceSubscriptionId, paymentFromCharge, trialFromSubscription } from '../src/providers/stripe.js';
+import { applyInvoice, attemptFromCharge, attribution, chargeInvoiceId, invoiceSubscriptionId, landingDomain, paymentFromCharge, trialFromSubscription } from '../src/providers/stripe.js';
 
 const sub = (p: Partial<Stripe.Subscription>) =>
   ({ id: 'sub_1', customer: 'cus_1', trial_start: null, trial_end: null, ...p }) as Stripe.Subscription;
@@ -193,7 +193,29 @@ describe('paymentFromCharge', () => {
       payment_method: 'google_pay',
       card_brand: 'visa',
       bank: null,
+      funding: null,
+      // клиент не развёрнут — трафика нет
+      utm_source: null,
+      campaign_id: null,
+      campaign_name: null,
+      landing_domain: null,
     });
+  });
+
+  it('клиент развёрнут — тип карты и трафик из metadata клиента: источник в нижнем регистре, от url — только домен', async () => {
+    const customer = {
+      id: 'cus_9', object: 'customer',
+      metadata: { utm_source: 'Affise', campaign_id: '123', campaign_name: ' Movie Streaming ', url: 'https://www.TogglevPN.net/?click_id=abc', ip_address: '1.2.3.4', user_id: 'u1' },
+    };
+    const card = { country: 'HU', brand: 'visa', funding: 'prepaid' };
+    const payment = await paymentFromCharge(charge({ customer, payment_method_details: { type: 'card', card } }), 'corp', toUsd);
+    expect(payment).toMatchObject({
+      customer_id: 'cus_9', funding: 'prepaid', utm_source: 'affise', campaign_id: '123', campaign_name: 'Movie Streaming', landing_domain: 'togglevpn.net',
+    });
+    expect(JSON.stringify(payment)).not.toMatch(/1\.2\.3\.4|click_id|"u1"/); // IP, id пользователя и строка запроса не попадают в базу
+    expect(landingDomain('vpnapptoggle.com/')).toBe('vpnapptoggle.com');
+    expect([landingDomain(''), landingDomain('not a url'), landingDomain(undefined)]).toEqual([null, null, null]);
+    expect(attribution({ id: 'cus_1', object: 'customer', deleted: true } as never)).toEqual({ utm_source: null, campaign_id: null, campaign_name: null, landing_domain: null });
   });
 
   it('частичный рефанд — той же долей; не прошло, холд без захвата или без balance transaction — не оборот', async () => {

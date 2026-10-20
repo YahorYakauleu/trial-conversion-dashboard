@@ -12,12 +12,18 @@ import { addDays, localMidnight } from './time.js';
 // Visa датирует его днём, когда банк сообщил о фроде, — этой даты в API нет, поэтому на стыке месяцев цифры расходятся.
 // VAMP ratio = count ÷ успешные Visa-списания того же месяца. Excessive — оба порога сразу (config.vamp).
 
-// Измерения: мерчант, MID, страна и способ оплаты есть и у событий, и у платежей (ratio считается);
-// риск и тип списания — только у событий
-export const VAMP_DIMENSIONS = ['merchant', 'mid', 'country', 'payment_method', 'risk', 'charge_type'] as const;
+// Измерения: у большинства есть и события, и продажи (ratio считается); причина, дни до события и Radar risk — только
+// у событий. Фильтр — по любому измерению; фильтр по измерению без продаж скрывает ratio
+export const VAMP_DIMENSIONS = [
+  'merchant', 'mid', 'country', 'payment_method', 'bank', 'funding', 'payment_number', 'reason', 'days_to_report',
+  'utm_source', 'campaign', 'landing_domain', 'risk',
+] as const;
 export type VampDimension = (typeof VAMP_DIMENSIONS)[number];
-export const VAMP_FILTERS = ['merchant', 'mid', 'country', 'payment_method'] as const;
+export const VAMP_FILTERS = VAMP_DIMENSIONS;
 export type VampFilters = Partial<Record<VampDimension, string[]>>;
+// Строка разреза — аномалия: ratio выше среднего по выборке хотя бы вдвое и событий достаточно, чтобы это не был шум
+export const ANOMALY_LIFT = 2;
+export const ANOMALY_MIN_COUNT = 10;
 
 const UTC = { stripe: 'UTC', solidgate: 'UTC' };
 
@@ -25,21 +31,41 @@ const UTC = { stripe: 'UTC', solidgate: 'UTC' };
 const REPORTS = 'vamp_reports v LEFT JOIN payments p ON p.provider = v.provider AND p.payment_id = v.payment_id';
 // сеть из самого события; если её нет (чарджбэк Solidgate с незнакомым кодом) — платёжная система списания
 const NETWORK = 'COALESCE(v.network, p.card_brand)';
+// Номер платежа подписки (src/ltv.ts → refreshPaymentNumbers): 0 — оплата триала, -1 — подписка оформлена раньше истории
+const paymentNumber = (n: string) => `CASE WHEN ${n} IS NULL THEN NULL WHEN ${n} < 0 THEN 'before_history' WHEN ${n} = 0 THEN 'trial_fee'
+  WHEN ${n} >= 5 THEN '5+' ELSE CAST(${n} AS TEXT) END`;
+// Сколько суток прошло от списания до события
+const LAG_DAYS = `((v.reported_at - COALESCE(v.charged_at, p.paid_at)) / ${DAY})`;
 const REPORT_SQL: Record<Exclude<VampDimension, 'merchant'>, string> = {
   mid: "v.provider || ':' || COALESCE(v.mid, p.mid)",
   country: 'COALESCE(v.country, p.country)',
   payment_method: 'COALESCE(v.payment_method, p.payment_method)',
+  // карта и трафик: у Stripe — из самого события (есть и у списаний раньше истории), у Solidgate — из платежа
+  bank: 'COALESCE(v.bank, p.bank)',
+  funding: 'COALESCE(v.funding, p.funding)',
+  // списания нет в платежах дашборда — оно раньше истории, значит, и подписка старше
+  payment_number: `CASE WHEN v.payment_id IS NULL THEN NULL WHEN p.payment_id IS NULL THEN 'before_history' ELSE ${paymentNumber('p.payment_n')} END`,
+  // тип фрода у репорта, причина у диспута
+  reason: "CASE WHEN v.reason IS NULL THEN NULL ELSE v.kind || ':' || v.reason END",
+  days_to_report: `CASE WHEN COALESCE(v.charged_at, p.paid_at) IS NULL THEN NULL WHEN ${LAG_DAYS} <= 7 THEN '0–7' WHEN ${LAG_DAYS} <= 30 THEN '8–30'
+    WHEN ${LAG_DAYS} <= 60 THEN '31–60' WHEN ${LAG_DAYS} <= 90 THEN '61–90' WHEN ${LAG_DAYS} <= 180 THEN '91–180' ELSE '180+' END`,
+  utm_source: 'COALESCE(v.utm_source, p.utm_source)',
+  campaign: 'COALESCE(v.campaign_id, p.campaign_id)',
+  landing_domain: 'COALESCE(v.landing_domain, p.landing_domain)',
   // Radar risk score Stripe; у Solidgate его нет
   risk: `CASE WHEN v.risk_score IS NULL THEN NULL WHEN v.risk_score < 20 THEN '0–19' WHEN v.risk_score < 50 THEN '20–49'
          WHEN v.risk_score < 75 THEN '50–74' ELSE '75–99' END`,
-  // первый платёж после триала — успешная попытка первого инвойса (attempts); всё остальное — продления
-  charge_type: `CASE WHEN EXISTS (SELECT 1 FROM attempts a WHERE a.provider = v.provider AND a.attempt_id = v.payment_id AND a.approved = 1)
-                THEN 'first_payment' ELSE 'renewal' END`,
 };
 const PAYMENT_SQL: Partial<Record<VampDimension, string>> = {
   mid: "p.provider || ':' || p.mid",
   country: 'p.country',
   payment_method: 'p.payment_method',
+  bank: 'p.bank',
+  funding: 'p.funding',
+  payment_number: paymentNumber('p.payment_n'),
+  utm_source: 'p.utm_source',
+  campaign: 'p.campaign_id',
+  landing_domain: 'p.landing_domain',
 };
 
 // Мерчант Visa: MID из группы — имя группы, остальные — сами MID
@@ -180,8 +206,22 @@ export function getVampSeries(db: Db, o: VampOptions, t: VampRules) {
   }));
 }
 
+// Кампания — по ID; подпись — имя, чаще всего встречавшееся у этого ID в событиях
+function campaignNames(db: Db, ids: string[]): Map<string, string> {
+  if (!ids.length) return new Map();
+  const rows = db
+    .prepare(
+      `SELECT campaign_id AS id, campaign_name AS name FROM vamp_reports
+       WHERE campaign_id IN (${ids.map(() => '?').join(', ')}) AND campaign_name IS NOT NULL
+       GROUP BY campaign_id, campaign_name ORDER BY COUNT(*)`,
+    )
+    .all(...ids) as { id: string; name: string }[];
+  return new Map(rows.map((r) => [r.id, r.name])); // по возрастанию частоты — последнее, самое частое, побеждает
+}
+
 // Разбивка за один месяц (from…to внутри месяца): по убыванию count, «не определено» — в конце.
-// Статус — только у мерчантов; у риска и типа списания платежей нет — ratio нет
+// Статус — только у мерчантов; у измерений без продаж (причина, дни до события, риск) ratio нет.
+// lift — во сколько раз ratio строки выше ratio всей выборки; anomaly — заметно выше и событий достаточно
 export function getVampBreakdown(db: Db, o: VampOptions, dimension: VampDimension, t: VampRules) {
   const { report, payment } = sqlOf(t);
   const withStatus = dimension === 'merchant' && statusApplies(o);
@@ -196,13 +236,25 @@ export function getVampBreakdown(db: Db, o: VampOptions, dimension: VampDimensio
   for (const { key, visa_sales } of sales ?? []) put(key, { visa_sales });
   const state = monthState(o.from, o.to, o.now);
   const total = [...rows.values()].reduce((s, c) => s + c.fraud + c.disputes, 0);
-  return [...rows]
+  const totalSales = [...rows.values()].reduce((s, c) => s + c.visa_sales, 0);
+  const average = sales && totalSales > 0 ? total / totalSales : null;
+  const result = [...rows]
     .map(([value, c]) => {
       const totals = withTotals(c, state, (count, ratio, forecast) => (withStatus ? vampStatus(count, ratio, forecast, t) : null));
-      return { value, ...totals, vamp_ratio: sales ? totals.vamp_ratio : null, share: total === 0 ? null : totals.vamp_count / total };
+      const ratio = sales ? totals.vamp_ratio : null;
+      const lift = ratio !== null && average ? ratio / average : null;
+      return {
+        value, label: null as string | null, ...totals, vamp_ratio: ratio, share: total === 0 ? null : totals.vamp_count / total,
+        lift, anomaly: lift !== null && lift >= ANOMALY_LIFT && totals.vamp_count >= ANOMALY_MIN_COUNT,
+      };
     })
     .filter((r) => r.vamp_count + r.rdr > 0 || (listed && r.visa_sales > 0))
     .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.vamp_count - a.vamp_count || b.visa_sales - a.visa_sales);
+  if (dimension === 'campaign') {
+    const names = campaignNames(db, result.flatMap((r) => (r.value === null ? [] : [r.value])));
+    for (const r of result) r.label = r.value === null ? null : (names.get(r.value) ?? null);
+  }
+  return result;
 }
 
 // Итог месяца: суммы и статус (если мерчант один); сколько мерчантов в каком статусе (null — выборка сужена фильтрами)
@@ -249,15 +301,20 @@ export function listVampReports(db: Db, o: VampOptions, t: VampRules, limit: num
       `SELECT v.provider, v.account, ${report.merchant} AS merchant, ${REPORT_SQL.mid} AS mid, v.kind,
               CASE WHEN v.kind = 'fraud' THEN ${OUTCOME_SQL} END AS outcome, ${AMOUNT} AS amount_usd_cents, v.report_id, v.reported_at, v.payment_id,
               COALESCE(v.charged_at, p.paid_at) AS charged_at, ${REPORT_SQL.country} AS country, ${REPORT_SQL.payment_method} AS payment_method,
-              v.risk_score, ${REPORT_SQL.charge_type} AS charge_type, v.reason, v.case_type, v.rdr, v.lost_usd_cents, v.customer_id,
+              v.risk_score, ${REPORT_SQL.payment_number} AS payment_number, v.reason, v.case_type, v.rdr, v.lost_usd_cents, v.customer_id,
+              ${REPORT_SQL.bank} AS bank, ${REPORT_SQL.funding} AS funding, CASE WHEN COALESCE(v.charged_at, p.paid_at) IS NOT NULL THEN ${LAG_DAYS} END AS days_to_report,
+              ${REPORT_SQL.utm_source} AS utm_source, ${REPORT_SQL.campaign} AS campaign_id, COALESCE(v.campaign_name, p.campaign_name) AS campaign_name,
+              ${REPORT_SQL.landing_domain} AS landing_domain,
               CASE WHEN ${COUNTED} THEN 1 ELSE 0 END AS counted
        FROM ${REPORTS} WHERE ${where.join(' AND ')}
        ORDER BY v.reported_at, v.report_id LIMIT ${limit}`,
     )
     .all({ ...period.params, ...filters.params, provider: o.provider, ...(outcome ? { outcome } : {}) }) as unknown as {
     provider: string; account: string; merchant: string | null; mid: string | null; outcome: Outcome | null; amount_usd_cents: number | null; kind: 'fraud' | 'dispute'; report_id: string; reported_at: number; payment_id: string | null;
-    charged_at: number | null; country: string | null; payment_method: string | null; risk_score: number | null; charge_type: string;
+    charged_at: number | null; country: string | null; payment_method: string | null; risk_score: number | null; payment_number: string | null;
     reason: string | null; case_type: string | null; rdr: number; lost_usd_cents: number; customer_id: string | null; counted: number;
+    bank: string | null; funding: string | null; days_to_report: number | null; utm_source: string | null; campaign_id: string | null;
+    campaign_name: string | null; landing_domain: string | null;
   }[];
 }
 

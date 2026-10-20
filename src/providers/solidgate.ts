@@ -2,7 +2,7 @@ import type { SolidgateAccount } from '../config.js';
 import { toAlpha2 } from '../countries.js';
 import type { AttemptRow, CardDetails, PaymentRow, Store, TrialRow, VampReportRow } from '../db.js';
 import type { ToUsd } from '../fx.js';
-import { refreshTrialLtv, resetTrialLtv } from '../ltv.js';
+import { refreshPaymentNumbers, refreshTrialLtv, resetPaymentNumbers, resetTrialLtv } from '../ltv.js';
 import { DAY, dayKey } from '../metrics.js';
 import { refreshTrialFraud } from '../vamp.js';
 import {
@@ -28,9 +28,10 @@ const SUCCESS = new Set(['approved', 'settle_ok', 'auth_ok', 'refunded']);
 const PENDING = new Set(['created', 'processing', '3ds_verify']);
 // Версия набора данных по триалу: 2 — способ оплаты, платёжная система, банк, попытки, причины отказа, рефанды
 const DETAILS_VERSION = 2;
-// Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала, 3 — клиент у платежа (LTV), 4 — тип карты.
-// База, выгруженная раньше, один раз проходит заказы с HISTORY_FROM (это минуты, поэтому и после бэкфилла тоже).
-const ORDERS_VERSION = 4;
+// Версия данных из отчёта заказов: 1 — платежи для оборота, 2 — MID триала, 3 — клиент у платежа (LTV), 4 — тип карты
+// триала, 5 — тип карты платежа (VAMP). База, выгруженная раньше, один раз проходит заказы с HISTORY_FROM (это минуты,
+// поэтому и после бэкфилла тоже).
+const ORDERS_VERSION = 5;
 // Поля подписки, появившиеся позже (1 — ID клиента, 2 — ещё и отмена): база загружена раньше — один раз проходим подписки заново
 const SUBSCRIPTION_FIELDS_VERSION = 2;
 // Деньги списаны: settle_ok, а refunded — списали и потом вернули (сумма возврата — в refunded_amount)
@@ -166,6 +167,7 @@ export async function paymentFromOrder(order: SgCardOrder, account: string, toUs
     refunded_usd_cents: Math.round((amountUsd * Math.min(order.refunded_amount ?? 0, order.amount)) / order.amount),
     customer_id: order.customer_account_id ?? null,
     ...orderCardDetails(order),
+    funding: orderFunding(order),
   };
 }
 
@@ -273,11 +275,13 @@ export async function syncSolidgateAccount(
     const progressKey = `history_${dayKey(cfg.historyFrom)}_day`;
     const from = store.getState('solidgate', acc.account, progressKey) ?? cfg.historyFrom;
     await inWindows(from, subscriptionsAndOrders('created_at'), progress(progressKey), Math.min(now, loadedFrom + DAY));
+    resetPaymentNumbers(store.db, 'solidgate', acc.account); // у старых платежей появились триалы
   }
   store.setState('solidgate', acc.account, 'loaded_from', Math.min(loadedFrom, cfg.historyFrom));
 
   await inWindows((cursor ?? now) - DAY, subscriptionsAndOrders('updated_at'));
   refreshTrialLtv(store.db, 'solidgate', acc.account, now);
+  refreshPaymentNumbers(store.db, now);
 
   store.setState('solidgate', acc.account, 'cursor', now);
   return items;

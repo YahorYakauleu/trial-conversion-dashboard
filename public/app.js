@@ -84,10 +84,22 @@ const MODES = {
     title: 'Visa VAMP',
     api: '/api/vamp',
     charts: 'vamp-charts',
-    dimensions: ['merchant', 'mid', 'country', 'payment_method'],
-    tabs: [['time', 'Trend'], ['merchant', 'Merchants'], ['outcome', 'After report'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['risk', 'Radar risk'], ['charge_type', 'Charge type']],
+    dimensions: ['merchant', 'mid', 'country', 'payment_method', 'bank', 'funding', 'payment_number', 'reason', 'days_to_report', 'utm_source', 'campaign', 'landing_domain', 'risk'],
+    tabs: [
+      ['time', 'Trend'], ['merchant', 'Merchants'], ['outcome', 'After report'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'],
+      ['bank', 'Issuing banks'], ['funding', 'Card types'], ['payment_number', 'Payment number'], ['reason', 'Reasons'], ['days_to_report', 'Days to report'],
+      ['utm_source', 'Traffic sources'], ['campaign', 'Campaigns'], ['landing_domain', 'Landing domains'], ['risk', 'Radar risk'],
+    ],
     hints: {
       time: "A report counts in the month it reached Stripe or Solidgate (UTC); Visa dates it by when the bank reported it, so around month boundaries counts can differ by 10–15%. Visa's official figures come next month: Stripe → VAMP → Visa data",
+      bank: 'Issuing bank of the charged card. × avg — how many times the ratio is above the whole selection; highlighted from 2× with at least 10 events',
+      funding: 'Debit, credit or prepaid card. × avg — how many times the ratio is above the whole selection',
+      payment_number: 'Which payment of the subscription was reported. Subscriptions started before the dashboard history (July 1) are counted together',
+      reason: 'Fraud type of the report or reason of the chargeback. No Visa sales here — share only',
+      days_to_report: 'Days from the charge to the report or chargeback. No Visa sales here — share only',
+      utm_source: 'Where the Stripe customer came from (customer metadata). Solidgate has no traffic data — Unknown',
+      campaign: 'Campaign of the Stripe customer, by campaign ID. Solidgate has no traffic data — Unknown',
+      landing_domain: 'Landing domain of the Stripe customer. Solidgate has no traffic data — Unknown',
     },
   },
   turnover: {
@@ -136,7 +148,8 @@ const MODES = {
 const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
-  destination: 'Destination', package: 'Package', risk: 'Radar risk score', charge_type: 'Charge type', merchant: 'Visa merchant', funding: 'Card type',
+  destination: 'Destination', package: 'Package', risk: 'Radar risk score', merchant: 'Visa merchant', funding: 'Card type',
+  payment_number: 'Payment number', reason: 'Reason', days_to_report: 'Days to report', utm_source: 'Traffic source', campaign: 'Campaign', landing_domain: 'Landing domain',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
 const TAB_TIPS = {
@@ -156,7 +169,12 @@ const TAB_TIPS = {
   attempt: 'Отдача от попытки по её номеру',
   day: 'Повторы по дням после первой попытки',
   decline_code: 'Что было после отказа с этим кодом',
-  charge_type: 'Первый платёж после триала или продление',
+  payment_number: 'Каким по счёту платежом подписки было списание: оплата триала, 1-й после триала, 2-й…',
+  reason: 'Тип фрода у фрод-репорта, причина у чарджбэка',
+  days_to_report: 'Сколько дней прошло от списания до фрод-репорта или чарджбэка',
+  utm_source: 'Источник трафика клиента Stripe (utm_source в metadata клиента)',
+  campaign: 'Кампания клиента Stripe — по campaign_id, подписана campaign_name',
+  landing_domain: 'Домен лендинга, с которого пришёл клиент Stripe',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
 };
@@ -264,8 +282,12 @@ function valueParts(dimension, value) {
     const mid = value.slice('solidgate:'.length);
     return [MID_DESCRIPTORS[mid] ? `Solidgate · ${MID_DESCRIPTORS[mid]}` : 'Solidgate', mid];
   }
+  // кампания — по ID; имя приходит с данными (разбивка, значения фильтра)
+  if (dimension === 'campaign' && value && value !== 'none') return campaignNames.has(value) ? [campaignNames.get(value), value] : [value, null];
   return [valueName(dimension, value), null];
 }
+const campaignNames = new Map();
+const rememberCampaigns = (rows) => rows?.forEach((r) => r.label && campaignNames.set(r.value, r.label));
 
 function valueName(dimension, value) {
   if (value === null || value === 'none') return 'Unknown';
@@ -279,11 +301,26 @@ function valueName(dimension, value) {
   if (dimension === 'mid') return ACCOUNT_NAMES[value] ?? `Stripe · ${value.split(':')[1]}`; // MID Stripe — аккаунт
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
-  if (dimension === 'charge_type') return CHARGE_TYPES[value] ?? value;
   if (dimension === 'funding') return value[0].toUpperCase() + value.slice(1);
+  if (dimension === 'payment_number') return PAYMENT_NUMBERS[value] ?? value;
+  if (dimension === 'reason') {
+    const [kind, code] = [value.slice(0, value.indexOf(':')), value.slice(value.indexOf(':') + 1)];
+    return `${kind === 'fraud' ? 'Fraud report' : 'Chargeback'} · ${REASON_NAMES[code] ?? code.replaceAll('_', ' ')}`;
+  }
+  if (dimension === 'days_to_report') return `${value} days`;
+  if (dimension === 'utm_source') return value[0].toUpperCase() + value.slice(1);
   return value;
 }
-const CHARGE_TYPES = { first_payment: 'First payment after trial', renewal: 'Renewal or other' };
+const PAYMENT_NUMBERS = {
+  trial_fee: 'Trial fee', 1: '1st after trial', 2: '2nd', 3: '3rd', 4: '4th', '5+': '5th and later', before_history: 'Subscription older than history',
+};
+// типы фрода (Stripe early fraud warning) и причины диспутов Stripe; у Solidgate — описание кода как есть
+const REASON_NAMES = {
+  unauthorized_use_of_card: 'Unauthorized use of card', made_with_counterfeit_card: 'Counterfeit card', made_with_lost_card: 'Lost card',
+  made_with_stolen_card: 'Stolen card', card_never_received: 'Card never received', fraudulent_card_application: 'Fraudulent card application', misc: 'Other',
+  fraudulent: 'Fraudulent', subscription_canceled: 'Subscription canceled', product_unacceptable: 'Product unacceptable', credit_not_processed: 'Credit not processed',
+  product_not_received: 'Product not received', general: 'General', unrecognized: 'Unrecognized', duplicate: 'Duplicate',
+};
 
 function query() {
   const q = new URLSearchParams({ mode: state.mode, product: product(), provider: state.provider, granularity: state.granularity, view: state.view, period: state.preset });
@@ -386,7 +423,7 @@ function loadValues(dimension) {
   if (valuesCache.size > 200) valuesCache.clear();
   const values = api(`/api/values?${key}`)
     .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-    .then((body) => body.values)
+    .then((body) => (rememberCampaigns(body.values), body.values))
     .catch(() => {
       valuesCache.delete(key); // не получилось — спросим снова при следующем открытии
       return [];
@@ -812,8 +849,10 @@ const CANCEL_REASON_COLUMNS = [
   { key: 'after_trial', title: 'After trial', tip: 'Отменили в 30 дней после конца триала', sort: (r) => r.after_trial, cell: (r) => `<td>${num(r.after_trial)}</td>` },
 ];
 
-// Visa VAMP: «≈» — месяц ещё идёт; без платежей у измерения (риск, тип списания) — продаж и ratio нет
-const hasSales = () => !['risk', 'charge_type'].includes(state.view);
+// Visa VAMP: «≈» — месяц ещё идёт; у измерений без продаж (причина, дни до события, риск) и при фильтре по ним —
+// продаж и ratio нет
+const EVENT_ONLY = ['risk', 'reason', 'days_to_report'];
+const hasSales = () => !EVENT_ONLY.includes(state.view) && !EVENT_ONLY.some((d) => state.filters[d]?.length);
 const VAMP_COLUMNS = [
   { key: 'vamp_count', title: 'VAMP count', tip: 'Фрод-репорты Visa + чарджбэки без RDR', sort: (p) => p.vamp_count, cell: (p) => pendingCell(num(p.vamp_count), p.final) },
   { key: 'vamp_ratio', title: 'VAMP ratio', tip: 'VAMP count ÷ Visa sales; порог — 1,5%', sort: (p) => p.vamp_ratio, cell: (p) => pendingCell(pct2(p.vamp_ratio), p.final) },
@@ -846,6 +885,13 @@ const OUTCOME_COLUMNS = [
 
 const STATUS_COLUMN = { key: 'status', title: 'Status', tip: 'Excessive — оба порога сразу: ratio ≥ 1,5% и count ≥ 1 500', text: true, sort: (p) => p.status, cell: (p) => `<td>${statusBadge(p.status)}</td>` };
 const VAMP_SHARE_COLUMN = { key: 'share', title: 'Share', tip: 'Доля в VAMP count месяца', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
+const VAMP_LIFT_COLUMN = {
+  key: 'lift',
+  title: '× avg',
+  tip: 'Во сколько раз ratio строки выше ratio всей выборки. Подсвечено — от 2× и хотя бы 10 событий',
+  sort: (r) => r.lift,
+  cell: (r) => `<td${r.anomaly ? ' class="lift-high"' : ''}>${r.lift === null ? '—' : `${r.lift.toFixed(1)}×`}</td>`,
+};
 
 // eSIM, удержание: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
 // В подсказке к «≈» — сколько дней окна прошло (у самых свежих клиентов группы) и когда цифра станет итоговой
@@ -938,7 +984,10 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'No d
     `<td class="export-cell"><button class="row-export" data-row="${i}" data-tip="Выгрузить записи этой строки списком (CSV)" aria-label="Export rows">${ICONS.download}</button></td>`;
   $('rows').innerHTML =
     shown
-      .map((r, i) => `<tr${link ? ` class="link" data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}${exportCell(i)}</tr>`)
+      .map((r, i) => {
+        const cls = [link && 'link', r.anomaly && 'anomaly'].filter(Boolean).join(' '); // anomaly — строка VAMP с ratio заметно выше среднего
+        return `<tr${cls ? ` class="${cls}"` : ''}${link ? ` data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}${exportCell(i)}</tr>`;
+      })
       .join('') || `<tr><td colspan="${columns.length + 1}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
   $('show-all').textContent = `Show all (${num(rows.length)})`;
@@ -1015,10 +1064,14 @@ function renderView(data) {
       renderVampChart(data);
     } else {
       // у мерчантов главное — статус (если выборка не сужена фильтрами); у остальных разрезов — доля в count
-      const [count, ...rest] = VAMP_COLUMNS;
-      const columns = data.breakdown.some((r) => r.status) ? [valueColumn(), STATUS_COLUMN, ...VAMP_COLUMNS] : [valueColumn(), count, VAMP_SHARE_COLUMN, ...rest];
+      const [count, ratio, ...rest] = VAMP_COLUMNS;
+      rememberCampaigns(data.breakdown);
+      const columns = data.breakdown.some((r) => r.status)
+        ? [valueColumn(), STATUS_COLUMN, ...VAMP_COLUMNS]
+        : [valueColumn(), count, VAMP_SHARE_COLUMN, ratio, ...(hasSales() ? [VAMP_LIFT_COLUMN] : []), ...rest];
       renderTable(columns, data.breakdown, { link: dimensions().includes(state.view), limit: true, empty: 'No Visa fraud reports or chargebacks for this month' });
-      $('hint').textContent = `${month}. Thresholds apply to a whole Visa merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
+      const tabHint = MODES.vamp.hints[state.view] ?? `Thresholds apply to a whole Visa merchant: ratio ≥ ${pct2(data.thresholds.ratio)} and count ≥ ${num(data.thresholds.count)}`;
+      $('hint').textContent = `${month}. ${tabHint}`;
     }
     return;
   }

@@ -6,6 +6,7 @@ import { syncSolidgateVamp, vampFromChargebacks, vampFromFraudAlert } from '../s
 import { syncStripeVamp, vampFromDispute, vampFromFraudWarning, type StripeLike } from '../src/providers/stripe.js';
 import { getMetrics } from '../src/metrics.js';
 import { getVampBreakdown, getVampDaily, getVampMonth, getVampOutcomes, getVampSeries, refreshTrialFraud, vampStatus } from '../src/vamp.js';
+import { refreshPaymentNumbers } from '../src/ltv.js';
 
 // «Сейчас» — 17 октября 12:00 UTC: сентябрь закрыт, октябрь идёт (прошло 16,5 из 31 дня)
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -97,7 +98,7 @@ describe('Visa VAMP', () => {
     expect(month).toMatchObject({ vamp_count: 3, visa_sales: 210, merchants: 2, status: null, statuses: { excessive: 0, at_risk: 1, ok: 1 } });
   });
 
-  it('разбивки: мерчанты со статусом, страны с ratio; у риска и типа списания продаж нет', () => {
+  it('разбивки: мерчанты со статусом, страны с ratio; у риска продаж нет', () => {
     const db = storeWithData().db;
     const sept = { ...base, from: '2026-09-01', to: '2026-09-30' };
     expect(getVampBreakdown(db, sept, 'merchant', t).map((r) => [r.value, r.vamp_count, r.visa_sales, r.status])).toEqual([['stripe:corp', 4, 100, 'at_risk']]);
@@ -105,7 +106,6 @@ describe('Visa VAMP', () => {
     expect(getVampBreakdown(db, sept, 'risk', t).map((r) => [r.value, r.vamp_count, r.vamp_ratio])).toEqual([
       ['0–19', 1, null], ['50–74', 1, null], ['75–99', 1, null], [null, 1, null],
     ]);
-    expect(getVampBreakdown(db, sept, 'charge_type', t).map((r) => [r.value, r.vamp_count])).toEqual([['renewal', 3], ['first_payment', 1]]);
   });
 
   it('накопленный count по дням месяца и прошлого', () => {
@@ -135,8 +135,102 @@ describe('Visa VAMP', () => {
       ['issfr_2', 'fraud report (TC40)', 'yes'],
       ['issfr_3', 'fraud report (TC40)', 'yes'],
     ]);
-    expect(rows[3]).toMatchObject({ charge: 'first payment after trial', payment_link: 'https://dashboard.stripe.com/acct_1TM4VlLTzrJvLtxV/payments/ch_s0' });
+    expect(rows[3]).toMatchObject({ payment_link: 'https://dashboard.stripe.com/acct_1TM4VlLTzrJvLtxV/payments/ch_s0' });
     expect(rows[1].rdr_lost_usd).toBe('9.99');
+    expect(table.columns).toEqual(expect.arrayContaining(['days_to_report', 'payment_number', 'issuing_bank', 'card_type', 'utm_source', 'campaign_id', 'campaign_name', 'landing_domain']));
+  });
+});
+
+describe('VAMP: разрезы для поиска паттернов', () => {
+  // Сентябрь, Corp: 10 Visa-продаж. ch_a2 — 2-й платёж подписки cus_a (триал в августе), ch_old — клиента без триала
+  // в истории, остальные 8 — без клиента. Банк A / debit / voluum / c1 / a.com — у 9 продаж, банк B / prepaid / affise / c2 / b.com — у ch_old.
+  // События: e1 — по ch_a2; e2 и чарджбэк e4 — по ch_old; e3 — по списанию раньше истории (его нет в платежах)
+  function patternStore() {
+    const store = openStore(':memory:');
+    store.upsertTrial({
+      provider: 'stripe', account: 'corp', subscription_id: 'sub_a', trial_started_at: ts('2026-08-01T12:00:00Z'), trial_ended_at: ts('2026-08-08T12:00:00Z'),
+      first_invoice_id: null, first_attempt_succeeded: true, paid_at: ts('2026-08-08T12:00:00Z'), country: 'US', payment_method: 'card', card_brand: 'visa', bank: null, customer_id: 'cus_a',
+    });
+    const a = { bank: 'BANK A', funding: 'debit', utm_source: 'voluum', campaign_id: 'c1', campaign_name: 'Movie Streaming', landing_domain: 'a.com' };
+    const b = { bank: 'BANK B', funding: 'prepaid', utm_source: 'affise', campaign_id: 'c2', campaign_name: null, landing_domain: 'b.com' };
+    const sale = (id: string, at: string, card: typeof a | typeof b, customer: string | null) =>
+      store.upsertPayment({ provider: 'stripe', payment_id: id, account: 'corp', mid: 'corp', paid_at: ts(at), amount_usd_cents: 999, refunded_usd_cents: 0, country: 'US', payment_method: 'card', card_brand: 'visa', customer_id: customer, ...card });
+    sale('ch_a1', '2026-08-08T12:00:00Z', a, 'cus_a');
+    sale('ch_a2', '2026-09-08T12:00:00Z', a, 'cus_a');
+    sale('ch_old', '2026-09-10T12:00:00Z', b, 'cus_old');
+    for (let i = 0; i < 8; i++) sale(`ch_f${i}`, '2026-09-05T12:00:00Z', a, null);
+    refreshPaymentNumbers(store.db, NOW);
+    const event = (id: string, patch: Partial<VampReportRow>) => store.upsertVampReport(report(id, { customer_id: null, ...patch }));
+    event('e1', { payment_id: 'ch_a2', charged_at: ts('2026-09-08T12:00:00Z'), reported_at: ts('2026-09-20T12:00:00Z'), reason: 'unauthorized_use_of_card', ...a, bank: 'Bank A.' });
+    event('e2', { payment_id: 'ch_old', charged_at: ts('2026-09-10T12:00:00Z'), reported_at: ts('2026-09-12T12:00:00Z'), reason: 'made_with_lost_card', ...b });
+    event('e3', { payment_id: 'ch_pre', charged_at: ts('2026-05-01T12:00:00Z'), reported_at: ts('2026-09-15T12:00:00Z'), reason: 'made_with_counterfeit_card', ...b, campaign_name: 'Old name' });
+    event('e4', { kind: 'dispute', case_type: 'chargeback', payment_id: 'ch_old', charged_at: ts('2026-09-10T12:00:00Z'), reported_at: ts('2026-09-25T12:00:00Z'), reason: 'fraudulent', ...b, campaign_name: 'Old name' });
+    return store;
+  }
+  const sept = { ...base, from: '2026-09-01', to: '2026-09-30' };
+  const rows = (db: ReturnType<typeof patternStore>['db'], dimension: Parameters<typeof getVampBreakdown>[2], o: Parameters<typeof getVampBreakdown>[1] = sept) =>
+    getVampBreakdown(db, o, dimension, t).map((r) => [r.value, r.vamp_count, r.visa_sales, r.vamp_ratio]);
+
+  it('банк и тип карты — с ratio и × к среднему; сумма строк = VAMP count месяца', () => {
+    const db = patternStore().db;
+    expect(rows(db, 'bank')).toEqual([['BANK B', 3, 1, 3], ['BANK A', 1, 9, 1 / 9]]); // «Bank A.» у события — в одном написании
+    expect(rows(db, 'funding')).toEqual([['prepaid', 3, 1, 3], ['debit', 1, 9, 1 / 9]]);
+    const banks = getVampBreakdown(db, sept, 'bank', t);
+    expect(banks.map((r) => r.lift)).toEqual([3 / 0.4, 1 / 9 / 0.4]); // средний ratio выборки — 4 события на 10 продаж
+    expect(banks.every((r) => !r.anomaly)).toBe(true); // выше вдвое, но событий меньше 10 — не аномалия
+    expect(banks.reduce((s, r) => s + r.vamp_count, 0)).toBe(getVampMonth(db, sept, t).vamp_count);
+  });
+
+  it('аномалия — ratio хотя бы вдвое выше среднего и не меньше 10 событий', () => {
+    const store = patternStore();
+    for (let i = 0; i < 10; i++) store.upsertVampReport(report(`ex${i}`, { payment_id: 'ch_old', bank: 'BANK B', reported_at: ts('2026-09-26T12:00:00Z') }));
+    const banks = getVampBreakdown(store.db, sept, 'bank', t);
+    expect(banks.map((r) => [r.value, r.vamp_count, r.anomaly])).toEqual([['BANK B', 13, true], ['BANK A', 1, false]]);
+  });
+
+  it('номер платежа: 2-й платёж подписки; клиент без триала и списание раньше истории — подписка старше истории', () => {
+    const db = patternStore().db;
+    expect(rows(db, 'payment_number')).toEqual([['before_history', 3, 1, 3], ['2', 1, 1, 1]]);
+  });
+
+  it('причина, дни до события — без продаж и ratio', () => {
+    const db = patternStore().db;
+    expect(rows(db, 'reason')).toEqual([
+      ['dispute:fraudulent', 1, 0, null], ['fraud:made_with_counterfeit_card', 1, 0, null], ['fraud:made_with_lost_card', 1, 0, null], ['fraud:unauthorized_use_of_card', 1, 0, null],
+    ]);
+    expect(rows(db, 'days_to_report')).toEqual([['8–30', 2, 0, null], ['0–7', 1, 0, null], ['91–180', 1, 0, null]]);
+  });
+
+  it('трафик: источник, кампания (по ID, подписана самым частым именем), домен лендинга', () => {
+    const db = patternStore().db;
+    expect(rows(db, 'utm_source')).toEqual([['affise', 3, 1, 3], ['voluum', 1, 9, 1 / 9]]);
+    expect(getVampBreakdown(db, sept, 'campaign', t).map((r) => [r.value, r.label, r.vamp_count])).toEqual([['c2', 'Old name', 3], ['c1', 'Movie Streaming', 1]]);
+    expect(rows(db, 'landing_domain')).toEqual([['b.com', 3, 1, 3], ['a.com', 1, 9, 1 / 9]]);
+  });
+
+  it('фильтр: по разрезу с продажами сужает и продажи; по разрезу без продаж — ratio нет', () => {
+    const db = patternStore().db;
+    expect(getVampMonth(db, { ...sept, filters: { bank: ['BANK A'] } }, t)).toMatchObject({ vamp_count: 1, visa_sales: 9 });
+    expect(rows(db, 'country', { ...sept, filters: { campaign: ['c2'] } })).toEqual([['US', 3, 1, 3]]);
+    const byReason = getVampBreakdown(db, { ...sept, filters: { reason: ['fraud:made_with_lost_card'] } }, 'bank', t);
+    expect(byReason.map((r) => [r.value, r.vamp_count, r.vamp_ratio, r.lift])).toEqual([['BANK B', 1, null, null]]);
+  });
+
+  it('Solidgate: банк и тип карты события — из платежа (заказа)', () => {
+    const store = patternStore();
+    store.upsertPayment({ provider: 'solidgate', payment_id: 'ord_1', account: 'sgH2H', mid: 'm1', paid_at: ts('2026-09-05T12:00:00Z'), amount_usd_cents: 999, refunded_usd_cents: 0, country: 'SA', payment_method: 'google_pay', card_brand: 'visa', bank: 'SG BANK', funding: 'credit' });
+    store.upsertVampReport(report('fa_1', { provider: 'solidgate', account: 'sgH2H', mid: null, payment_id: 'ord_1', country: null, payment_method: null }));
+    const sg = { ...sept, provider: 'solidgate' as const };
+    expect(rows(store.db, 'bank', sg)).toEqual([['SG BANK', 1, 1, 1]]);
+    expect(rows(store.db, 'funding', sg)).toEqual([['credit', 1, 1, 1]]);
+    expect(rows(store.db, 'utm_source', sg)).toEqual([[null, 1, 1, 1]]); // атрибуции у Solidgate нет
+  });
+
+  it('выгрузка: банк, тип карты, номер платежа, дни до события, трафик', () => {
+    const table = exportVampReports(patternStore().db, sept, t);
+    const byId = Object.fromEntries(table.rows.map((r) => [r[table.columns.indexOf('report_id')], Object.fromEntries(table.columns.map((c, i) => [c, r[i]]))]));
+    expect(byId.e1).toMatchObject({ issuing_bank: 'BANK A', card_type: 'debit', payment_number: '2', days_to_report: 12, utm_source: 'voluum', campaign_id: 'c1', campaign_name: 'Movie Streaming', landing_domain: 'a.com' });
+    expect(byId.e3).toMatchObject({ payment_number: 'subscription older than history', days_to_report: 137 });
   });
 });
 
@@ -152,6 +246,17 @@ describe('события VAMP у провайдеров', () => {
       report_id: 'issfr_1', kind: 'fraud', reported_at: 200, payment_id: 'ch_1', charged_at: 100, network: 'visa', country: 'MX',
       payment_method: 'apple_pay', customer_id: 'cus_1', risk_score: 67, reason: 'unauthorized_use_of_card', mid: 'corp', amount_usd_cents: 999, refunded: true,
     });
+  });
+
+  it('Stripe: банк, тип карты и трафик — из списания и его клиента (есть и у списаний раньше истории)', () => {
+    const customer = { id: 'cus_1', object: 'customer', metadata: { utm_source: 'Voluum', campaign_id: 'c7', campaign_name: 'Betting', url: 'https://www.vpntoggle.app/?s=1', ip_address: '1.2.3.4' } };
+    const card = { ...charge.payment_method_details.card, issuer: 'Banco Azteca', funding: 'debit' };
+    const efw = { id: 'issfr_2', created: 200, fraud_type: 'misc', charge: { ...charge, customer, payment_method_details: { type: 'card', card } } };
+    expect(vampFromFraudWarning(efw as never, 'corp')).toMatchObject({
+      customer_id: 'cus_1', bank: 'Banco Azteca', funding: 'debit', utm_source: 'voluum', campaign_id: 'c7', campaign_name: 'Betting', landing_domain: 'vpntoggle.app',
+    });
+    // списание не развёрнуто — ни карты, ни трафика
+    expect(vampFromFraudWarning({ id: 'issfr_3', created: 200, fraud_type: 'misc', charge: 'ch_1' } as never, 'corp')).toMatchObject({ bank: null, funding: null, utm_source: null });
   });
 
   it('Stripe: диспут — сеть (не бренд), RDR и сколько по нему списано', () => {
@@ -199,12 +304,28 @@ describe('события VAMP у провайдеров', () => {
       radar: { earlyFraudWarnings: { list: list('efw', [{ id: 'issfr_1', created: from + 10 * DAY, fraud_type: 'misc', charge: 'ch_1' }]) } },
       disputes: { list: list('disputes', [{ id: 'du_1', created: from + 20 * DAY, reason: 'fraudulent', charge: 'ch_2', balance_transactions: [] }]) },
     } as unknown as StripeLike;
+    const expands: unknown[] = [];
+    const efwList = client.radar.earlyFraudWarnings.list;
+    client.radar.earlyFraudWarnings.list = ((params: { expand?: unknown }) => (expands.push(params.expand), efwList(params as never))) as never;
     await syncStripeVamp(store, client, 'corp', from, from + 30 * DAY);
     expect(calls.filter((c) => c.list === 'efw')).toHaveLength(5); // 30 дней — пять недельных окон
+    expect(expands[0]).toEqual(['data.charge', 'data.charge.customer']); // клиент списания — ради трафика
+    expect(store.getState('stripe', 'corp', 'vamp_version')).toBe(4);
     expect(store.db.prepare('SELECT report_id FROM vamp_reports ORDER BY report_id').all()).toEqual([{ report_id: 'du_1' }, { report_id: 'issfr_1' }]);
     calls.length = 0;
     await syncStripeVamp(store, client, 'corp', from, from + 31 * DAY);
     expect(calls.map((c) => c.created)).toEqual([{ gte: from + 29 * DAY }, { gte: from + 29 * DAY }]);
+
+    // база, загруженная прошлой версией (без банка и трафика), — один раз с начала истории заново; прогресс
+    // отменённой версии 3 (P&L) на это не влияет
+    const old = openStore(':memory:');
+    old.setState('stripe', 'corp', 'vamp_version', 3);
+    old.setState('stripe', 'corp', 'vamp_v3_day', from + 35 * DAY);
+    old.setState('stripe', 'corp', 'vamp_cursor', from + 31 * DAY);
+    calls.length = 0;
+    await syncStripeVamp(old, client, 'corp', from, from + 32 * DAY);
+    expect(calls.filter((c) => c.list === 'efw')[0].created).toEqual({ gte: from, lt: from + 7 * DAY });
+    expect(old.getState('stripe', 'corp', 'vamp_version')).toBe(4);
   });
 
   it('загрузка Solidgate: окнами по 30 дней, дальше — с прошлого раза с запасом в сутки', async () => {

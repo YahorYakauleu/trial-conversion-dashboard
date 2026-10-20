@@ -160,17 +160,19 @@ export function exportVampReports(db: Db, o: VampOptions, rules: VampRules, outc
   const { rows, truncated } = limited(listVampReports(db, o, rules, EXPORT_LIMIT + 1, outcome));
   const event = (r: (typeof rows)[number]) =>
     r.kind === 'fraud' ? 'fraud report (TC40)' : r.case_type !== 'chargeback' ? (r.case_type ?? 'dispute') : r.rdr ? 'chargeback, RDR' : 'chargeback (TC15)';
+  // номер платежа подписки: 0 — оплата триала, before_history — подписка оформлена раньше истории дашборда
+  const paymentNumber = (n: string | null) => (n === 'trial_fee' ? 'trial fee' : n === 'before_history' ? 'subscription older than history' : text(n));
   return {
     columns: [
       'provider', 'account', 'visa_merchant', 'mid', 'event', 'counted_in_vamp', 'after_report', 'report_id', 'reported_utc', 'payment_id', 'charged_utc',
-      'amount_usd', 'charge',
-      'card_country', 'payment_method', 'radar_risk_score', 'reason', 'rdr_lost_usd', 'customer_id', 'payment_link', 'customer_link',
+      'days_to_report', 'amount_usd', 'payment_number', 'card_country', 'payment_method', 'issuing_bank', 'card_type', 'radar_risk_score', 'reason',
+      'utm_source', 'campaign_id', 'campaign_name', 'landing_domain', 'rdr_lost_usd', 'customer_id', 'payment_link', 'customer_link',
     ],
     rows: rows.map((r) => [
       r.provider, r.account, text(r.merchant), text(r.mid), event(r), yesNo(r.counted), text(r.outcome), r.report_id, utc(r.reported_at), text(r.payment_id), utc(r.charged_at),
-      dollars(r.amount_usd_cents),
-      r.charge_type === 'first_payment' ? 'first payment after trial' : 'renewal or other', text(r.country), text(r.payment_method), text(r.risk_score),
-      text(r.reason), r.rdr ? dollars(r.lost_usd_cents) : '', text(r.customer_id),
+      text(r.days_to_report), dollars(r.amount_usd_cents), paymentNumber(r.payment_number), text(r.country), text(r.payment_method), text(r.bank), text(r.funding),
+      text(r.risk_score), text(r.reason), text(r.utm_source), text(r.campaign_id), text(r.campaign_name), text(r.landing_domain),
+      r.rdr ? dollars(r.lost_usd_cents) : '', text(r.customer_id),
       stripeLink(r.provider, r.account, 'payments', r.payment_id), stripeLink(r.provider, r.account, 'customers', r.customer_id),
     ]),
     truncated,

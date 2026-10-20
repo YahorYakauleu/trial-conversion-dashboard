@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { openStore } from '../src/db.js';
-import { getLtv, getLtvBreakdown, refreshTrialLtv, resetTrialLtv } from '../src/ltv.js';
+import { getLtv, getLtvBreakdown, refreshPaymentNumbers, refreshTrialLtv, resetPaymentNumbers, resetTrialLtv } from '../src/ltv.js';
 import { DAY } from '../src/metrics.js';
 
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -89,5 +89,37 @@ describe('LTV по когортам триалов', () => {
     resetTrialLtv(store.db, 'stripe', 'corp');
     refreshTrialLtv(store.db, 'stripe', 'corp', NOW + DAY);
     expect(store.db.prepare("SELECT ltv_30 FROM trials WHERE subscription_id = 'a'").get()).toEqual({ ltv_30: 5100 });
+  });
+});
+
+describe('номер платежа подписки (для VAMP)', () => {
+  const numbers = (store: ReturnType<typeof storeWithData>) =>
+    Object.fromEntries((store.db.prepare("SELECT payment_id, payment_n FROM payments ORDER BY payment_id").all() as { payment_id: string; payment_n: number | null }[]).map((r) => [r.payment_id, r.payment_n]));
+
+  it('оплата триала — 0, дальше 1, 2, 3… по порядку; новый триал клиента — счёт заново; без триала в истории — -1, без клиента — не считаем', () => {
+    const store = storeWithData();
+    refreshPaymentNumbers(store.db, NOW);
+    expect(numbers(store)).toEqual({
+      ch_a0: 0, ch_a1: 1, ch_a2: 2, ch_a3: 3, ch_a4: 4, // a: оплата триала и четыре платежа после
+      ch_b1: 1, ch_b2: 1, // b: второй триал — снова первый платёж
+      ch_x: -1, // cus_x — триала в истории нет
+      ch_y: null, // без клиента
+    });
+  });
+
+  it('свежие платежи пересчитываются: триал клиента мог прийти позже его платежа; сброс — после сдвига начала истории', () => {
+    const store = storeWithData();
+    refreshPaymentNumbers(store.db, NOW);
+    store.upsertTrial({
+      provider: 'stripe', account: 'corp', subscription_id: 'x', trial_started_at: end - 7 * DAY, trial_ended_at: end, first_invoice_id: null,
+      first_attempt_succeeded: true, paid_at: end, country: 'US', payment_method: 'card', card_brand: 'visa', bank: null, customer_id: 'cus_x',
+    });
+    refreshPaymentNumbers(store.db, end + DAY); // ch_x — в пределах свежих трёх суток
+    expect(numbers(store).ch_x).toBe(1);
+    refreshPaymentNumbers(store.db, NOW); // старые посчитанные не трогаем
+    resetPaymentNumbers(store.db, 'stripe', 'corp');
+    expect(numbers(store).ch_a1).toBeNull();
+    refreshPaymentNumbers(store.db, NOW);
+    expect(numbers(store).ch_a1).toBe(1);
   });
 });

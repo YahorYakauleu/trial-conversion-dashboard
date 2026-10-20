@@ -45,8 +45,17 @@ export interface CardDetails {
   bank: string | null;
 }
 
+// Откуда пришёл клиент Stripe — из metadata клиента (у Solidgate этого нет): источник, кампания, домен лендинга
+export interface Attribution {
+  utm_source?: string | null; // voluum, affise — в нижнем регистре
+  campaign_id?: string | null;
+  campaign_name?: string | null;
+  landing_domain?: string | null; // только домен из url, без www.: путь и строку запроса не храним
+}
+const NO_ATTRIBUTION: Required<Attribution> = { utm_source: null, campaign_id: null, campaign_name: null, landing_domain: null };
+
 // Успешный платёж для оборота: любое списание (первые платежи, продления, разовые), суммы — в центах USD
-export interface PaymentRow extends CardDetails {
+export interface PaymentRow extends CardDetails, Attribution {
   provider: Provider;
   payment_id: string; // Stripe charge / Solidgate order
   account: string;
@@ -55,6 +64,7 @@ export interface PaymentRow extends CardDetails {
   amount_usd_cents: number;
   refunded_usd_cents: number;
   customer_id?: string | null; // клиент — чтобы связать продления с триалом (LTV)
+  funding?: string | null; // тип карты: credit, debit, prepaid
 }
 
 // Списание eSIM: у продукта нет подписок — только разовые покупки (PaymentIntent), поэтому храним и отклонённые
@@ -72,7 +82,7 @@ export interface EsimChargeRow extends Omit<PaymentRow, 'customer_id'> {
 // Событие для Visa VAMP: фрод-репорт (TC40 — Stripe early fraud warning, Solidgate fraud alert) или диспут (TC15).
 // Храним все сети, в VAMP идут только прошедшие через сеть Visa: фрод-репорты и чарджбэки, не закрытые через RDR.
 // Поля карты у Solidgate пустые — берутся из платежа (payments) по ID заказа
-export interface VampReportRow {
+export interface VampReportRow extends Attribution {
   provider: Provider;
   report_id: string; // Stripe issfr_… / du_…, Solidgate — id алерта или чарджбэка
   account: string;
@@ -94,6 +104,9 @@ export interface VampReportRow {
   lost_usd_cents: number; // сколько списано по RDR-диспуту
   amount_usd_cents: number | null; // сумма списания в долларах, если известна (у платежей дашборда — из payments)
   refunded: boolean; // по списанию вернули деньги (на момент загрузки; рефанды потом дописываются)
+  // карта списания — у Stripe приходит вместе с событием (есть и у списаний раньше истории); у Solidgate — из платежа
+  bank?: string | null;
+  funding?: string | null;
 }
 
 export interface LatestRun {
@@ -257,6 +270,9 @@ export function openStore(file: string) {
   const vampTableColumns = new Set((db.prepare('PRAGMA table_info(vamp_reports)').all() as { name: string }[]).map((c) => c.name));
   if (!vampTableColumns.has('amount_usd_cents')) db.exec('ALTER TABLE vamp_reports ADD COLUMN amount_usd_cents INTEGER');
   if (!vampTableColumns.has('refunded')) db.exec('ALTER TABLE vamp_reports ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0');
+  for (const column of ['bank', 'funding', 'utm_source', 'campaign_id', 'campaign_name', 'landing_domain']) {
+    if (!vampTableColumns.has(column)) db.exec(`ALTER TABLE vamp_reports ADD COLUMN ${column} TEXT`);
+  }
   db.exec(`
     CREATE INDEX IF NOT EXISTS vamp_reports_customer_idx ON vamp_reports (provider, customer_id) WHERE customer_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS vamp_reports_payment_idx ON vamp_reports (provider, payment_id);
@@ -275,6 +291,12 @@ export function openStore(file: string) {
   for (const column of ['reason', 'intent_id', 'customer_id', 'destination', 'package', 'order_type']) {
     if (!paymentColumns.has(column)) db.exec(`ALTER TABLE payments ADD COLUMN ${column} TEXT`);
   }
+  // Для разбивки VAMP по продажам: тип карты, откуда пришёл клиент (Stripe) и номер платежа подписки (src/ltv.ts →
+  // refreshPaymentNumbers): 0 — оплата триала, 1… — после триала, -1 — триала клиента нет в истории, NULL — ещё не посчитан
+  for (const column of ['funding', 'utm_source', 'campaign_id', 'campaign_name', 'landing_domain']) {
+    if (!paymentColumns.has(column)) db.exec(`ALTER TABLE payments ADD COLUMN ${column} TEXT`);
+  }
+  if (!paymentColumns.has('payment_n')) db.exec('ALTER TABLE payments ADD COLUMN payment_n INTEGER');
   db.exec(`
     CREATE INDEX IF NOT EXISTS payments_product_paid_idx ON payments (product, paid_at);
     CREATE INDEX IF NOT EXISTS payments_customer_idx ON payments (customer_id) WHERE customer_id IS NOT NULL;
@@ -382,11 +404,16 @@ export function openStore(file: string) {
   // Платёж: перевыгрузка обновляет всё, кроме рефанда — он только растёт
   const upsertPaymentStmt = db.prepare(`
     INSERT INTO payments (provider, payment_id, account, mid, paid_at, amount_usd_cents, refunded_usd_cents,
-                          country, payment_method, card_brand, bank, customer_id)
+                          country, payment_method, card_brand, bank, customer_id, funding, utm_source, campaign_id, campaign_name, landing_domain)
     VALUES (@provider, @payment_id, @account, @mid, @paid_at, @amount_usd_cents, @refunded_usd_cents,
-            @country, @payment_method, @card_brand, @bank, @customer_id)
+            @country, @payment_method, @card_brand, @bank, @customer_id, @funding, @utm_source, @campaign_id, @campaign_name, @landing_domain)
     ON CONFLICT (provider, payment_id) DO UPDATE SET
       customer_id = COALESCE(excluded.customer_id, payments.customer_id),
+      funding = COALESCE(excluded.funding, payments.funding),
+      utm_source = COALESCE(excluded.utm_source, payments.utm_source),
+      campaign_id = COALESCE(excluded.campaign_id, payments.campaign_id),
+      campaign_name = COALESCE(excluded.campaign_name, payments.campaign_name),
+      landing_domain = COALESCE(excluded.landing_domain, payments.landing_domain),
       account = excluded.account,
       mid = excluded.mid,
       paid_at = excluded.paid_at,
@@ -421,7 +448,8 @@ export function openStore(file: string) {
       order_type = excluded.order_type
   `);
   const vampColumns = ['provider', 'report_id', 'account', 'mid', 'kind', 'reported_at', 'payment_id', 'charged_at', 'network', 'country',
-    'payment_method', 'customer_id', 'risk_score', 'reason', 'case_type', 'rdr', 'lost_usd_cents', 'amount_usd_cents', 'refunded'];
+    'payment_method', 'customer_id', 'risk_score', 'reason', 'case_type', 'rdr', 'lost_usd_cents', 'amount_usd_cents', 'refunded',
+    'bank', 'funding', 'utm_source', 'campaign_id', 'campaign_name', 'landing_domain'];
   // перевыгрузка обновляет всё, кроме рефанда — он только появляется
   const upsertVampStmt = db.prepare(`
     INSERT INTO vamp_reports (${vampColumns.join(', ')}) VALUES (${vampColumns.map((c) => `@${c}`).join(', ')})
@@ -511,21 +539,27 @@ export function openStore(file: string) {
     },
 
     upsertPayment(p: PaymentRow): void {
-      upsertPaymentStmt.run({ ...p, customer_id: p.customer_id ?? null, bank: bankName(p.bank) });
+      upsertPaymentStmt.run({ ...NO_ATTRIBUTION, funding: null, ...p, customer_id: p.customer_id ?? null, bank: bankName(p.bank) });
     },
 
-    // Клиент и банк у уже загруженного платежа — разовые проходы (LTV, банк Stripe): только пустые, известные не трогаем
-    setPaymentDetails(provider: Provider, paymentId: string, details: { customer_id: string | null; bank: string | null }): void {
-      db.prepare('UPDATE payments SET customer_id = COALESCE(customer_id, ?), bank = COALESCE(bank, ?) WHERE provider = ? AND payment_id = ?').run(
-        details.customer_id,
-        bankName(details.bank),
-        provider,
-        paymentId,
-      );
+    // Клиент, карта и трафик у уже загруженного платежа — разовые проходы (LTV, банк, тип карты, атрибуция Stripe):
+    // только пустые, известные не трогаем
+    setPaymentDetails(
+      provider: Provider,
+      paymentId: string,
+      details: { customer_id: string | null; bank: string | null; funding?: string | null } & Attribution,
+    ): void {
+      const d = { ...NO_ATTRIBUTION, funding: null, ...details, bank: bankName(details.bank) };
+      db.prepare(
+        `UPDATE payments SET customer_id = COALESCE(customer_id, @customer_id), bank = COALESCE(bank, @bank), funding = COALESCE(funding, @funding),
+                utm_source = COALESCE(utm_source, @utm_source), campaign_id = COALESCE(campaign_id, @campaign_id),
+                campaign_name = COALESCE(campaign_name, @campaign_name), landing_domain = COALESCE(landing_domain, @landing_domain)
+         WHERE provider = @provider AND payment_id = @payment_id`,
+      ).run({ ...d, provider, payment_id: paymentId });
     },
 
     upsertVampReport(r: VampReportRow): void {
-      upsertVampStmt.run({ ...r, rdr: Number(r.rdr), refunded: Number(r.refunded) });
+      upsertVampStmt.run({ ...NO_ATTRIBUTION, funding: null, ...r, bank: bankName(r.bank), rdr: Number(r.rdr), refunded: Number(r.refunded) });
     },
 
     // Рефанд, пришедший позже фрод-репорта (Stripe refunds, Solidgate — заказ с возвратом)

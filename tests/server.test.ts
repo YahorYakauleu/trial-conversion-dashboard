@@ -230,8 +230,9 @@ describe('server', () => {
     }
     const report = { provider: 'stripe' as const, account: 'org', mid: 'org', reported_at: at, payment_id: 'ch_1', charged_at: at, network: 'visa', country: 'US',
       payment_method: 'card', customer_id: null, risk_score: 70, reason: null, case_type: null, rdr: false, lost_usd_cents: 0, amount_usd_cents: null, refunded: false };
-    store.upsertVampReport({ ...report, report_id: 'issfr_1', kind: 'fraud' });
-    store.upsertVampReport({ ...report, report_id: 'du_1', kind: 'dispute', case_type: 'chargeback' });
+    const card = { bank: 'Bank A', campaign_id: 'c1', campaign_name: 'Movie Streaming' };
+    store.upsertVampReport({ ...report, ...card, report_id: 'issfr_1', kind: 'fraud', reason: 'misc' });
+    store.upsertVampReport({ ...report, ...card, report_id: 'du_1', kind: 'dispute', case_type: 'chargeback' });
     const server = createApp({ store, config, sources: [] }).listen(0);
     await new Promise((resolve) => server.once('listening', resolve));
     close = () => server.close();
@@ -261,6 +262,14 @@ describe('server', () => {
 
     const values = await (await fetch(`${url}/api/values?mode=vamp&dimension=country&${period}`, { headers: auth })).json();
     expect(values.values).toEqual([{ value: 'US', count: 2 }]);
+    // новые разрезы: кампания — с именем в значениях фильтра; фильтр по причине — без ratio
+    const campaigns = await (await fetch(`${url}/api/values?mode=vamp&dimension=campaign&${period}`, { headers: auth })).json();
+    expect(campaigns.values).toEqual([{ value: 'c1', label: 'Movie Streaming', count: 2 }]);
+    const byReason = await get(`view=bank&reason=${encodeURIComponent('fraud:misc')}`);
+    expect([byReason.filters, byReason.breakdown.map((r: { value: string; vamp_count: number; vamp_ratio: number | null }) => [r.value, r.vamp_count, r.vamp_ratio])]).toEqual([
+      { reason: ['fraud:misc'] }, [['BANK A', 1, null]],
+    ]);
+    expect((await get('view=payment_number&campaign=c1')).filters).toEqual({ campaign: ['c1'] });
     const csv = await fetch(`${url}/api/export?mode=vamp&view=risk&risk=${encodeURIComponent('50–74')}&${period}`, { headers: auth });
     expect(csv.headers.get('content-disposition')).toContain('vamp-reports_');
     expect((await csv.text()).trim().split('\r\n')).toHaveLength(3);

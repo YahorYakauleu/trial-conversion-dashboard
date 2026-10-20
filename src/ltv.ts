@@ -43,6 +43,30 @@ export function resetTrialLtv(db: Db, provider: Provider, account: string): void
   db.prepare('UPDATE trials SET ltv_at = NULL WHERE provider = ? AND account = ?').run(provider, account);
 }
 
+// Номер платежа подписки — для разбивки VAMP: платёж относится к последнему триалу клиента, оформленному не позже него
+// (как в LTV: следующий триал начинает счёт заново). До конца триала — 0 (оплата триала), после — 1, 2, 3… по порядку;
+// триала клиента нет в истории (подписка оформлена раньше HISTORY_FROM) — -1. Считаются ещё не посчитанные и свежие
+// платежи: триал или более ранний платёж клиента могли прийти позже
+const RENUMBER_RECENT = 3 * DAY;
+export function refreshPaymentNumbers(db: Db, now: number): void {
+  const trial = `FROM trials t WHERE t.provider = payments.provider AND t.customer_id = payments.customer_id
+                   AND t.trial_started_at <= payments.paid_at + ${TOLERANCE} ORDER BY t.trial_started_at DESC LIMIT 1`;
+  const earlier = `SELECT COUNT(*) FROM payments q INDEXED BY payments_customer_paid_idx
+                   WHERE q.provider = payments.provider AND q.customer_id = payments.customer_id AND q.product = 'vpn'
+                     AND q.paid_at >= t.trial_ended_at - ${TOLERANCE}
+                     AND (q.paid_at < payments.paid_at OR (q.paid_at = payments.paid_at AND q.payment_id <= payments.payment_id))`;
+  db.prepare(
+    `UPDATE payments SET payment_n = COALESCE(
+       (SELECT CASE WHEN payments.paid_at < t.trial_ended_at - ${TOLERANCE} THEN 0 ELSE (${earlier}) END ${trial}), -1)
+     WHERE product = 'vpn' AND customer_id IS NOT NULL AND (payment_n IS NULL OR paid_at >= @recent)`,
+  ).run({ recent: now - RENUMBER_RECENT });
+}
+
+// История аккаунта начинается раньше (HISTORY_FROM сдвинули) — у старых платежей могли появиться триалы
+export function resetPaymentNumbers(db: Db, provider: Provider, account: string): void {
+  db.prepare('UPDATE payments SET payment_n = NULL WHERE provider = ? AND account = ?').run(provider, account);
+}
+
 interface Counts {
   started: number;
   paid: number; // оплатили первый платный период в окне ретраев (как Trial-to-paid)

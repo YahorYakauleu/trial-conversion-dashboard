@@ -245,6 +245,7 @@ button, select, input { font: inherit; color: var(--text); }
 /* вкладки разрезов */
 .tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 2px; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
+@media (min-width: 900px) { .tabs { flex-wrap: wrap; } } /* у VAMP вкладок много — на широком экране все видны сразу */
 .tabs button {
   height: 34px; padding: 0 14px; border-radius: 10px; border: 1px solid transparent; background: transparent;
   color: var(--text-2); cursor: pointer; white-space: nowrap;
@@ -285,6 +286,9 @@ th:first-child, td:first-child { text-align: left; }
 td:first-child { font-weight: 500; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 td .n { color: var(--muted); margin-left: 6px; }
 tr.link { cursor: pointer; }
+/* VAMP: ratio строки заметно выше среднего — подсказка цветом, само значение «× avg» всегда текстом */
+tr.anomaly td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
+td.lift-high { color: var(--danger); font-weight: 600; }
 tbody tr:hover td { background: var(--surface-sunken); }
 .pending { color: var(--muted); }
 /* статус VAMP: название всегда текстом, цвет — только подсказка */

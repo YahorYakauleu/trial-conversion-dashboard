@@ -87,7 +87,12 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   package: /^.{1,40}$/, // eSIM: «5 GB · 7 days»
   merchant: /^.{1,80}$/, // VAMP: мерчант Visa — имя группы MID или сам MID
   risk: /^\d{1,2}–\d{2}$/, // VAMP: полоса Radar risk score, «50–74»
-  charge_type: /^(first_payment|renewal)$/, // VAMP: первый платёж после триала или продление
+  payment_number: /^(trial_fee|before_history|[1-4]|5\+)$/, // VAMP: номер платежа подписки
+  reason: /^(fraud|dispute):.{1,120}$/, // VAMP: тип фрода репорта или причина диспута
+  days_to_report: /^(\d{1,3}–\d{1,3}|180\+)$/, // VAMP: дней от списания до события, «8–30»
+  utm_source: /^.{1,80}$/, // VAMP: источник трафика клиента Stripe
+  campaign: /^.{1,120}$/, // VAMP: ID кампании
+  landing_domain: /^[a-z0-9.-]{1,120}$/, // VAMP: домен лендинга
 };
 
 // Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA
@@ -332,7 +337,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
       if (mode === 'vamp') {
         const { dimension, filters } = facet(VAMP_FILTERS);
         const o = { provider, filters, now, ...vampScope(range).latest };
-        return dimension ? getVampBreakdown(store.db, o, dimension, config.vamp).map((r) => ({ value: r.value, count: r.vamp_count })) : [];
+        return dimension ? getVampBreakdown(store.db, o, dimension, config.vamp).map((r) => ({ value: r.value, label: r.label, count: r.vamp_count })) : [];
       }
       if (mode === 'esim_overview') {
         const { dimension, filters } = facet(OVERVIEW_DIMENSIONS);
@@ -350,7 +355,7 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const values = cached({ api: 'values', mode, provider, range, query: req.query }, () =>
       compute()
         .filter((v) => v.count > 0 || v.keep)
-        .map(({ value, count }) => ({ value, count }))
+        .map((v) => ('label' in v && v.label ? { value: v.value, label: v.label, count: v.count } : { value: v.value, count: v.count })) // label — имя кампании VAMP
         .sort((a, b) => b.count - a.count),
     );
     res.json({ values });
