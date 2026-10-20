@@ -1,5 +1,5 @@
 import type { Db, Provider } from './db.js';
-import { declineHint, declineLabel } from './declines.js';
+import { declineHint, declineLabel, reasonSql } from './declines.js';
 import { addDays, localDay, localMidnight } from './time.js';
 
 export const DAY = 86_400;
@@ -344,6 +344,25 @@ export function getDeclineReasons(db: Db, o: RangeOptions): ReasonRow[] {
       final: g.last_trial_end === null || g.last_trial_end + o.retryWindowDays * DAY <= o.now,
     }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason, 'en'));
+}
+
+// Банки отказов одной причины (строка вкладки Decline reasons): отклонённые попытки с кодами этой группы — по банку
+// карты триала (у попытки банк не хранится), по убыванию, «не определено» — в конце; share — доля от отказов причины
+export function getDeclineBanks(db: Db, o: RangeOptions, reason: string) {
+  const filter = trialFilter(o);
+  const byReason = reasonSql('a.reason', reason);
+  const rows = db
+    .prepare(
+      `SELECT t.bank AS value, COUNT(*) AS count
+       FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
+       WHERE ${filter.sql} AND a.approved = 0 AND ${byReason.sql}
+       GROUP BY t.bank`,
+    )
+    .all({ ...filter.params, ...byReason.params }) as { value: string | null; count: number }[];
+  const total = rows.reduce((s, r) => s + r.count, 0);
+  return rows
+    .map((r) => ({ value: r.value, count: r.count, share: r.count / total }))
+    .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.count - a.count || (a.value ?? '').localeCompare(b.value ?? '', 'en'));
 }
 
 const add = (a: Counts, b: Counts): Counts => ({

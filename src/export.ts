@@ -1,6 +1,6 @@
 import { AFTER_TRIAL, cancelCodes, cancelLabel, IN_TRIAL } from './cancellations.js';
 import type { Db } from './db.js';
-import { declineCodes, declineLabel } from './declines.js';
+import { declineLabel, reasonSql } from './declines.js';
 import { cohortCte, ordersCte, type EsimOptions } from './esim.js';
 import { DAY, trialFilter, type RangeOptions } from './metrics.js';
 import { isNoRetry, listRetryAttempts } from './retries.js';
@@ -34,15 +34,6 @@ const text = (value: string | number | null | undefined) => value ?? '';
 
 // Строк на одну больше лимита — чтобы понять, что выгрузка обрезана
 const limited = <T>(rows: T[]) => ({ rows: rows.slice(0, EXPORT_LIMIT), truncated: rows.length > EXPORT_LIMIT });
-
-// Условие «причина из группы» для строки вкладки причин (отказы списания или отмены подписки)
-function reasonSql(column: string, label: string | null, codesOf = declineCodes) {
-  if (!label) return { sql: '1 = 1', params: {} };
-  const { codes, withoutCode } = codesOf(label);
-  const params = Object.fromEntries(codes.map((code, i) => [`reason_${i}`, code]));
-  const parts = [codes.length ? `${column} IN (${codes.map((_, i) => `@reason_${i}`).join(', ')})` : '', withoutCode ? `${column} IS NULL` : ''];
-  return { sql: `(${parts.filter(Boolean).join(' OR ')})`, params };
-}
 
 // --- VPN
 

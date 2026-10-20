@@ -73,6 +73,15 @@ export function declineCodes(label: string): { codes: string[]; withoutCode: boo
   return { codes: GROUPS.find((g) => g.label === label)?.codes ?? [label], withoutCode: false };
 }
 
+// Условие «причина из группы» для строки вкладки причин (отказы списания или отмены подписки): column — колонка с кодом
+export function reasonSql(column: string, label: string | null, codesOf = declineCodes) {
+  if (!label) return { sql: '1 = 1', params: {} };
+  const { codes, withoutCode } = codesOf(label);
+  const params = Object.fromEntries(codes.map((code, i) => [`reason_${i}`, code]));
+  const parts = [codes.length ? `${column} IN (${codes.map((_, i) => `@reason_${i}`).join(', ')})` : '', withoutCode ? `${column} IS NULL` : ''];
+  return { sql: `(${parts.filter(Boolean).join(' OR ')})`, params };
+}
+
 // Отказы, после которых повтор бесполезен: банк закрыл или заблокировал карту, отозвал разрешение на списания,
 // Stripe сам блокирует повторы по карте, карта в блок-листе. На сентябрьских когортах после них ~0,4% успешных повторов
 export const NO_RETRY_CODES = [

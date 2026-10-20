@@ -10,6 +10,7 @@ import { nowSec, type Store } from './db.js';
 import {
   DIMENSIONS,
   getBreakdown,
+  getDeclineBanks,
   getDeclineReasons,
   getMetrics,
   latestDay,
@@ -175,18 +176,21 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
     const { now, provider, granularity, range, meta } = common(req.query);
     const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
     const filters: Filters = parseFilters(req.query, DIMENSIONS);
+    const reason = typeof req.query.reason === 'string' && /^.{1,80}$/.test(req.query.reason) ? req.query.reason : null;
     const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
     // разбивка — один проход по базе, итоги — сумма её строк; динамика и причины отказа — итоги из ряда по дням
-    const data = cached({ api: 'metrics', provider, granularity, range, view, filters }, () => {
+    const data = cached({ api: 'metrics', provider, granularity, range, view, filters, reason }, () => {
       if ((DIMENSIONS as readonly string[]).includes(view)) {
         const breakdown = getBreakdown(store.db, options, view as Dimension);
         return { totals: totalsOf(breakdown), series: [], breakdown, reasons: [] };
       }
       const { totals, series } = getMetrics(store.db, { ...options, granularity });
       const reasons = view === 'decline_reason' ? getDeclineReasons(store.db, options) : [];
-      return { totals, series: view === 'time' ? series : [], breakdown: [], reasons };
+      // &reason=<причина> — банки отказов этой причины (строка вкладки Decline reasons)
+      const banks = view === 'decline_reason' && reason ? getDeclineBanks(store.db, options, reason) : null;
+      return { totals, series: view === 'time' ? series : [], breakdown: [], reasons, reason_banks: banks };
     });
-    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
+    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, reason, ...data });
   });
 
   // Отмены VPN: те же параметры, что у /api/metrics; view=time|<измерение>|cancel_reason. Когорты по дню оформления триала

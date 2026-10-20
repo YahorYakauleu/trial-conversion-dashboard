@@ -27,7 +27,7 @@ const MODES = {
     tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['decline_reason', 'Decline reasons']],
     hints: {
       time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
-      decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended',
+      decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended. Click a reason to see its issuing banks',
     },
   },
   ltv: {
@@ -228,6 +228,8 @@ const state = {
   filters: Object.fromEntries(MODES[initialMode].dimensions.filter((d) => params.getAll(d).length).map((d) => [d, params.getAll(d)])),
   sort: parseSort(params.get('sort')),
   showAll: false,
+  // Conversion → Decline reasons: открытая причина — её банки (строка таблицы причин)
+  drill: initialMode === 'conversion' && params.get('view') === 'decline_reason' ? params.get('reason') || null : null,
 };
 const product = () => MODES[state.mode].product;
 const kind = () => MODES[state.mode].kind;
@@ -329,6 +331,7 @@ function query() {
     q.set('to', state.to);
   }
   for (const [dimension, values] of Object.entries(state.filters)) for (const value of values) q.append(dimension, value);
+  if (state.drill) q.set('reason', state.drill);
   return q;
 }
 
@@ -1122,15 +1125,49 @@ function renderView(data) {
   if (isTime) {
     renderTable([periodColumn(timeHead('Trial start date')), ...CONVERSION_COLUMNS], data.series);
     renderCharts(data.series);
+  } else if (state.view === 'decline_reason' && data.reason_banks) {
+    renderTable(DECLINE_BANK_COLUMNS, data.reason_banks, { limit: true, empty: 'No declines for this reason in this period' });
+    $('hint').innerHTML = `<button class="link-btn" id="drill-back">← All decline reasons</button> · ${esc(data.reason)}: declines by the issuing bank of the trial's card`;
   } else if (state.view === 'decline_reason') {
     renderReasons(REASON_COLUMNS, data.reasons);
   } else {
-    renderTable([valueColumn(), ...CONVERSION_COLUMNS], data.breakdown, breakdown);
+    // доля триалов строки — от всех триалов выборки, включая Unknown и строки за пределами показанных
+    const total = data.breakdown.reduce((s, r) => s + r.started, 0);
+    const shareOfTotal = { key: 'share_of_total', title: 'Share of total', tip: 'Доля триалов строки от всех триалов выборки', sort: (r) => r.started, cell: (r) => shareCell(total ? r.started / total : null) };
+    renderTable([valueColumn(), shareOfTotal, ...CONVERSION_COLUMNS], data.breakdown, breakdown);
   }
 }
 
+// Строка причины отказа → её банки; назад — ссылкой над таблицей или повторным кликом по вкладке
+function openReason(reason) {
+  state.drill = reason;
+  state.sort = null;
+  state.showAll = false;
+  load('view');
+}
+$('hint').addEventListener('click', (event) => {
+  if (!event.target.closest('#drill-back')) return;
+  state.drill = null;
+  state.sort = null;
+  state.showAll = false;
+  load('view');
+});
+const DECLINE_BANK_COLUMNS = [
+  {
+    key: 'value',
+    title: 'Issuing bank',
+    tip: 'Банк карты триала: у Stripe — карта клиента, у Solidgate — карта заказа',
+    text: true,
+    sort: (r) => (r.value === null ? null : valueLabel('bank', r.value)),
+    cell: (r) => `<td title="${esc(valueLabel('bank', r.value))}">${esc(valueLabel('bank', r.value))}</td>`,
+  },
+  { key: 'count', title: 'Declines', tip: 'Отклонённые попытки с этой причиной', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
+  { key: 'share', title: 'Share of declines', tip: 'Доля от всех отказов по этой причине', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
+];
+
 function renderReasons(columns, reasons) {
-  renderTable(columns, reasons, { empty: 'No declines for this period' });
+  // строка причины открывает её банки
+  renderTable(columns, reasons.map((r) => ({ ...r, value: r.reason })), { link: true, empty: 'No declines for this period' });
   // итог по всем причинам — в подсказке над таблицей
   const first = reasons.reduce((s, r) => s + r.first_declines, 0);
   const recovered = reasons.reduce((s, r) => s + r.recovered, 0);
@@ -1568,6 +1605,7 @@ const closeSidebar = () => {
 // Смена экрана: фильтры, которых у него нет (аккаунт ↔ MID), снимаются; вкладка, которой нет, — на динамику
 function switchMode(value) {
   state.mode = value;
+  state.drill = null;
   state.filters = Object.fromEntries(Object.entries(state.filters).filter(([d]) => dimensions().includes(d)));
   if (!MODES[value].tabs.some(([v]) => v === state.view)) state.view = 'time';
   state.sort = null;
@@ -1599,8 +1637,9 @@ for (const id of ['provider', 'granularity']) {
 
 $('view').addEventListener('click', (event) => {
   const value = event.target.closest('button')?.dataset.v;
-  if (!value || value === state.view) return;
+  if (!value || (value === state.view && !state.drill)) return; // повторный клик по Decline reasons — назад ко всем причинам
   state.view = value;
+  state.drill = null;
   state.sort = null; // у вкладок разные колонки
   state.showAll = false;
   load('view');
@@ -1647,7 +1686,9 @@ $('rows').addEventListener('click', (event) => {
   const exportButton = event.target.closest('.row-export');
   if (exportButton) return void exportCsv(rowPatch(table.shown[+exportButton.dataset.row]), exportButton);
   const row = event.target.closest('tr.link');
-  if (loading || !row || !dimensions().includes(state.view)) return; // строки старой вкладки, пока грузится новая
+  if (loading || !row) return; // строки старой вкладки, пока грузится новая
+  if (kind() === 'conversion' && state.view === 'decline_reason' && !state.drill) return void openReason(row.dataset.value);
+  if (!dimensions().includes(state.view)) return;
   state.filters[state.view] = [row.dataset.value];
   state.view = 'time';
   state.sort = null;
@@ -1682,6 +1723,7 @@ async function exportCsv(patch = {}, button = $('export')) {
 // Строка таблицы сужает выгрузку: период строки (динамика), причина отказа или значение разреза
 function rowPatch(r) {
   if (state.view === 'time') return { period: 'custom', from: r.period, to: r.period_end };
+  if (state.view === 'decline_reason' && state.drill) return { bank: r.value ?? 'none' }; // банк открытой причины (она уже в запросе)
   if (state.view === 'decline_reason' || state.view === 'cancel_reason') return { reason: r.reason };
   if (state.view === 'outcome') return { reason: r.outcome }; // исход после фрод-репорта
   if (state.view === 'attempt') return { attempt: r.attempt };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type AttemptRow, type PaymentRow, type TrialRow } from '../src/db.js';
 import { declineHint, declineLabel } from '../src/declines.js';
-import { DAY, getBreakdown, getDeclineReasons, getMetrics, latestDay, resolveRange, totalsOf } from '../src/metrics.js';
+import { DAY, getBreakdown, getDeclineBanks, getDeclineReasons, getMetrics, latestDay, resolveRange, totalsOf } from '../src/metrics.js';
 import { getTurnover, getTurnoverBreakdown } from '../src/turnover.js';
 
 // «Сегодня» = понедельник 2026-10-12, история с 1 сентября, триалы по 7 дней, окно ретраев 30 дней
@@ -289,6 +289,18 @@ describe('платёжные метрики: проходимость, decline, 
       'Fraudulent', // поровну — по алфавиту
       'Insufficient funds',
     ]);
+  });
+
+  it('банки одной причины отказа: отклонённые попытки её кодов по банку карты триала, доля от отказов причины; «не определено» — в конце', () => {
+    const store = paymentsStore();
+    store.setCardDetails('stripe', 'b', { country: null, payment_method: null, card_brand: null, bank: 'Bank B', mid: null });
+    // Insufficient funds: у b (Stripe, insufficient_funds) и у c (Solidgate, 3.02 — без банка)
+    expect(getDeclineBanks(store.db, opts, 'Insufficient funds')).toEqual([
+      { value: 'BANK B', count: 1, share: 0.5 },
+      { value: null, count: 1, share: 0.5 },
+    ]);
+    expect(getDeclineBanks(store.db, { ...opts, provider: 'solidgate' }, 'Insufficient funds')).toEqual([{ value: null, count: 1, share: 1 }]);
+    expect(getDeclineBanks(store.db, opts, 'Do not honor / Generic decline')).toEqual([{ value: 'BANK B', count: 1, share: 1 }]);
   });
 });
 
