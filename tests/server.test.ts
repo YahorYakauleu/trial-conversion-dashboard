@@ -140,7 +140,7 @@ describe('server', () => {
     expect((await get('view=bank')).breakdown.map((r: { value: string | null }) => r.value)).toEqual(['SUTTON BANK', null]);
     // строка причины → её банки; без причины — банков нет
     const drill = await get(`view=decline_reason&reason=${encodeURIComponent('Do not honor / Generic decline')}`);
-    expect([drill.reason, drill.reason_banks]).toEqual(['Do not honor / Generic decline', [{ value: 'SUTTON BANK', count: 1, share: 1 }]]);
+    expect([drill.reason, drill.reason_banks]).toEqual(['Do not honor / Generic decline', [{ value: 'SUTTON BANK', count: 1, share: 1, bank_countries: [{ country: 'US', count: 1 }] }]]);
     expect((await get('view=decline_reason')).reason_banks).toBeNull();
   });
 

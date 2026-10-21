@@ -69,6 +69,20 @@ export interface Point extends Totals {
 
 export interface BreakdownRow extends Totals {
   value: string | null; // значение измерения; null — не определено
+  bank_countries?: BankCountry[]; // у банка: страны его карт в выборке, самая частая — первой
+}
+
+// Страна банка — страна выпуска его карт. У банка с картами нескольких стран (Revolut, Santander) их несколько:
+// по убыванию числа, первая — основная
+export interface BankCountry {
+  country: string;
+  count: number;
+}
+function bankCountries(rows: { bank: string | null; country: string; count: number }[]): Map<string | null, BankCountry[]> {
+  const byBank = new Map<string | null, BankCountry[]>();
+  for (const { bank, country, count } of rows) byBank.set(bank, [...(byBank.get(bank) ?? []), { country, count }]);
+  for (const list of byBank.values()) list.sort((a, b) => b.count - a.count || a.country.localeCompare(b.country));
+  return byBank;
 }
 
 export interface ReasonRow {
@@ -267,9 +281,19 @@ function dailyPoints(db: Db, o: MetricsOptions): Point[] {
 export function getBreakdown(db: Db, o: RangeOptions, dimension: Dimension): BreakdownRow[] {
   const groups = aggregate(db, o, DIMENSION_SQL[dimension]);
   const final = finality(o, o.to, maxLengthOf(groups));
-  return [...groups]
+  const rows: BreakdownRow[] = [...groups]
     .map(([value, { max_len: _, ...counts }]) => withRates({ value: value === null ? null : String(value), ...counts, ...final }))
     .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.started - a.started || String(a.value).localeCompare(String(b.value)));
+  if (dimension === 'bank') {
+    const filter = trialFilter(o);
+    const countries = bankCountries(
+      db
+        .prepare(`SELECT t.bank AS bank, t.country AS country, COUNT(*) AS count FROM trials t WHERE ${filter.sql} AND t.country IS NOT NULL GROUP BY t.bank, t.country`)
+        .all(filter.params) as { bank: string | null; country: string; count: number }[],
+    );
+    for (const r of rows) r.bank_countries = countries.get(r.value) ?? [];
+  }
+  return rows;
 }
 
 // Итоги периода из разбивки: каждый триал попадает ровно в одну строку (в том числе «не определено»),
@@ -347,21 +371,25 @@ export function getDeclineReasons(db: Db, o: RangeOptions): ReasonRow[] {
 }
 
 // Банки отказов одной причины (строка вкладки Decline reasons): отклонённые попытки с кодами этой группы — по банку
-// карты триала (у попытки банк не хранится), по убыванию, «не определено» — в конце; share — доля от отказов причины
+// карты триала (у попытки банк не хранится), по убыванию, «не определено» — в конце; share — доля от отказов причины,
+// bank_countries — страны карт этих отказов
 export function getDeclineBanks(db: Db, o: RangeOptions, reason: string) {
   const filter = trialFilter(o);
   const byReason = reasonSql('a.reason', reason);
   const rows = db
     .prepare(
-      `SELECT t.bank AS value, COUNT(*) AS count
+      `SELECT t.bank AS bank, t.country AS country, COUNT(*) AS count
        FROM attempts a JOIN trials t ON t.provider = a.provider AND t.subscription_id = a.subscription_id
        WHERE ${filter.sql} AND a.approved = 0 AND ${byReason.sql}
-       GROUP BY t.bank`,
+       GROUP BY t.bank, t.country`,
     )
-    .all({ ...filter.params, ...byReason.params }) as { value: string | null; count: number }[];
+    .all({ ...filter.params, ...byReason.params }) as { bank: string | null; country: string | null; count: number }[];
+  const counts = new Map<string | null, number>();
+  for (const r of rows) counts.set(r.bank, (counts.get(r.bank) ?? 0) + r.count);
+  const countries = bankCountries(rows.filter((r): r is typeof r & { country: string } => r.country !== null));
   const total = rows.reduce((s, r) => s + r.count, 0);
-  return rows
-    .map((r) => ({ value: r.value, count: r.count, share: r.count / total }))
+  return [...counts]
+    .map(([value, count]) => ({ value, count, share: count / total, bank_countries: countries.get(value) ?? [] }))
     .sort((a, b) => Number(a.value === null) - Number(b.value === null) || b.count - a.count || (a.value ?? '').localeCompare(b.value ?? '', 'en'));
 }
 

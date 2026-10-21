@@ -1134,7 +1134,8 @@ function renderView(data) {
     // доля триалов строки — от всех триалов выборки, включая Unknown и строки за пределами показанных
     const total = data.breakdown.reduce((s, r) => s + r.started, 0);
     const shareOfTotal = { key: 'share_of_total', title: 'Share of total', tip: 'Доля триалов строки от всех триалов выборки', sort: (r) => r.started, cell: (r) => shareCell(total ? r.started / total : null) };
-    renderTable([valueColumn(), shareOfTotal, ...CONVERSION_COLUMNS], data.breakdown, breakdown);
+    const bankCountry = state.view === 'bank' ? [BANK_COUNTRY_COLUMN] : [];
+    renderTable([valueColumn(), ...bankCountry, shareOfTotal, ...CONVERSION_COLUMNS], data.breakdown, breakdown);
   }
 }
 
@@ -1152,6 +1153,21 @@ $('hint').addEventListener('click', (event) => {
   state.showAll = false;
   load('view');
 });
+// Страна банка — страна выпуска его карт; у банка с картами нескольких стран — основная, остальные — «+N» с подсказкой
+const BANK_COUNTRY_COLUMN = {
+  key: 'bank_country',
+  title: 'Bank country',
+  tip: 'Страна выпуска карт банка. Если карты из нескольких стран (Revolut и т. п.) — самая частая, остальные — в подсказке',
+  text: true,
+  sort: (r) => (r.bank_countries?.length ? valueLabel('country', r.bank_countries[0].country) : null),
+  cell: (r) => {
+    const [main, ...rest] = r.bank_countries ?? [];
+    if (!main) return '<td class="muted">—</td>';
+    const all = r.bank_countries.reduce((s, c) => s + c.count, 0);
+    const tip = rest.length ? r.bank_countries.map((c) => `${valueLabel('country', c.country)} — ${pct(c.count / all)}`).join('\n') : '';
+    return `<td${tip ? ` title="${esc(tip)}"` : ''}>${esc(valueLabel('country', main.country))}${rest.length ? `<span class="n">+${rest.length}</span>` : ''}</td>`;
+  },
+};
 const DECLINE_BANK_COLUMNS = [
   {
     key: 'value',
@@ -1161,6 +1177,7 @@ const DECLINE_BANK_COLUMNS = [
     sort: (r) => (r.value === null ? null : valueLabel('bank', r.value)),
     cell: (r) => `<td title="${esc(valueLabel('bank', r.value))}">${esc(valueLabel('bank', r.value))}</td>`,
   },
+  BANK_COUNTRY_COLUMN,
   { key: 'count', title: 'Declines', tip: 'Отклонённые попытки с этой причиной', sort: (r) => r.count, cell: (r) => `<td>${num(r.count)}</td>` },
   { key: 'share', title: 'Share of declines', tip: 'Доля от всех отказов по этой причине', sort: (r) => r.share, cell: (r) => shareCell(r.share) },
 ];

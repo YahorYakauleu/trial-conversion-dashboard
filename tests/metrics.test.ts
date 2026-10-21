@@ -294,13 +294,32 @@ describe('платёжные метрики: проходимость, decline, 
   it('банки одной причины отказа: отклонённые попытки её кодов по банку карты триала, доля от отказов причины; «не определено» — в конце', () => {
     const store = paymentsStore();
     store.setCardDetails('stripe', 'b', { country: null, payment_method: null, card_brand: null, bank: 'Bank B', mid: null });
-    // Insufficient funds: у b (Stripe, insufficient_funds) и у c (Solidgate, 3.02 — без банка)
+    // Insufficient funds: у b (Stripe, insufficient_funds) и у c (Solidgate, 3.02 — без банка); карты — US
+    const us = [{ country: 'US', count: 1 }];
     expect(getDeclineBanks(store.db, opts, 'Insufficient funds')).toEqual([
-      { value: 'BANK B', count: 1, share: 0.5 },
-      { value: null, count: 1, share: 0.5 },
+      { value: 'BANK B', count: 1, share: 0.5, bank_countries: us },
+      { value: null, count: 1, share: 0.5, bank_countries: us },
     ]);
-    expect(getDeclineBanks(store.db, { ...opts, provider: 'solidgate' }, 'Insufficient funds')).toEqual([{ value: null, count: 1, share: 1 }]);
-    expect(getDeclineBanks(store.db, opts, 'Do not honor / Generic decline')).toEqual([{ value: 'BANK B', count: 1, share: 1 }]);
+    expect(getDeclineBanks(store.db, { ...opts, provider: 'solidgate' }, 'Insufficient funds')).toEqual([{ value: null, count: 1, share: 1, bank_countries: us }]);
+    expect(getDeclineBanks(store.db, opts, 'Do not honor / Generic decline')).toEqual([{ value: 'BANK B', count: 1, share: 1, bank_countries: us }]);
+  });
+
+  it('страна банка: страны его карт в выборке, самая частая — первой (Revolut — карты разных стран)', () => {
+    const store = storeWith([
+      trial(s, { bank: 'REVOLUT LTD', country: 'RO' }),
+      trial(s, { bank: 'REVOLUT LTD', country: 'RO' }),
+      trial(s, { bank: 'REVOLUT LTD', country: 'FR' }),
+      trial(s, { bank: 'SUTTON BANK', country: 'US' }),
+      trial(s, { bank: null, country: 'SA' }),
+    ]);
+    expect(getBreakdown(store.db, opts, 'bank').map((r) => [r.value, r.started, r.bank_countries])).toEqual([
+      ['REVOLUT LTD', 3, [{ country: 'RO', count: 2 }, { country: 'FR', count: 1 }]],
+      ['SUTTON BANK', 1, [{ country: 'US', count: 1 }]],
+      [null, 1, [{ country: 'SA', count: 1 }]],
+    ]);
+    // фильтр сужает и страны банка
+    expect(getBreakdown(store.db, { ...opts, filters: { country: ['FR'] } }, 'bank')[0].bank_countries).toEqual([{ country: 'FR', count: 1 }]);
+    expect(getBreakdown(store.db, opts, 'country')[0].bank_countries).toBeUndefined(); // только у разреза по банку
   });
 });
 
