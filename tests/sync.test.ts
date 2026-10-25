@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openStore } from '../src/db.js';
 import { DAY } from '../src/metrics.js';
-import { isSyncRunning, needsStartupSync, runSync, type Source } from '../src/sync.js';
+import { inProcessSync, isSyncRunning, needsStartupSync, runSync, type Source } from '../src/sync.js';
 
 const source = (provider: Source['provider'], account: string, run: Source['run']): Source => ({ provider, account, run });
 
@@ -42,6 +42,25 @@ describe('runSync', () => {
     release();
     expect(await first).toBe(true);
     expect(isSyncRunning()).toBe(false);
+  });
+
+  it('после каждого источника — уведомление (сервер сбрасывает кэш по версии данных), в том числе после ошибки', async () => {
+    const store = openStore(':memory:');
+    const versions: number[] = [];
+    await runSync(store, [source('stripe', 'org', async () => { throw new Error('boom'); }), source('solidgate', 'sg', async () => 1)], () => versions.push(store.dataVersion()));
+    expect(versions).toEqual([1, 2]);
+  });
+
+  it('синк в этом же потоке: идёт ли, запуск, версия данных', async () => {
+    const store = openStore(':memory:');
+    let release!: () => void;
+    const sync = inProcessSync(store, [source('stripe', 'org', () => new Promise((resolve) => (release = () => resolve(0))))]);
+    expect([sync.running(), sync.version()]).toEqual([false, 0]);
+    expect(sync.start()).toBe(true);
+    expect([sync.running(), sync.start()]).toEqual([true, false]); // второй запуск — нет
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect([sync.running(), sync.version()]).toEqual([false, 1]);
   });
 });
 

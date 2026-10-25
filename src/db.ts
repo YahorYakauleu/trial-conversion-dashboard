@@ -148,6 +148,8 @@ export function openStore(file: string) {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
+    -- соединений два: сервер читает, поток синка пишет (src/sync-worker.ts); запись, заставшая другую, ждёт, а не падает
+    PRAGMA busy_timeout = 10000;
     CREATE TABLE IF NOT EXISTS trials (
       provider TEXT NOT NULL,
       account TEXT NOT NULL,

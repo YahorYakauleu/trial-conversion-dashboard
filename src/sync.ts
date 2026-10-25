@@ -1,3 +1,4 @@
+import { Worker } from 'node:worker_threads';
 import type { Config } from './config.js';
 import { nowSec, type Provider, type Store } from './db.js';
 import { createToUsd } from './fx.js';
@@ -26,7 +27,8 @@ export function needsStartupSync(store: Store, sources: Source[], now: number): 
 }
 
 // Источники синкаются по очереди; ошибка одного пишется в журнал и не трогает остальные.
-export async function runSync(store: Store, sources: Source[]): Promise<boolean> {
+// onSourceDone — после каждого источника (данные уже записаны: серверу пора сбросить кэш)
+export async function runSync(store: Store, sources: Source[], onSourceDone?: () => void): Promise<boolean> {
   if (running) return false;
   running = true;
   try {
@@ -42,11 +44,74 @@ export async function runSync(store: Store, sources: Source[]): Promise<boolean>
         store.finishRun(runId, 'error', 0, message);
         console.error(`[${source.provider}:${source.account}] ${kind} упал: ${message}`);
       }
+      onSourceDone?.();
     }
     return true;
   } finally {
     running = false;
   }
+}
+
+// Что серверу нужно от синка: идёт ли он, запустить вручную и версия данных — растёт после каждого источника,
+// по ней сервер сбрасывает кэш ответов
+export interface SyncControl {
+  running(): boolean;
+  start(): boolean; // false — синк уже идёт
+  version(): number;
+}
+
+// Синк в этом же потоке — тесты
+export function inProcessSync(store: Store, sources: Source[]): SyncControl {
+  return {
+    running: isSyncRunning,
+    start: () => (isSyncRunning() ? false : (void runSync(store, sources), true)),
+    version: () => store.dataVersion(),
+  };
+}
+
+// Синк — в отдельном потоке (src/sync-worker.ts) со своим соединением с базой. У SQLite запросы синхронные:
+// в одном потоке с сервером запись тысяч строк и пересчёт LTV и фрода на десятки секунд останавливали ответы,
+// Render не получал ответа на /health за 5 с и перезапускал сервис — отсюда 502. База в режиме WAL: сервер читает,
+// пока поток пишет. Поток упал — поднимаем заново через минуту
+const WORKER_RESTART_MS = 60_000;
+export function startSyncWorker(): SyncControl {
+  let running = false;
+  // версия для сервера только растёт: у перезапущенного потока свой счётчик с нуля — считаем его изменения
+  let version = 0;
+  let workerVersion = 0;
+  const spawn = () => {
+    // В сборке модуль потока — .js. В разработке (tsx) — .ts, а загрузчик tsx в поток сам не переходит, и импорты .js
+    // не находят .ts: поток стартует с модуля, который сначала подключает tsx, а потом — модуль потока
+    const dev = import.meta.url.endsWith('.ts');
+    const entry = new URL(`./sync-worker.${dev ? 'ts' : 'js'}`, import.meta.url);
+    const bootstrap = () =>
+      `import { register } from ${JSON.stringify(import.meta.resolve('tsx/esm/api'))}; register(); await import(${JSON.stringify(entry.href)});`;
+    const worker = new Worker(dev ? new URL(`data:text/javascript,${encodeURIComponent(bootstrap())}`) : entry);
+    workerVersion = 0;
+    worker.on('message', (next: { running: boolean; version: number }) => {
+      running = next.running;
+      if (next.version !== workerVersion) [workerVersion, version] = [next.version, version + 1];
+    });
+    worker.on('error', (error) => console.error('[sync] поток синка упал:', error));
+    worker.on('exit', (code) => {
+      console.error(`[sync] поток синка завершился (код ${code}) — перезапуск через минуту`);
+      running = false;
+      version++; // синк мог оборваться посреди записи
+      setTimeout(() => (current = spawn()), WORKER_RESTART_MS).unref();
+    });
+    return worker;
+  };
+  let current = spawn();
+  return {
+    running: () => running,
+    start: () => {
+      if (running) return false;
+      running = true; // сразу — без двойного запуска до ответа потока
+      current.postMessage('sync');
+      return true;
+    },
+    version: () => version,
+  };
 }
 
 export function buildSources(config: Config): Source[] {

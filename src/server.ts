@@ -44,7 +44,7 @@ import {
   toCsv,
   type ExportTable,
 } from './export.js';
-import { isSyncRunning, runSync, type Source } from './sync.js';
+import { inProcessSync, type Source, type SyncControl } from './sync.js';
 import { localDay } from './time.js';
 import {
   getTurnover,
@@ -112,7 +112,8 @@ function parseFilters<D extends AnyDimension>(query: Record<string, unknown>, di
   return filters;
 }
 
-export function createApp({ store, config, sources }: { store: Store; config: Config; sources: Source[] }) {
+// sync — синк в отдельном потоке (main.ts); без него — в этом же потоке по sources (тесты)
+export function createApp({ store, config, sources = [], sync = inProcessSync(store, sources) }: { store: Store; config: Config; sources?: Source[]; sync?: SyncControl }) {
   const app = express();
   const auth = createAuth(config.users);
   const esimEnabled = Boolean(config.esimStripeKey);
@@ -138,11 +139,11 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   const cached = <T>(key: object, compute: () => T): T => {
     const id = JSON.stringify(key);
     const hit = cache.get(id);
-    const ttl = isSyncRunning() ? SYNC_CACHE_TTL_MS : CACHE_TTL_MS;
-    if (hit && hit.version === store.dataVersion() && Date.now() - hit.at < ttl) return hit.data as T;
+    const ttl = sync.running() ? SYNC_CACHE_TTL_MS : CACHE_TTL_MS;
+    if (hit && hit.version === sync.version() && Date.now() - hit.at < ttl) return hit.data as T;
     if (cache.size > 500) cache.clear();
     const data = compute();
-    cache.set(id, { at: Date.now(), version: store.dataVersion(), data });
+    cache.set(id, { at: Date.now(), version: sync.version(), data });
     return data;
   };
 
@@ -164,9 +165,9 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
         time_zones: config.timeZones,
         history_from: first,
         today,
-        sync_running: isSyncRunning(),
+        sync_running: sync.running(),
         sync: store.latestRuns(),
-        data_version: store.dataVersion(), // меняется после каждого синка — по ней браузер обновляет значения фильтров
+        data_version: sync.version(), // меняется после каждого синка — по ней браузер обновляет значения фильтров
         products: esimEnabled ? ['vpn', 'esim'] : ['vpn'], // eSIM — если подключён его Stripe-аккаунт
       },
     };
@@ -424,11 +425,10 @@ export function createApp({ store, config, sources }: { store: Store; config: Co
   });
 
   app.post('/api/sync', auth.requireAdmin, (_req, res) => {
-    if (isSyncRunning()) {
+    if (!sync.start()) {
       res.status(409).json({ status: 'running' });
       return;
     }
-    void runSync(store, sources);
     res.status(202).json({ status: 'started' });
   });
 
