@@ -77,13 +77,13 @@ export function createAuth(users: Config['users']) {
     res.redirect(303, '/login');
   };
 
-  // Без входа: API отвечает 401, страницы ведут на форму входа — с возвратом на ту же ссылку
+  // Без входа: API и MCP отвечают 401, страницы ведут на форму входа — с возвратом на ту же ссылку
   const requireLogin: RequestHandler = (req, res, next) => {
     const role = roleOf(req);
     if (role) {
       res.locals.role = role;
       next();
-    } else if (req.path.startsWith('/api/')) {
+    } else if (req.path.startsWith('/api/') || req.path === '/mcp') {
       res.status(401).json({ error: 'Sign-in required' });
     } else {
       res.redirect(303, `/login?next=${encodeURIComponent(req.originalUrl)}`);

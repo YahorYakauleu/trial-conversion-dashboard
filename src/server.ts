@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import express from 'express';
+import express, { type RequestHandler } from 'express';
 import { createAuth } from './auth.js';
 import { getCancellationBreakdown, getCancellationReasons, getCancellations } from './cancellations.js';
 import { getLtv, getLtvBreakdown } from './ltv.js';
+import { mcpHandler } from './mcp.js';
 import { getRetries, getRetryBreakdown, getRetryCodes, getRetryCurve, getRetryDays } from './retries.js';
 import type { Config } from './config.js';
 import { nowSec, type Store } from './db.js';
@@ -71,6 +72,8 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 const PROVIDERS: ProviderFilter[] = ['all', 'stripe', 'solidgate'];
 const GRANULARITIES: Granularity[] = ['day', 'week', 'month'];
 const MAX_FILTER_VALUES = 100;
+// Параметры отчёта — как в адресе запроса: ?provider=…&view=…&country=US&country=SA
+type Query = Record<string, unknown>;
 // «Сегодня» и окончательность цифр зависят от текущего времени — кэш живёт не дольше этого
 const CACHE_TTL_MS = 5 * 60_000;
 const SYNC_CACHE_TTL_MS = 2 * 60_000;
@@ -173,109 +176,9 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
     };
   };
 
-  app.get('/api/metrics', (req, res) => {
-    const { now, provider, granularity, range, meta } = common(req.query);
-    const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
-    const filters: Filters = parseFilters(req.query, DIMENSIONS);
-    const reason = typeof req.query.reason === 'string' && /^.{1,80}$/.test(req.query.reason) ? req.query.reason : null;
-    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
-    // разбивка — один проход по базе, итоги — сумма её строк; динамика и причины отказа — итоги из ряда по дням
-    const data = cached({ api: 'metrics', provider, granularity, range, view, filters, reason }, () => {
-      if ((DIMENSIONS as readonly string[]).includes(view)) {
-        const breakdown = getBreakdown(store.db, options, view as Dimension);
-        return { totals: totalsOf(breakdown), series: [], breakdown, reasons: [] };
-      }
-      const { totals, series } = getMetrics(store.db, { ...options, granularity });
-      const reasons = view === 'decline_reason' ? getDeclineReasons(store.db, options) : [];
-      // &reason=<причина> — банки отказов этой причины (строка вкладки Decline reasons)
-      const banks = view === 'decline_reason' && reason ? getDeclineBanks(store.db, options, reason) : null;
-      return { totals, series: view === 'time' ? series : [], breakdown: [], reasons, reason_banks: banks };
-    });
-    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, reason, ...data });
-  });
-
-  // Отмены VPN: те же параметры, что у /api/metrics; view=time|<измерение>|cancel_reason. Когорты по дню оформления триала
-  app.get('/api/cancellations', (req, res) => {
-    const { now, provider, granularity, range, meta } = common(req.query);
-    const view = [...DIMENSIONS, 'cancel_reason'].find((v) => v === req.query.view) ?? 'time';
-    const filters: Filters = parseFilters(req.query, DIMENSIONS);
-    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
-    const data = cached({ api: 'cancellations', provider, granularity, range, view, filters }, () => {
-      if (view === 'time') return { ...getCancellations(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
-      if (view === 'cancel_reason') return { ...getCancellations(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getCancellationReasons(store.db, options) };
-      return { ...getCancellationBreakdown(store.db, options, view as Dimension), series: [], reasons: [] };
-    });
-    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
-  });
-
-  // LTV: деньги от триала за 30/60/90 дней по когортам оформления; те же параметры, что у /api/metrics; view=time|<измерение>
-  app.get('/api/ltv', (req, res) => {
-    const { now, provider, granularity, range, meta } = common(req.query);
-    const view = DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
-    const filters: Filters = parseFilters(req.query, DIMENSIONS);
-    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
-    const data = cached({ api: 'ltv', provider, granularity, range, view, filters }, () =>
-      view === 'time' ? { ...getLtv(store.db, { ...options, granularity }), breakdown: [] } : { ...getLtvBreakdown(store.db, options, view), series: [] },
-    );
-    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
-  });
-
-  // Ретраи первого платежа: те же параметры, что у /api/metrics; view=time|attempt|day|decline_code|<измерение>
-  app.get('/api/retries', (req, res) => {
-    const { now, provider, granularity, range, meta } = common(req.query);
-    const view = (['time', 'attempt', 'day', 'decline_code', ...DIMENSIONS] as const).find((v) => v === req.query.view) ?? 'time';
-    const filters: Filters = parseFilters(req.query, DIMENSIONS);
-    const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
-    const data = cached({ api: 'retries', provider, granularity, range, view, filters }, () => {
-      const dimension = DIMENSIONS.find((d) => d === view);
-      const breakdown = dimension ? getRetryBreakdown(store.db, options, dimension) : null;
-      const trend = view === 'time' || !breakdown ? getRetries(store.db, { ...options, granularity }) : null;
-      return {
-        totals: breakdown?.totals ?? trend!.totals,
-        series: view === 'time' ? trend!.series : [],
-        breakdown: breakdown?.breakdown ?? [],
-        curve: view === 'time' || view === 'attempt' ? getRetryCurve(store.db, options) : [],
-        days: view === 'day' ? getRetryDays(store.db, options) : [],
-        codes: view === 'decline_code' ? getRetryCodes(store.db, options) : [],
-      };
-    });
-    res.json({ ...meta, role: res.locals.role, retry_window_days: config.retryWindowDays, range, filters, view, ...data });
-  });
-
-  // Visa VAMP: календарные месяцы UTC — период расширяется до начала месяца; view=time|<измерение>|outcome (что стало после фрод-репорта).
-  // Карточки, график по дням и разбивки — за последний месяц периода (VAMP считается помесячно)
+  // Visa VAMP считается календарными месяцами UTC: период расширяется до начала месяца; карточки, график по дням
+  // и разбивки — за последний месяц периода
   const vampScope = (range: { from: string; to: string }) => ({ months: { from: monthStart(range.from), to: range.to }, latest: { from: monthStart(range.to), to: range.to } });
-  app.get('/api/vamp', (req, res) => {
-    const { now, provider, range, meta } = common(req.query);
-    const view = (['time', 'outcome', ...VAMP_DIMENSIONS] as const).find((v) => v === req.query.view) ?? 'time';
-    const filters = parseFilters(req.query, VAMP_FILTERS);
-    const { months, latest } = vampScope(range);
-    const o = { provider, filters, now };
-    const data = cached({ api: 'vamp', provider, months, view, filters }, () => ({
-      month: { ...latest, ...getVampMonth(store.db, { ...o, ...latest }, config.vamp) },
-      series: view === 'time' ? getVampSeries(store.db, { ...o, ...months }, config.vamp) : [],
-      daily: view === 'time' ? getVampDaily(store.db, { ...o, ...latest }, config.vamp, latest.from) : null,
-      breakdown: view === 'time' || view === 'outcome' ? [] : getVampBreakdown(store.db, { ...o, ...latest }, view, config.vamp),
-      outcomes: view === 'outcome' ? getVampOutcomes(store.db, { ...o, ...latest }, config.vamp) : [],
-    }));
-    res.json({ ...meta, role: res.locals.role, range: months, filters, view, thresholds: { ratio: config.vamp.ratio, count: config.vamp.count }, ...data });
-  });
-
-  // Оборот VPN: те же параметры, что у /api/metrics; разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
-  app.get('/api/turnover', (req, res) => {
-    const { provider, granularity, range, meta } = common(req.query);
-    const view = TURNOVER_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
-    const filters = parseFilters(req.query, TURNOVER_DIMENSIONS);
-    const options = { provider, filters, ...range, timeZones: config.timeZones };
-    const data = cached({ api: 'turnover', provider, granularity, range, view, filters }, () => {
-      if (view !== 'time') {
-        const breakdown = getTurnoverBreakdown(store.db, options, view);
-        return { totals: turnoverTotalsOf(breakdown), series: [], breakdown };
-      }
-      return { ...getTurnover(store.db, { ...options, granularity }), breakdown: [] };
-    });
-    res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
-  });
 
   // История eSIM — с его первого платежа: аккаунт небольшой, грузится целиком, иначе «новые клиенты» первых когорт были бы старыми
   const esimFirstDay = () => {
@@ -283,88 +186,209 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
     return first === null ? config.historyFromDay : localDay(first, config.timeZones.stripe);
   };
 
-  // eSIM, обзор: заказы, деньги, новые клиенты и неоплаченные заказы по дню. ?granularity&period&view=time|decline_reason|destination|…
-  app.get('/api/esim/overview', (req, res) => {
-    if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
-    const { now, granularity, range, meta } = common(req.query, esimFirstDay());
-    const view = [...OVERVIEW_DIMENSIONS, 'decline_reason'].find((v) => v === req.query.view) ?? 'time';
-    const filters: EsimFilters = parseFilters(req.query, OVERVIEW_DIMENSIONS);
-    const options = { filters, ...range, timeZones: config.timeZones, now };
-    const data = cached({ api: 'esim-overview', granularity, range, view, filters }, () => {
-      if (view === 'decline_reason') return { ...getOverview(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getOverviewReasons(store.db, options) };
-      if (view !== 'time') return { ...getOverviewBreakdown(store.db, options, view as (typeof OVERVIEW_DIMENSIONS)[number]), series: [], reasons: [] };
-      return { ...getOverview(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
-    });
-    res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
-  });
+  // Отчёты экранов: параметры — как в адресе запроса, ответ — JSON экрана. Ими же отвечают инструменты MCP (src/mcp.ts),
+  // поэтому цифры там те же, что на экранах
+  const reports = {
+    // Конверсия VPN: ?view=time|<измерение>|decline_reason&reason=<причина> (банки отказов этой причины)
+    metrics(query: Query) {
+      const { now, provider, granularity, range, meta } = common(query);
+      const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === query.view) ?? 'time';
+      const filters: Filters = parseFilters(query, DIMENSIONS);
+      const reason = typeof query.reason === 'string' && /^.{1,80}$/.test(query.reason) ? query.reason : null;
+      const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+      // разбивка — один проход по базе, итоги — сумма её строк; динамика и причины отказа — итоги из ряда по дням
+      const data = cached({ api: 'metrics', provider, granularity, range, view, filters, reason }, () => {
+        if ((DIMENSIONS as readonly string[]).includes(view)) {
+          const breakdown = getBreakdown(store.db, options, view as Dimension);
+          return { totals: totalsOf(breakdown), series: [], breakdown, reasons: [] };
+        }
+        const { totals, series } = getMetrics(store.db, { ...options, granularity });
+        const reasons = view === 'decline_reason' ? getDeclineReasons(store.db, options) : [];
+        const banks = view === 'decline_reason' && reason ? getDeclineBanks(store.db, options, reason) : null;
+        return { totals, series: view === 'time' ? series : [], breakdown: [], reasons, reason_banks: banks };
+      });
+      return { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, reason, ...data };
+    },
 
-  // eSIM, удержание: когорты клиентов по дню первой покупки. ?granularity&period&view=time|destination|package|country|…
-  app.get('/api/esim/repeat', (req, res) => {
-    if (!esimEnabled) return void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' });
-    const { now, granularity, range, meta } = common(req.query, esimFirstDay());
-    const view = REPEAT_DIMENSIONS.find((v) => v === req.query.view) ?? 'time';
-    const filters: EsimFilters = parseFilters(req.query, REPEAT_DIMENSIONS);
-    const options = { filters, ...range, timeZones: config.timeZones, now };
-    const data = cached({ api: 'esim-repeat', granularity, range, view, filters }, () =>
-      view === 'time' ? { ...getRepeat(store.db, { ...options, granularity }), breakdown: [] } : { ...getRepeatBreakdown(store.db, options, view), series: [] },
-    );
-    res.json({ ...meta, role: res.locals.role, range, filters, view, ...data });
-  });
+    // Отмены VPN: ?view=time|<измерение>|cancel_reason. Когорты по дню оформления триала
+    cancellations(query: Query) {
+      const { now, provider, granularity, range, meta } = common(query);
+      const view = [...DIMENSIONS, 'cancel_reason'].find((v) => v === query.view) ?? 'time';
+      const filters: Filters = parseFilters(query, DIMENSIONS);
+      const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+      const data = cached({ api: 'cancellations', provider, granularity, range, view, filters }, () => {
+        if (view === 'time') return { ...getCancellations(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
+        if (view === 'cancel_reason') return { ...getCancellations(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getCancellationReasons(store.db, options) };
+        return { ...getCancellationBreakdown(store.db, options, view as Dimension), series: [], reasons: [] };
+      });
+      return { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, ...data };
+    },
 
-  // Значения одного фильтра: ?mode=…&dimension=…&provider&period&from&to&<остальные фильтры>. Учитывают период и остальные
-  // фильтры — кроме своего, иначе в списке осталось бы только выбранное. Число у значения — то же, что во вкладке-разрезе
-  // экрана (триалы, платежи, попытки, новые клиенты); значений, которых при такой выборке нет, в списке нет
-  app.get('/api/values', (req, res) => {
-    const mode = String(req.query.mode ?? 'conversion');
-    const esim = mode.startsWith('esim_');
-    if (esim && !esimEnabled) return void res.json({ values: [] });
-    const { now, range, ...rest } = esim ? common(req.query, esimFirstDay()) : common(req.query);
-    const provider = esim ? 'all' : rest.provider;
-    const base = { now, ...range, timeZones: config.timeZones };
-    // свой фильтр не применяем: иначе в списке осталось бы только уже выбранное
-    const facet = <D extends AnyDimension>(dimensions: readonly D[]) => {
-      const dimension = dimensions.find((d) => d === req.query.dimension);
-      const filters = parseFilters(req.query, dimensions);
-      if (dimension) delete filters[dimension];
-      return { dimension, filters };
-    };
-    // keep — значение остаётся в списке и с нулём (у eSIM: были только неоплаченные заказы — их можно выбрать и разобрать отказы)
-    const compute = (): { value: string | null; count: number; keep?: boolean }[] => {
-      if (mode === 'conversion' || mode === 'cancellations' || mode === 'retries' || mode === 'ltv') {
-        const { dimension, filters } = facet(DIMENSIONS);
-        const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
-        return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
-      }
-      if (mode === 'turnover') {
-        const { dimension, filters } = facet(TURNOVER_DIMENSIONS);
-        return dimension ? getTurnoverBreakdown(store.db, { ...base, provider, filters }, dimension).map((r) => ({ value: r.value, count: r.payments })) : [];
-      }
-      if (mode === 'vamp') {
-        const { dimension, filters } = facet(VAMP_FILTERS);
-        const o = { provider, filters, now, ...vampScope(range).latest };
-        return dimension ? getVampBreakdown(store.db, o, dimension, config.vamp).map((r) => ({ value: r.value, label: r.label, count: r.vamp_count })) : [];
-      }
-      if (mode === 'esim_overview') {
-        const { dimension, filters } = facet(OVERVIEW_DIMENSIONS);
-        // оплаченные заказы — как в карточке Orders
-        return dimension
-          ? getOverviewBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.paid_orders, keep: r.orders > 0 }))
-          : [];
-      }
-      if (mode === 'esim_repeat') {
-        const { dimension, filters } = facet(REPEAT_DIMENSIONS);
-        return dimension ? getRepeatBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.customers })) : [];
-      }
-      return [];
-    };
-    const values = cached({ api: 'values', mode, provider, range, query: req.query }, () =>
-      compute()
-        .filter((v) => v.count > 0 || v.keep)
-        .map((v) => ('label' in v && v.label ? { value: v.value, label: v.label, count: v.count } : { value: v.value, count: v.count })) // label — имя кампании VAMP
-        .sort((a, b) => b.count - a.count),
-    );
-    res.json({ values });
-  });
+    // LTV: деньги от триала за 30/60/90 дней по когортам оформления; ?view=time|<измерение>
+    ltv(query: Query) {
+      const { now, provider, granularity, range, meta } = common(query);
+      const view = DIMENSIONS.find((v) => v === query.view) ?? 'time';
+      const filters: Filters = parseFilters(query, DIMENSIONS);
+      const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+      const data = cached({ api: 'ltv', provider, granularity, range, view, filters }, () =>
+        view === 'time' ? { ...getLtv(store.db, { ...options, granularity }), breakdown: [] } : { ...getLtvBreakdown(store.db, options, view), series: [] },
+      );
+      return { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, ...data };
+    },
+
+    // Ретраи первого платежа: ?view=time|attempt|day|decline_code|<измерение>
+    retries(query: Query) {
+      const { now, provider, granularity, range, meta } = common(query);
+      const view = (['time', 'attempt', 'day', 'decline_code', ...DIMENSIONS] as const).find((v) => v === query.view) ?? 'time';
+      const filters: Filters = parseFilters(query, DIMENSIONS);
+      const options = { provider, filters, now, ...range, timeZones: config.timeZones, retryWindowDays: config.retryWindowDays };
+      const data = cached({ api: 'retries', provider, granularity, range, view, filters }, () => {
+        const dimension = DIMENSIONS.find((d) => d === view);
+        const breakdown = dimension ? getRetryBreakdown(store.db, options, dimension) : null;
+        const trend = view === 'time' || !breakdown ? getRetries(store.db, { ...options, granularity }) : null;
+        return {
+          totals: breakdown?.totals ?? trend!.totals,
+          series: view === 'time' ? trend!.series : [],
+          breakdown: breakdown?.breakdown ?? [],
+          curve: view === 'time' || view === 'attempt' ? getRetryCurve(store.db, options) : [],
+          days: view === 'day' ? getRetryDays(store.db, options) : [],
+          codes: view === 'decline_code' ? getRetryCodes(store.db, options) : [],
+        };
+      });
+      return { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, ...data };
+    },
+
+    // Visa VAMP: ?view=time|<измерение>|outcome (что стало после фрод-репорта)
+    vamp(query: Query) {
+      const { now, provider, range, meta } = common(query);
+      const view = (['time', 'outcome', ...VAMP_DIMENSIONS] as const).find((v) => v === query.view) ?? 'time';
+      const filters = parseFilters(query, VAMP_FILTERS);
+      const { months, latest } = vampScope(range);
+      const o = { provider, filters, now };
+      const data = cached({ api: 'vamp', provider, months, view, filters }, () => ({
+        month: { ...latest, ...getVampMonth(store.db, { ...o, ...latest }, config.vamp) },
+        series: view === 'time' ? getVampSeries(store.db, { ...o, ...months }, config.vamp) : [],
+        daily: view === 'time' ? getVampDaily(store.db, { ...o, ...latest }, config.vamp, latest.from) : null,
+        breakdown: view === 'time' || view === 'outcome' ? [] : getVampBreakdown(store.db, { ...o, ...latest }, view, config.vamp),
+        outcomes: view === 'outcome' ? getVampOutcomes(store.db, { ...o, ...latest }, config.vamp) : [],
+      }));
+      return { ...meta, range: months, filters, view, thresholds: { ratio: config.vamp.ratio, count: config.vamp.count }, ...data };
+    },
+
+    // Оборот VPN: разрезы — mid (stripe:corp, solidgate:<uuid>), страна, способ оплаты, банк, система
+    turnover(query: Query) {
+      const { provider, granularity, range, meta } = common(query);
+      const view = TURNOVER_DIMENSIONS.find((v) => v === query.view) ?? 'time';
+      const filters = parseFilters(query, TURNOVER_DIMENSIONS);
+      const options = { provider, filters, ...range, timeZones: config.timeZones };
+      const data = cached({ api: 'turnover', provider, granularity, range, view, filters }, () => {
+        if (view !== 'time') {
+          const breakdown = getTurnoverBreakdown(store.db, options, view);
+          return { totals: turnoverTotalsOf(breakdown), series: [], breakdown };
+        }
+        return { ...getTurnover(store.db, { ...options, granularity }), breakdown: [] };
+      });
+      return { ...meta, range, filters, view, ...data };
+    },
+
+    // eSIM, обзор: заказы, деньги, новые клиенты и неоплаченные заказы по дню; ?view=time|decline_reason|destination|…
+    esimOverview(query: Query) {
+      const { now, granularity, range, meta } = common(query, esimFirstDay());
+      const view = [...OVERVIEW_DIMENSIONS, 'decline_reason'].find((v) => v === query.view) ?? 'time';
+      const filters: EsimFilters = parseFilters(query, OVERVIEW_DIMENSIONS);
+      const options = { filters, ...range, timeZones: config.timeZones, now };
+      const data = cached({ api: 'esim-overview', granularity, range, view, filters }, () => {
+        if (view === 'decline_reason') return { ...getOverview(store.db, { ...options, granularity }), series: [], breakdown: [], reasons: getOverviewReasons(store.db, options) };
+        if (view !== 'time') return { ...getOverviewBreakdown(store.db, options, view as (typeof OVERVIEW_DIMENSIONS)[number]), series: [], reasons: [] };
+        return { ...getOverview(store.db, { ...options, granularity }), breakdown: [], reasons: [] };
+      });
+      return { ...meta, range, filters, view, ...data };
+    },
+
+    // eSIM, удержание: когорты клиентов по дню первой покупки; ?view=time|destination|package|country|…
+    esimRepeat(query: Query) {
+      const { now, granularity, range, meta } = common(query, esimFirstDay());
+      const view = REPEAT_DIMENSIONS.find((v) => v === query.view) ?? 'time';
+      const filters: EsimFilters = parseFilters(query, REPEAT_DIMENSIONS);
+      const options = { filters, ...range, timeZones: config.timeZones, now };
+      const data = cached({ api: 'esim-repeat', granularity, range, view, filters }, () =>
+        view === 'time' ? { ...getRepeat(store.db, { ...options, granularity }), breakdown: [] } : { ...getRepeatBreakdown(store.db, options, view), series: [] },
+      );
+      return { ...meta, range, filters, view, ...data };
+    },
+
+    // Значения одного фильтра: ?mode=…&dimension=…&provider&period&from&to&<остальные фильтры>. Учитывают период и остальные
+    // фильтры — кроме своего, иначе в списке осталось бы только выбранное. Число у значения — то же, что во вкладке-разрезе
+    // экрана (триалы, платежи, попытки, новые клиенты); значений, которых при такой выборке нет, в списке нет
+    values(query: Query) {
+      const mode = String(query.mode ?? 'conversion');
+      const esim = mode.startsWith('esim_');
+      if (esim && !esimEnabled) return { values: [] };
+      const { now, range, ...rest } = esim ? common(query, esimFirstDay()) : common(query);
+      const provider = esim ? 'all' : rest.provider;
+      const base = { now, ...range, timeZones: config.timeZones };
+      // свой фильтр не применяем: иначе в списке осталось бы только уже выбранное
+      const facet = <D extends AnyDimension>(dimensions: readonly D[]) => {
+        const dimension = dimensions.find((d) => d === query.dimension);
+        const filters = parseFilters(query, dimensions);
+        if (dimension) delete filters[dimension];
+        return { dimension, filters };
+      };
+      // keep — значение остаётся в списке и с нулём (у eSIM: были только неоплаченные заказы — их можно выбрать и разобрать отказы)
+      const compute = (): { value: string | null; count: number; keep?: boolean }[] => {
+        if (mode === 'conversion' || mode === 'cancellations' || mode === 'retries' || mode === 'ltv') {
+          const { dimension, filters } = facet(DIMENSIONS);
+          const options = { ...base, provider, filters, retryWindowDays: config.retryWindowDays };
+          return dimension ? getBreakdown(store.db, options, dimension).map((r) => ({ value: r.value, count: r.started })) : [];
+        }
+        if (mode === 'turnover') {
+          const { dimension, filters } = facet(TURNOVER_DIMENSIONS);
+          return dimension ? getTurnoverBreakdown(store.db, { ...base, provider, filters }, dimension).map((r) => ({ value: r.value, count: r.payments })) : [];
+        }
+        if (mode === 'vamp') {
+          const { dimension, filters } = facet(VAMP_FILTERS);
+          const o = { provider, filters, now, ...vampScope(range).latest };
+          return dimension ? getVampBreakdown(store.db, o, dimension, config.vamp).map((r) => ({ value: r.value, label: r.label, count: r.vamp_count })) : [];
+        }
+        if (mode === 'esim_overview') {
+          const { dimension, filters } = facet(OVERVIEW_DIMENSIONS);
+          // оплаченные заказы — как в карточке Orders
+          return dimension
+            ? getOverviewBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.paid_orders, keep: r.orders > 0 }))
+            : [];
+        }
+        if (mode === 'esim_repeat') {
+          const { dimension, filters } = facet(REPEAT_DIMENSIONS);
+          return dimension ? getRepeatBreakdown(store.db, { ...base, filters }, dimension).breakdown.map((r) => ({ value: r.value, count: r.customers })) : [];
+        }
+        return [];
+      };
+      const values = cached({ api: 'values', mode, provider, range, query }, () =>
+        compute()
+          .filter((v) => v.count > 0 || v.keep)
+          .map((v) => ('label' in v && v.label ? { value: v.value, label: v.label, count: v.count } : { value: v.value, count: v.count })) // label — имя кампании VAMP
+          .sort((a, b) => b.count - a.count),
+      );
+      return { values };
+    },
+  };
+
+  // Ответ API — отчёт и роль вошедшего (админ или гость)
+  const send = (report: (query: Query) => object): RequestHandler => (req, res) => void res.json({ ...report(req.query), role: res.locals.role });
+  const esimOnly: RequestHandler = (_req, res, next) => (esimEnabled ? next() : void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' }));
+  app.get('/api/metrics', send(reports.metrics));
+  app.get('/api/cancellations', send(reports.cancellations));
+  app.get('/api/ltv', send(reports.ltv));
+  app.get('/api/retries', send(reports.retries));
+  app.get('/api/vamp', send(reports.vamp));
+  app.get('/api/turnover', send(reports.turnover));
+  app.get('/api/esim/overview', esimOnly, send(reports.esimOverview));
+  app.get('/api/esim/repeat', esimOnly, send(reports.esimRepeat));
+  app.get('/api/values', (req, res) => void res.json(reports.values(req.query)));
+
+  // MCP для Claude Code и других клиентов: те же отчёты инструментами, только чтение, вход — как у API (src/mcp.ts)
+  app.post('/mcp', express.json({ inflate: false, limit: '100kb' }), mcpHandler(reports, { esimEnabled }));
+  app.all('/mcp', (_req, res) => void res.status(405).set('Allow', 'POST').json({ error: 'Use POST (stateless Streamable HTTP)' }));
 
   // Выгрузка списком (CSV): записи, из которых посчитана цифра, — для текущей выборки, с теми же параметрами, что у экрана.
   // Строка таблицы сужает выборку: период строки (динамика), значение разреза или &reason=<группа> (причины отказа)

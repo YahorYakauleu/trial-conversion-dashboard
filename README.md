@@ -77,6 +77,30 @@ npm run typecheck
 
 `npm run digest` собирает сводку по локальной базе без синка. Флаг `--send` отправляет её по `SLACK_WEBHOOK_URL` из `.env`, например в тестовый канал. Плановую отправку это не затрагивает.
 
+## MCP для Claude Code
+
+Дашборд отдаёт свои отчёты как MCP-сервер по адресу `POST /mcp`. Протокол — Streamable HTTP без сессий, ответ — обычным JSON. Claude Code может спрашивать цифры сам: «какая конверсия у Saudi National Bank за прошлую неделю», «что с VAMP у Corp в этом месяце».
+
+**Инструменты:**
+- `conversion`, `cancellations`, `ltv`, `retries`, `vamp`, `volume`;
+- `esim_overview` и `esim_retention` — если подключён eSIM;
+- `filter_values` — точные значения фильтров;
+- `methodology` — страницы методологии.
+
+**Как работает:**
+- Параметры те же, что у экранов: провайдер, период, шаг, фильтры, разбивка. Цифры считают те же функции, что и экраны.
+- Только чтение и только агрегаты: синка и выгрузки с ID клиентов нет.
+- Длинные разбивки обрезаются до первых `limit` строк, по умолчанию 50. Полное число строк приходит в поле `<список>_rows_total`.
+
+**Вход** — как у API, заголовком Basic. Достаточно гостевого логина.
+
+```bash
+claude mcp add --scope user --transport http billing-dashboard https://billpulse.app/mcp \
+  --header "Authorization: Basic $(printf '%s' 'GUEST_USER:GUEST_PASSWORD' | base64)"
+```
+
+Вместо `GUEST_USER:GUEST_PASSWORD` подставьте логин и пароль. Заголовок с ними Claude Code хранит в локальном конфиге `~/.claude.json`. Проверить подключение: `claude mcp list` или `/mcp` внутри Claude Code.
+
 ## Посмотреть базу
 
 Файл `data/dashboard.sqlite` (SQLite) можно открыть в DBeaver или `sqlite3 -readonly`. Время хранится в unix-секундах (`trial_started_at`, `paid_at`, …), а рядом есть вычисляемые колонки с обычной датой по UTC — `trial_started_utc`, `trial_ended_utc`, `paid_utc`, `attempted_utc`, `started_utc`/`finished_utc` у синков, `value_utc` у курсоров. Они не занимают места и считаются при чтении. В строке триала лежат и итоги его попыток (`attempts`, `approved`, `refunded`) и `mid` — так метрики считаются одним проходом по `trials`; посчитанные ответы сервер держит в памяти до следующего синка. Сутки в дашборде режутся по часовому поясу провайдера (Stripe — Нью-Йорк, Solidgate — UTC).
