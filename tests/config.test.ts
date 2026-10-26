@@ -54,6 +54,16 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, SOLIDGATE_TIMEZONE: 'Mars/Olympus' })).toThrow(/SOLIDGATE_TIMEZONE/);
   });
 
+  it('сводка в Slack — только с вебхуком Slack; адрес — секрет, в ошибку не попадает', () => {
+    expect(loadConfig(base)).toMatchObject({ slackWebhookUrl: null, dashboardUrl: null });
+    const hook = 'https://hooks.slack.com/services/T0/B0/abc';
+    expect(loadConfig({ ...base, SLACK_WEBHOOK_URL: ` ${hook} `, DASHBOARD_URL: 'https://billpulse.app' })).toMatchObject({
+      slackWebhookUrl: hook,
+      dashboardUrl: 'https://billpulse.app',
+    });
+    expect(() => loadConfig({ ...base, SLACK_WEBHOOK_URL: 'http://example.com/abc' })).toThrow(/^SLACK_WEBHOOK_URL должен начинаться с https:\/\/hooks\.slack\.com\/$/);
+  });
+
   it('выгрузка начинается с самой ранней полуночи HISTORY_FROM по часовым поясам провайдеров', () => {
     const ny = { ...base, SOLIDGATE_TIMEZONE: 'America/New_York' };
     expect(loadConfig(ny).historyFrom).toBe(Date.parse('2026-09-01T04:00:00Z') / 1000);

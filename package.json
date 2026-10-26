@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "sync": "tsx src/sync-cli.ts",
+    "digest": "tsx src/digest-cli.ts",
     "probe:solidgate": "tsx scripts/probe-solidgate.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",

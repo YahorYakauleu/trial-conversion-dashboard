@@ -2,6 +2,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { NO_RETRY_CODES } from './declines.js';
 
 export type Provider = 'stripe' | 'solidgate';
+// Чьё состояние в sync_state: провайдеры (курсоры, прогресс) и сводка в Slack (день последней отправки)
+export type StateOwner = Provider | 'slack';
 export type RunKind = 'backfill' | 'daily';
 export type RunStatus = 'running' | 'ok' | 'error';
 
@@ -666,12 +668,12 @@ export function openStore(file: string) {
       return (db.prepare('SELECT COUNT(*) AS n FROM trials').get() as { n: number }).n;
     },
 
-    getState(provider: Provider, account: string, key: string): number | null {
+    getState(provider: StateOwner, account: string, key: string): number | null {
       const r = selectState.get(provider, account, key) as { value: number } | undefined;
       return r ? r.value : null;
     },
 
-    setState(provider: Provider, account: string, key: string, value: number): void {
+    setState(provider: StateOwner, account: string, key: string, value: number): void {
       upsertState.run(provider, account, key, value);
     },
 

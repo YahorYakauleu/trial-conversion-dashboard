@@ -35,6 +35,9 @@ export interface Config {
   // Visa VAMP: порог Excessive для мерчанта (ratio и count за месяц — оба сразу) и какие MID Visa считает одним мерчантом
   vamp: { ratio: number; count: number; merchants: Record<string, string[]> };
   users: { admin: Credentials; guest: Credentials | null };
+  // Утренняя сводка в Slack (src/digest.ts): Incoming Webhook канала — секрет; без него сводки нет. Ссылка на дашборд внизу — необязательна
+  slackWebhookUrl: string | null;
+  dashboardUrl: string | null;
   dataDir: string;
   port: number;
 }
@@ -87,6 +90,8 @@ export function loadConfig(env: Env = process.env): Config {
       },
       guest: guest(env),
     },
+    slackWebhookUrl: slackWebhook(env),
+    dashboardUrl: env.DASHBOARD_URL?.trim() || null,
     dataDir: env.DATA_DIR?.trim() || './data',
     port: positiveInt(env, 'PORT', 3000),
   };
@@ -114,6 +119,14 @@ function guest(env: Env): Credentials | null {
   if (!user && !password) return null;
   if (!user || !password) throw new Error('GUEST_USER и GUEST_PASSWORD задаются вместе');
   return { user, password };
+}
+
+// Адрес вебхука — секрет: в тексте ошибки его нет
+function slackWebhook(env: Env): string | null {
+  const value = env.SLACK_WEBHOOK_URL?.trim();
+  if (!value) return null;
+  if (!value.startsWith('https://hooks.slack.com/')) throw new Error('SLACK_WEBHOOK_URL должен начинаться с https://hooks.slack.com/');
+  return value;
 }
 
 function timeZone(env: Env, name: string, fallback: string): string {
