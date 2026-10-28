@@ -156,6 +156,18 @@ describe('Store', () => {
     rmSync(`${file}-shm`, { force: true });
   });
 
+  it('база без платы за триал получает колонку, и LTV пересчитывается целиком — иначе тип триала у старых триалов не появится', () => {
+    const file = `/tmp/trial-dashboard-trial-fee-${process.pid}.sqlite`;
+    const before = openStore(file);
+    before.upsertTrial(row);
+    before.db.exec('UPDATE trials SET ltv_at = 123; ALTER TABLE trials DROP COLUMN trial_fee');
+    before.db.close();
+    const store = openStore(file);
+    expect({ ...(store.db.prepare('SELECT trial_fee, ltv_at FROM trials').get() as object) }).toEqual({ trial_fee: 0, ltv_at: null });
+    store.db.close();
+    for (const f of [file, `${file}-wal`, `${file}-shm`]) rmSync(f, { force: true });
+  });
+
   it('getTrial возвращает null для неизвестной подписки', () => {
     expect(openStore(':memory:').getTrial('stripe', 'nope')).toBeNull();
   });

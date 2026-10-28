@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type EsimChargeRow } from '../src/db.js';
 import { exportCustomers, exportDeclinedAttempts, exportOrders, exportPayments, exportTrials, toCsv } from '../src/export.js';
+import { refreshTrialLtv } from '../src/ltv.js';
 import { DAY } from '../src/metrics.js';
 
 const ts = (iso: string) => Date.parse(iso) / 1000;
@@ -44,6 +45,20 @@ describe('выгрузка списком', () => {
       },
     ]);
     expect(table.truncated).toBe(false);
+  });
+
+  it('VPN, триалы: тип, длина и плата за триал — как в разрезах Trial type и Trial length', () => {
+    const store = vpnStore();
+    const columns = ['subscription_id', 'trial_type', 'trial_length_days', 'trial_fee_usd'];
+    const pick = () => {
+      const table = exportTrials(store.db, vpn);
+      return table.rows.map((r) => columns.map((c) => r[table.columns.indexOf(c)]));
+    };
+    expect(pick()).toEqual([['sg_b', '', 7, '0.00'], ['sub_a', '', 7, '0.00']]); // LTV ещё не посчитан — тип не определён
+    store.upsertPayment({ provider: 'stripe', payment_id: 'ch_fee', account: 'corp', mid: 'corp', paid_at: started, amount_usd_cents: 99, refunded_usd_cents: 0, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, customer_id: 'cus_a' });
+    refreshTrialLtv(store.db, 'stripe', 'corp', NOW);
+    refreshTrialLtv(store.db, 'solidgate', 'sgH2H', NOW);
+    expect(pick()).toEqual([['sg_b', 'free', 7, '0.00'], ['sub_a', 'paid', 7, '0.99']]);
   });
 
   it('VPN, отменённые триалы: только отменённые, день и причина отмены; по строке причины — её группа', () => {

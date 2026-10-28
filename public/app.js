@@ -23,10 +23,11 @@ const MODES = {
     title: 'Trial conversion',
     api: '/api/metrics',
     charts: 'charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
-    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['decline_reason', 'Decline reasons']],
+    dimensions: ['trial_type', 'trial_length', 'account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['trial_type', 'Trial types'], ['trial_length', 'Trial lengths'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['decline_reason', 'Decline reasons']],
     hints: {
       time: 'Trial-to-paid — paid the first billing period within 30 days after the trial ended',
+      trial_type: 'Paid — the customer paid a trial fee at sign-up (e.g. $0.99). Trial-to-paid counts only the first full period after the trial, not the fee. Unknown — not computed yet (a few minutes after a sync)',
       decline_reason: 'Declines — all declined first-payment attempts. Recovery rate — share of trials whose first attempt was declined for this reason that paid within 30 days after the trial ended. Click a reason to see its issuing banks',
     },
   },
@@ -38,10 +39,11 @@ const MODES = {
     title: 'Revenue per trial (LTV)',
     api: '/api/ltv',
     charts: 'ltv-charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
-    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types']],
+    dimensions: ['trial_type', 'trial_length', 'account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['trial_type', 'Trial types'], ['trial_length', 'Trial lengths'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types']],
     hints: {
       time: 'All money from the trial’s customer — trial fee, first period, renewals — within 30/60/90 days of the trial start, net of refunds, in USD. Numbers marked ≈ grow until the window closes',
+      trial_type: 'Paid — the customer paid a trial fee at sign-up (e.g. $0.99); LTV includes the fee',
     },
   },
   cancellations: {
@@ -52,8 +54,8 @@ const MODES = {
     title: 'Trial cancellations',
     api: '/api/cancellations',
     charts: 'cancel-charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
-    tabs: [['time', 'Trend'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['cancel_reason', 'Cancellation reasons']],
+    dimensions: ['trial_type', 'trial_length', 'account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['trial_type', 'Trial types'], ['trial_length', 'Trial lengths'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands'], ['funding', 'Card types'], ['cancel_reason', 'Cancellation reasons']],
     hints: {
       time: 'Trials by start date: how many were cancelled before the trial ended, and how soon. A cancellation counts when it was requested, even if access lasts until the period end',
       cancel_reason: 'Cancellations during the trial and within 30 days after it. Stripe and Solidgate reasons are grouped — hover a reason for details',
@@ -67,8 +69,8 @@ const MODES = {
     title: 'Payment retries',
     api: '/api/retries',
     charts: 'retry-charts',
-    dimensions: ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
-    tabs: [['time', 'Trend'], ['attempt', 'Attempt number'], ['day', 'Days after decline'], ['decline_code', 'Decline codes'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands'], ['funding', 'Card types']],
+    dimensions: ['trial_type', 'trial_length', 'account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'],
+    tabs: [['time', 'Trend'], ['attempt', 'Attempt number'], ['day', 'Days after decline'], ['decline_code', 'Decline codes'], ['trial_type', 'Trial types'], ['trial_length', 'Trial lengths'], ['account', 'Accounts'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['card_brand', 'Card brands'], ['funding', 'Card types']],
     hints: {
       time: 'Trials by start date whose first payment attempt was declined, and the retries made for them. Retries are scheduled by Stripe Billing and Solidgate, not by our backend',
       attempt: 'How often each attempt succeeds — where retries stop paying off. Recoveries so far: share of all recoveries made by this attempt or earlier',
@@ -149,6 +151,7 @@ const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
   destination: 'Destination', package: 'Package', risk: 'Radar risk score', merchant: 'Visa merchant', funding: 'Card type',
+  trial_type: 'Trial type', trial_length: 'Trial length',
   payment_number: 'Payment number', reason: 'Reason', days_to_report: 'Days to report', utm_source: 'Traffic source', campaign: 'Campaign', landing_domain: 'Landing domain',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
@@ -161,6 +164,8 @@ const TAB_TIPS = {
   bank: 'Банк-эмитент карты',
   card_brand: 'Платёжная система карты: Visa, Mastercard…',
   funding: 'Тип карты: дебетовая, кредитная, предоплаченная',
+  trial_type: 'Бесплатный триал или платный — с платой при оформлении (например, $0.99)',
+  trial_length: 'Длина триала в днях',
   decline_reason: 'Почему отклонили попытки списания',
   cancel_reason: 'Почему отменили подписку',
   risk: 'Radar risk score списания — только у Stripe',
@@ -304,6 +309,8 @@ function valueName(dimension, value) {
   if (dimension === 'payment_method') return METHOD_NAMES[value] ?? value;
   if (dimension === 'card_brand') return BRAND_NAMES[value] ?? value[0].toUpperCase() + value.slice(1);
   if (dimension === 'funding') return value[0].toUpperCase() + value.slice(1);
+  if (dimension === 'trial_type') return value === 'paid' ? 'Paid' : 'Free';
+  if (dimension === 'trial_length') return `${value} ${value === '1' ? 'day' : 'days'}`;
   if (dimension === 'payment_number') return PAYMENT_NUMBERS[value] ?? value;
   if (dimension === 'reason') {
     const [kind, code] = [value.slice(0, value.indexOf(':')), value.slice(value.indexOf(':') + 1)];

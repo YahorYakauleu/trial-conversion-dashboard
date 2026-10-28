@@ -51,7 +51,7 @@ export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string
   return {
     columns: [
       'provider', 'account', 'subscription_id', 'customer_id', 'first_invoice_id', 'trial_started_utc', 'trial_ended_utc',
-      'paid_within_30_days', 'paid_utc', 'paid_on_first_attempt', 'attempts', 'declines', 'refunded',
+      'trial_type', 'trial_length_days', 'trial_fee_usd', 'paid_within_30_days', 'paid_utc', 'paid_on_first_attempt', 'attempts', 'declines', 'refunded',
       'mid', 'card_country', 'payment_method', 'card_brand', 'issuing_bank',
       'canceled_utc', 'canceled_on_day', 'cancellation', 'cancel_reason', 'cancel_code', 'fraud_reported', 'vamp_events',
       'revenue_30d_usd', 'revenue_60d_usd', 'revenue_90d_usd', 'periods_paid_90d', 'subscription_link', 'customer_link',
@@ -66,6 +66,9 @@ export function exportTrials(db: Db, o: RangeOptions, canceled: { reason: string
       return [
         provider, account, text(t.subscription_id), text(t.customer_id), text(t.first_invoice_id),
         utc(t.trial_started_at as number), utc(t.trial_ended_at as number),
+        // тип триала — как в разрезе Trial type: до расчёта LTV не определён
+        t.ltv_at === null ? '' : Number(t.trial_fee) > 0 ? 'paid' : 'free',
+        Math.round((Number(t.trial_ended_at) - Number(t.trial_started_at)) / DAY), dollars(Number(t.trial_fee)),
         yesNo(paid), utc(t.paid_at as number | null), yesNo(t.first_attempt_succeeded), text(t.attempts), Number(t.attempts) - Number(t.approved), yesNo(t.refunded),
         text(t.mid), text(t.country), text(t.payment_method), text(t.card_brand), text(t.bank),
         utc(canceledAt), cancelDay, when, canceledAt === null ? '' : cancelLabel(t.cancel_reason as string | null), text(t.cancel_reason),

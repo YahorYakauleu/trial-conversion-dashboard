@@ -19,7 +19,7 @@ export type TimeZones = Record<Provider, string>;
 export type Granularity = 'day' | 'week' | 'month';
 export type Preset = 'last7' | 'last30' | 'thisMonth' | 'prevMonth' | 'all' | 'custom';
 // Измерения для разбивки и фильтров и их значение в SQL по триалу (алиас t)
-export const DIMENSIONS = ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding'] as const;
+export const DIMENSIONS = ['account', 'mid', 'country', 'payment_method', 'bank', 'card_brand', 'funding', 'trial_type', 'trial_length'] as const;
 export type Dimension = (typeof DIMENSIONS)[number];
 export const DIMENSION_SQL: Record<Dimension, string> = {
   // провайдер вместе с аккаунтом: одинаковые имена у Stripe и Solidgate не склеиваются (stripe:corp, solidgate:sgH2H)
@@ -31,6 +31,10 @@ export const DIMENSION_SQL: Record<Dimension, string> = {
   bank: 't.bank',
   card_brand: 't.card_brand',
   funding: 't.funding', // тип карты: credit, debit, prepaid
+  // платный — клиент заплатил до конца триала (плата за триал, src/ltv.ts); ещё не посчитан или без клиента — не определён
+  trial_type: "CASE WHEN t.ltv_at IS NULL THEN NULL WHEN t.trial_fee > 0 THEN 'paid' ELSE 'free' END",
+  // длина триала в днях — текстом, как значения фильтра: '3', '7'
+  trial_length: 'CAST(CAST(ROUND((t.trial_ended_at - t.trial_started_at) / 86400.0) AS INTEGER) AS TEXT)',
 };
 // Фильтр по измерению — список значений, 'none' — «не определено».
 // Значения одного фильтра складываются (ИЛИ), разные фильтры сужают выборку (И).

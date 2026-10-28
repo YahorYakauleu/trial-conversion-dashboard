@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { openStore, type AttemptRow, type PaymentRow, type TrialRow } from '../src/db.js';
 import { declineHint, declineLabel } from '../src/declines.js';
+import { refreshTrialLtv } from '../src/ltv.js';
 import { DAY, getBreakdown, getDeclineBanks, getDeclineReasons, getMetrics, latestDay, resolveRange, totalsOf } from '../src/metrics.js';
 import { getTurnover, getTurnoverBreakdown } from '../src/turnover.js';
 
@@ -478,5 +479,35 @@ describe('оборот', () => {
     expect(getTurnover(db, { ...range, granularity: 'day', filters: { country: ['GB', 'none'] } }).totals.payments).toBe(2);
     expect(getTurnover(db, { ...range, granularity: 'day', provider: 'solidgate' }).totals.gross).toBe(1_000);
     expect(getTurnover(db, { ...range, granularity: 'day', filters: { mid: ['stripe:corp'], payment_method: ['google_pay'] } }).totals.payments).toBe(1);
+  });
+});
+
+describe('тип и длина триала', () => {
+  // a — платный триал на 3 дня ($0.99 при оформлении), b — бесплатный на 7 дней, c — без клиента: тип не определить
+  function storeWithTypes() {
+    const s = '2026-09-01T12:00:00Z';
+    const store = storeWith([
+      trial(s, { subscription_id: 'a', customer_id: 'cus_a', trial_ended_at: ts(s) + 3 * DAY }),
+      trial(s, { subscription_id: 'b', customer_id: 'cus_b' }),
+      trial(s, { subscription_id: 'c' }),
+    ]);
+    store.upsertPayment({ provider: 'stripe', payment_id: 'ch_fee', account: 'corp', mid: 'corp', paid_at: ts(s), amount_usd_cents: 99, refunded_usd_cents: 0, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, customer_id: 'cus_a' });
+    return store;
+  }
+  const rows = (breakdown: { value: string | null; started: number }[]) => breakdown.map((r) => [r.value, r.started]);
+
+  it('Trial type: платный — клиент заплатил до конца триала; пока LTV не посчитан — не определён', () => {
+    const store = storeWithTypes();
+    expect(rows(getBreakdown(store.db, opts, 'trial_type'))).toEqual([[null, 3]]);
+    refreshTrialLtv(store.db, 'stripe', 'corp', NOW);
+    expect(rows(getBreakdown(store.db, opts, 'trial_type'))).toEqual([['free', 1], ['paid', 1], [null, 1]]);
+    expect(getMetrics(store.db, { ...opts, filters: { trial_type: ['paid'] } }).totals.started).toBe(1);
+    expect(getMetrics(store.db, { ...opts, filters: { trial_type: ['free', 'none'] } }).totals.started).toBe(2);
+  });
+
+  it('Trial length — дни от начала до конца триала', () => {
+    const { db } = storeWithTypes();
+    expect(rows(getBreakdown(db, opts, 'trial_length'))).toEqual([['7', 2], ['3', 1]]);
+    expect(getMetrics(db, { ...opts, filters: { trial_length: ['3'] } }).totals.started).toBe(1);
   });
 });

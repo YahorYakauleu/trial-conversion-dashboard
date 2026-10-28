@@ -171,6 +171,13 @@ describe('server', () => {
 
     const values = await (await fetch(`${url}/api/values?mode=cancellations&dimension=payment_method&${period}`, { headers: auth })).json();
     expect(values.values).toEqual([{ value: 'apple_pay', count: 2 }, { value: 'google_pay', count: 1 }]);
+    // тип и длина триала — фильтры и значения, как у остальных разрезов (LTV не посчитан — тип не определён)
+    expect((await get('trial_length=7')).totals.started).toBe(3);
+    expect((await get('trial_length=3')).totals.started).toBe(0);
+    expect((await get('trial_type=none')).totals.started).toBe(3);
+    expect((await get('trial_type=bogus')).filters).toEqual({});
+    const lengths = await (await fetch(`${url}/api/values?mode=cancellations&dimension=trial_length&${period}`, { headers: auth })).json();
+    expect(lengths.values).toEqual([{ value: '7', count: 3 }]);
     const csv = await fetch(`${url}/api/export?mode=cancellations&view=cancel_reason&reason=Requested&${period}`, { headers: auth });
     expect(csv.headers.get('content-disposition')).toBe('attachment; filename="vpn-cancelled-trials_2026-09-10_2026-09-10.csv"');
     expect((await csv.text()).trim().split('\r\n')).toHaveLength(3); // заголовок и два отменённых

@@ -207,6 +207,12 @@ export function openStore(file: string) {
     db.exec('ALTER TABLE trials ADD COLUMN first_payment INTEGER NOT NULL DEFAULT 0');
     db.exec('UPDATE trials SET ltv_at = NULL');
   }
+  // Плата за триал (центы USD): платежи клиента от оформления до конца триала; больше нуля — платный триал (разрез Trial type).
+  // Появилась позже — LTV один раз пересчитывается целиком
+  if (!columns.has('trial_fee')) {
+    db.exec('ALTER TABLE trials ADD COLUMN trial_fee INTEGER NOT NULL DEFAULT 0');
+    db.exec('UPDATE trials SET ltv_at = NULL');
+  }
   // Итоги попыток прямо в строке триала: метрики считаются одним проходом по trials, без соединения с attempts
   const withoutAttemptTotals = !columns.has('attempts');
   for (const column of ['attempts', 'approved', 'refunded']) {

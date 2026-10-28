@@ -58,6 +58,17 @@ describe('LTV по когортам триалов', () => {
     ]);
   });
 
+  it('плата за триал — платежи клиента до конца триала: по ней триал платный', () => {
+    const rows = storeWithData().db.prepare('SELECT subscription_id, trial_fee FROM trials ORDER BY subscription_id').all().map((r) => ({ ...r }));
+    // у a — $1 при оформлении; первый период и продления в плату не входят
+    expect(rows).toEqual([
+      { subscription_id: 'a', trial_fee: 100 },
+      { subscription_id: 'b', trial_fee: 0 },
+      { subscription_id: 'b2', trial_fee: 0 },
+      { subscription_id: 'c', trial_fee: 0 },
+    ]);
+  });
+
   it('когорта: деньги на триал и на оплатившего, доля оплативших второй и третий период; окна закрыты', () => {
     const { totals, series } = getLtv(storeWithData().db, { ...o, granularity: 'day' });
     expect(totals).toMatchObject({

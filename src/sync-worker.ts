@@ -4,7 +4,7 @@ import cron from 'node-cron';
 import { loadConfig } from './config.js';
 import { nowSec, openStore } from './db.js';
 import { DIGEST_CRON, runDigest } from './digest.js';
-import { refreshPaymentNumbers } from './ltv.js';
+import { refreshPaymentNumbers, refreshTrialLtv } from './ltv.js';
 import { buildSources, isSyncRunning, needsStartupSync, runSync } from './sync.js';
 
 // Поток синка (запускает src/sync.ts → startSyncWorker): по расписанию, при старте, если данные устарели, и по просьбе
@@ -26,6 +26,8 @@ const sync = () =>
   })().finally(() => (syncing = null)));
 
 refreshPaymentNumbers(store.db, nowSec()); // номера платежей для VAMP — не дожидаясь синка
+// LTV и плата за триал — тоже: после выкатки новой колонки тип триала иначе не определён до синка (секунды на всю базу)
+for (const s of sources) refreshTrialLtv(store.db, s.provider, s.account, nowSec());
 parentPort!.on('message', (message) => message === 'sync' && void sync());
 cron.schedule(config.syncCron, () => void sync(), { timezone: 'UTC' });
 cron.schedule(DIGEST_CRON, () => void runDigest(store, config, sync), { timezone: 'UTC' });

@@ -8,6 +8,7 @@ import { addDays, localMidnight } from './time.js';
 // (Stripe — cus_…, Solidgate — ID аккаунта); если клиент оформил триал ещё раз, дальше деньги идут новому триалу.
 // Периоды — сколько платежей после конца триала пришло за 90 дней (при месячном плане: 1 — первый период, 2 — первое продление).
 // Первый платёж после триала — цена первого периода в долларах: по ней видно, где цены ниже (региональные цены).
+// Плата за триал — платежи до конца триала (например, $0.99 при оформлении): по ней триал платный.
 
 const WINDOWS = [30, 60, 90] as const;
 const TOLERANCE = 3_600; // оплата триала проходит в момент оформления — на секунды раньше
@@ -32,7 +33,8 @@ export function refreshTrialLtv(db: Db, provider: Provider, account: string, now
          SELECT COALESCE(${within(30)}, 0), COALESCE(${within(60)}, 0), COALESCE(${within(90)}, 0),
                 COALESCE(SUM(CASE WHEN ${afterTrial} THEN 1 ELSE 0 END), 0), @now
          ${payments}),
-       first_payment = COALESCE((SELECT p.amount_usd_cents ${payments} AND ${afterTrial} ORDER BY p.paid_at LIMIT 1), 0)
+       first_payment = COALESCE((SELECT p.amount_usd_cents ${payments} AND ${afterTrial} ORDER BY p.paid_at LIMIT 1), 0),
+       trial_fee = COALESCE((SELECT SUM(p.amount_usd_cents) ${payments} AND NOT (${afterTrial})), 0)
      WHERE provider = @provider AND account = @account AND customer_id IS NOT NULL
        AND (ltv_at IS NULL OR ltv_at < trial_started_at + ${SETTLED})`,
   ).run({ provider, account, now });
