@@ -158,7 +158,7 @@ const MODES = {
     dimensions: ['destination', 'package', 'country', 'payment_method', 'bank', 'card_brand'],
     tabs: [['time', 'Trend'], ['destination', 'Destinations'], ['package', 'Packages'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks']],
     hints: {
-      time: "Each row is the day of the customer's first purchase. Numbers marked ≈ keep growing until 30 (90) days have passed",
+      time: "Each row is the day of the customer's first purchase. Numbers marked ≈ keep growing until 14, 30 or 60 days have passed",
       _breakdown: 'Customers are split by their first purchase. Click a row to see its trend, or a column header to sort',
     },
   },
@@ -660,7 +660,7 @@ function renderRetryKpis({ totals: t }) {
   ]);
 }
 
-// Окончательность у eSIM своя: у повторных покупок — окна 30 и 90 дней с первой покупки
+// Окончательность у eSIM своя: у повторных покупок — окна 14, 30 и 60 дней с первой покупки
 const approxPct = (r, final) => `${final || r === null ? '' : '≈ '}${pct(r)}`;
 
 function renderRepeatKpis({ totals: t, range }) {
@@ -668,7 +668,8 @@ function renderRepeatKpis({ totals: t, range }) {
     ['New customers', num(t.customers), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Клиенты, впервые купившие eSIM в эти дни'],
     ['Returned within 30 days', approxPct(t.repeat_rate_30, t.final_30), `${num(t.repeat_30)} of ${num(t.customers)}`, 'Доля клиентов, купивших снова — пополнение или новый пакет — в течение 30 дней после первой покупки'],
     ['Revenue per customer, 14 days', `${t.final_14 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_14)}`, 'net of refunds', 'Сколько клиент принёс за 14 дней с первой покупки — включая её, за вычетом рефандов'],
-    ['Revenue per customer, 90 days', `${t.final_90 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_90)}`, 'net of refunds', 'Сколько клиент принёс за 90 дней с первой покупки — включая её, за вычетом рефандов'],
+    ['Revenue per customer, 30 days', `${t.final_30 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_30)}`, 'net of refunds', 'Сколько клиент принёс за 30 дней с первой покупки — включая её, за вычетом рефандов'],
+    ['Revenue per customer, 60 days', `${t.final_60 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_60)}`, 'net of refunds', 'Сколько клиент принёс за 60 дней с первой покупки — включая её, за вычетом рефандов'],
   ]);
 }
 
@@ -967,7 +968,7 @@ const VAMP_LIFT_COLUMN = {
   cell: (r) => `<td${r.anomaly ? ' class="lift-high"' : ''}>${r.lift === null ? '—' : `${r.lift.toFixed(1)}×`}</td>`,
 };
 
-// eSIM, удержание: когорты клиентов по дню первой покупки; «≈» — пока не прошли 30 (90) дней.
+// eSIM, удержание: когорты клиентов по дню первой покупки; «≈» — пока не прошли 14, 30 или 60 дней.
 // В подсказке к «≈» — сколько дней окна прошло (у самых свежих клиентов группы) и когда цифра станет итоговой
 const DAY_SECONDS = 86_400;
 const ruDate = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'America/New_York' });
@@ -993,11 +994,18 @@ const REPEAT_COLUMNS = [
     cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_14), p.final_14, '', windowTip(p, 14)),
   },
   {
-    key: 'revenue_per_customer_90',
-    title: 'Revenue per customer, 90 days',
-    tip: 'Сколько клиент принёс за 90 дней с первой покупки — включая её, за вычетом рефандов',
-    sort: (p) => p.revenue_per_customer_90,
-    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_90), p.final_90, '', windowTip(p, 90)),
+    key: 'revenue_per_customer_30',
+    title: 'Revenue per customer, 30 days',
+    tip: 'Сколько клиент принёс за 30 дней с первой покупки — включая её, за вычетом рефандов',
+    sort: (p) => p.revenue_per_customer_30,
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_30), p.final_30, '', windowTip(p, 30)),
+  },
+  {
+    key: 'revenue_per_customer_60',
+    title: 'Revenue per customer, 60 days',
+    tip: 'Сколько клиент принёс за 60 дней с первой покупки — включая её, за вычетом рефандов',
+    sort: (p) => p.revenue_per_customer_60,
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_60), p.final_60, '', windowTip(p, 60)),
   },
 ];
 

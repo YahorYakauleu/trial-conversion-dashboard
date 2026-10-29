@@ -141,46 +141,43 @@ export function getOverviewReasons(db: Db, o: EsimOptions) {
 
 const D14 = 14 * DAY;
 const D30 = 30 * DAY;
-const D90 = 90 * DAY;
+const D60 = 60 * DAY;
 
 interface RepeatCounts {
   customers: number; // новые клиенты — первая успешная покупка в эти дни
   repeat_30: number; // купили ещё раз в течение 30 дней после первой покупки
-  repeat_90: number;
   topup_30: number; // пополнили пакет в течение 30 дней
   revenue_14: number; // выручка с них за 14 дней с первой покупки (включая её, без рефандов), центы USD
   revenue_30: number;
-  revenue_90: number;
+  revenue_60: number;
   repeaters: number; // купили второй раз когда-либо
   seconds_to_second: number; // сумма времени до второй покупки — у них
-  first_first_at: number; // самая ранняя первая покупка в когорте (0 — клиентов нет): пока ей меньше 30 дней, 90 дней = 30 дням
+  first_first_at: number; // самая ранняя первая покупка в когорте (0 — клиентов нет)
   last_first_at: number; // самая поздняя первая покупка — для окончательности
 }
 
 export interface RepeatTotals extends RepeatCounts {
   repeat_rate_30: number | null;
-  repeat_rate_90: number | null;
   topup_rate_30: number | null;
   revenue_per_customer_14: number | null; // центы USD
   revenue_per_customer_30: number | null;
-  revenue_per_customer_90: number | null;
+  revenue_per_customer_60: number | null;
   avg_days_to_second: number | null;
   final_14: boolean; // у всех клиентов прошло 14 дней с первой покупки — цифры за 14 дней больше не изменятся
   final_30: boolean;
-  final_90: boolean;
+  final_60: boolean;
 }
 
 const zeroRepeat = (): RepeatCounts => ({
-  customers: 0, repeat_30: 0, repeat_90: 0, topup_30: 0, revenue_14: 0, revenue_30: 0, revenue_90: 0, repeaters: 0, seconds_to_second: 0, first_first_at: 0, last_first_at: 0,
+  customers: 0, repeat_30: 0, topup_30: 0, revenue_14: 0, revenue_30: 0, revenue_60: 0, repeaters: 0, seconds_to_second: 0, first_first_at: 0, last_first_at: 0,
 });
 const addRepeat = (a: RepeatCounts, b: RepeatCounts): RepeatCounts => ({
   customers: a.customers + b.customers,
   repeat_30: a.repeat_30 + b.repeat_30,
-  repeat_90: a.repeat_90 + b.repeat_90,
   topup_30: a.topup_30 + b.topup_30,
   revenue_14: a.revenue_14 + b.revenue_14,
   revenue_30: a.revenue_30 + b.revenue_30,
-  revenue_90: a.revenue_90 + b.revenue_90,
+  revenue_60: a.revenue_60 + b.revenue_60,
   repeaters: a.repeaters + b.repeaters,
   seconds_to_second: a.seconds_to_second + b.seconds_to_second,
   first_first_at: a.first_first_at && b.first_first_at ? Math.min(a.first_first_at, b.first_first_at) : a.first_first_at || b.first_first_at,
@@ -189,19 +186,18 @@ const addRepeat = (a: RepeatCounts, b: RepeatCounts): RepeatCounts => ({
 const withRepeatRates = <T extends RepeatCounts>(c: T, now: number): T & RepeatTotals => ({
   ...c,
   repeat_rate_30: rate(c.repeat_30, c.customers),
-  repeat_rate_90: rate(c.repeat_90, c.customers),
   topup_rate_30: rate(c.topup_30, c.customers),
   revenue_per_customer_14: c.customers === 0 ? null : Math.round(c.revenue_14 / c.customers),
   revenue_per_customer_30: c.customers === 0 ? null : Math.round(c.revenue_30 / c.customers),
-  revenue_per_customer_90: c.customers === 0 ? null : Math.round(c.revenue_90 / c.customers),
+  revenue_per_customer_60: c.customers === 0 ? null : Math.round(c.revenue_60 / c.customers),
   avg_days_to_second: c.repeaters === 0 ? null : c.seconds_to_second / c.repeaters / DAY,
   final_14: c.last_first_at + D14 <= now,
   final_30: c.last_first_at + D30 <= now,
-  final_90: c.last_first_at + D90 <= now,
+  final_60: c.last_first_at + D60 <= now,
 });
 
 // Когорта: клиенты, впервые купившие в периоде, — строка первой покупки (её разрезы) и итоги клиента:
-// когда купил второй раз, выручка за 14, 30 и 90 дней, пополнял ли. Общая основа для цифр экрана и выгрузки (src/export.ts)
+// когда купил второй раз, выручка за 14, 30 и 60 дней, пополнял ли. Общая основа для цифр экрана и выгрузки (src/export.ts)
 export function cohortCte(o: EsimOptions) {
   const period = periodSql('f', 'f.paid_at', o);
   const dims = dimensionFilterSql(column('f'), o.filters);
@@ -216,16 +212,16 @@ export function cohortCte(o: EsimOptions) {
               MIN(CASE WHEN n = 2 THEN paid_at END) AS second_at,
               SUM(CASE WHEN paid_at < first_at + @d14 THEN net ELSE 0 END) AS revenue_14,
               SUM(CASE WHEN paid_at < first_at + @d30 THEN net ELSE 0 END) AS revenue_30,
-              SUM(CASE WHEN paid_at < first_at + @d90 THEN net ELSE 0 END) AS revenue_90,
+              SUM(CASE WHEN paid_at < first_at + @d60 THEN net ELSE 0 END) AS revenue_60,
               MAX(n > 1 AND COALESCE(order_type, '') = 'topup' AND paid_at < first_at + @d30) AS topup_30
        FROM ranked GROUP BY customer_id
      ),
      cohort AS (
-       SELECT f.*, c.second_at, c.revenue_14, c.revenue_30, c.revenue_90, c.topup_30
+       SELECT f.*, c.second_at, c.revenue_14, c.revenue_30, c.revenue_60, c.topup_30
        FROM ranked f JOIN per_customer c ON c.customer_id = f.customer_id
        WHERE f.n = 1 AND ${[period.sql, ...dims.clauses].join(' AND ')}
      )`;
-  return { sql, params: { ...period.params, ...dims.params, d14: D14, d30: D30, d90: D90 } };
+  return { sql, params: { ...period.params, ...dims.params, d14: D14, d30: D30, d60: D60 } };
 }
 
 function repeatSums(db: Db, o: EsimOptions, key: string) {
@@ -235,8 +231,8 @@ function repeatSums(db: Db, o: EsimOptions, key: string) {
       `${cte.sql}
        SELECT ${key} AS key, COUNT(*) AS customers,
               -- у клиента без второй покупки second_at пуст — сравнение даёт NULL, поэтому COALESCE
-              COALESCE(SUM(f.second_at < f.paid_at + @d30), 0) AS repeat_30, COALESCE(SUM(f.second_at < f.paid_at + @d90), 0) AS repeat_90,
-              COALESCE(SUM(f.topup_30), 0) AS topup_30, SUM(f.revenue_14) AS revenue_14, SUM(f.revenue_30) AS revenue_30, SUM(f.revenue_90) AS revenue_90,
+              COALESCE(SUM(f.second_at < f.paid_at + @d30), 0) AS repeat_30,
+              COALESCE(SUM(f.topup_30), 0) AS topup_30, SUM(f.revenue_14) AS revenue_14, SUM(f.revenue_30) AS revenue_30, SUM(f.revenue_60) AS revenue_60,
               SUM(f.second_at IS NOT NULL) AS repeaters,
               COALESCE(SUM(f.second_at - f.paid_at), 0) AS seconds_to_second, MIN(f.paid_at) AS first_first_at, MAX(f.paid_at) AS last_first_at
        FROM cohort f GROUP BY key`,
