@@ -2133,27 +2133,46 @@ $('help-overlay').addEventListener('click', closeHelp);
 
 // Esc закрывает верхнее: выпадающее окно, «Как считается», панель выборки
 // Подсказки: у названий метрик, колонок, вкладок и причин отказа — data-tip с коротким пояснением по-русски.
-// Своя, а не title: появляется сразу при наведении и не обрезается таблицей
+// Своя, а не title: не обрезается таблицей. Мышью — если курсор задержался на элементе (TIP_DELAY_MS): при быстром проходе
+// по вкладкам и колонкам плашки не мелькают. С клавиатуры (Tab) — сразу
+const TIP_DELAY_MS = 500;
 const tip = document.createElement('div');
 tip.className = 'tip';
 tip.setAttribute('role', 'tooltip');
 tip.hidden = true;
 document.body.append(tip);
-function showTip(target) {
-  const el = target instanceof Element ? target.closest('[data-tip]') : null;
-  tip.hidden = !el?.dataset.tip;
-  if (tip.hidden) return;
+let tipTimer;
+let tipTarget = null; // элемент, к которому относится подсказка (показанная или ждущая)
+const tipOwner = (target) => (target instanceof Element ? target.closest('[data-tip]') : null);
+function showTip(el) {
   tip.textContent = el.dataset.tip;
+  tip.hidden = false;
   // над элементом, а если сверху не влезает — под ним; по горизонтали — в пределах окна
   const r = el.getBoundingClientRect();
   const above = r.top - tip.offsetHeight - 6;
   tip.style.top = `${above < 8 ? r.bottom + 6 : above}px`;
   tip.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 8 - tip.offsetWidth))}px`;
 }
-const hideTip = () => (tip.hidden = true);
-document.addEventListener('mouseover', (event) => showTip(event.target));
-document.addEventListener('mouseout', (event) => event.relatedTarget || hideTip()); // ушли за пределы окна
-document.addEventListener('focusin', (event) => showTip(event.target));
+function hideTip() {
+  clearTimeout(tipTimer);
+  tip.hidden = true;
+}
+document.addEventListener('mouseover', (event) => {
+  const el = tipOwner(event.target);
+  if (el === tipTarget) return; // курсор ходит внутри того же элемента
+  hideTip();
+  tipTarget = el;
+  if (el?.dataset.tip) tipTimer = setTimeout(() => el.isConnected && showTip(el), TIP_DELAY_MS);
+});
+document.addEventListener('mouseout', (event) => {
+  if (event.relatedTarget) return;
+  hideTip(); // ушли за пределы окна
+  tipTarget = null;
+});
+document.addEventListener('focusin', (event) => {
+  const el = tipOwner(event.target);
+  if (el?.dataset.tip && event.target.matches(':focus-visible')) showTip(el);
+});
 document.addEventListener('focusout', hideTip);
 document.addEventListener('click', hideTip); // после клика элемент под курсором обычно перерисовывается
 addEventListener('scroll', hideTip, true);
