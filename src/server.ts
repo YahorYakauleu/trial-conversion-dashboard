@@ -66,6 +66,7 @@ import {
   VAMP_FILTERS,
   type VampDimension,
 } from './vamp.js';
+import { createVisitsClient, VISIT_DIMENSIONS, visitBreakdown, visitSeries, visitTotals, type VisitDimension, type VisitsClient } from './visits.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -78,7 +79,7 @@ type Query = Record<string, unknown>;
 const CACHE_TTL_MS = 5 * 60_000;
 const SYNC_CACHE_TTL_MS = 2 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
-type AnyDimension = Dimension | TurnoverDimension | OverviewDimension | VampDimension;
+type AnyDimension = Dimension | TurnoverDimension | OverviewDimension | VampDimension | VisitDimension;
 const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
   mid: /^(stripe|solidgate):[A-Za-z0-9_-]{1,64}$/, // у Solidgate MID — UUID
@@ -99,6 +100,10 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   utm_source: /^.{1,80}$/, // VAMP: источник трафика клиента Stripe
   campaign: /^.{1,120}$/, // VAMP: ID кампании
   landing_domain: /^[a-z0-9.-]{1,120}$/, // VAMP: домен лендинга
+  site: /^[a-z0-9.:-]{1,80}$/, // Visits: домен лендинга, у локального — с портом
+  path: /^(\/.{0,63}|\(other\))$/, // Visits: путь страницы; «(other)» — пути сверх лимита сборщика
+  device: /^(mobile|tablet|desktop)$/,
+  os: /^[a-z]{1,16}$/,
 };
 
 // Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA
@@ -117,8 +122,15 @@ function parseFilters<D extends AnyDimension>(query: Record<string, unknown>, di
   return filters;
 }
 
-// sync — синк в отдельном потоке (main.ts); без него — в этом же потоке по sources (тесты)
-export function createApp({ store, config, sources = [], sync = inProcessSync(store, sources) }: { store: Store; config: Config; sources?: Source[]; sync?: SyncControl }) {
+// sync — синк в отдельном потоке (main.ts); без него — в этом же потоке по sources (тесты).
+// visits — клиент сборщика визитов; без VISITS_URL экрана Visits нет (тесты подставляют свой)
+export function createApp({
+  store,
+  config,
+  sources = [],
+  sync = inProcessSync(store, sources),
+  visits = config.visits ? createVisitsClient(config.visits) : null,
+}: { store: Store; config: Config; sources?: Source[]; sync?: SyncControl; visits?: VisitsClient | null }) {
   const app = express();
   const auth = createAuth(config.users);
   const esimEnabled = Boolean(config.esimStripeKey);
@@ -157,9 +169,9 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
   //  &view=time|account|country|payment_method|bank|card_brand|decline_reason. Дни — местные сутки провайдера (config.timeZones).
   // Общее для обоих экранов: провайдер, шаг, период (в местных сутках) и статус синка
   // first — начало истории экрана: у VPN — HISTORY_FROM, у eSIM — его первый платёж (его история грузится целиком)
-  const common = (query: Record<string, unknown>, first = config.historyFromDay) => {
+  // today — последний день периода «All»: по умолчанию самые поздние сутки провайдеров
+  const common = (query: Record<string, unknown>, first = config.historyFromDay, today = latestDay(nowSec(), config.timeZones)) => {
     const now = nowSec();
-    const today = latestDay(now, config.timeZones);
     return {
       now,
       provider: PROVIDERS.find((p) => p === query.provider) ?? 'all',
@@ -174,6 +186,7 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
         sync: store.latestRuns(),
         data_version: sync.version(), // меняется после каждого синка — по ней браузер обновляет значения фильтров
         products: esimEnabled ? ['vpn', 'esim'] : ['vpn'], // eSIM — если подключён его Stripe-аккаунт
+        visits: Boolean(visits), // экран Visits — если подключён сборщик визитов
       },
     };
   };
@@ -186,6 +199,13 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
   const esimFirstDay = () => {
     const first = store.firstPaymentAt('esim');
     return first === null ? config.historyFromDay : localDay(first, config.timeZones.stripe);
+  };
+
+  // Визиты: сутки — по Нью-Йорку, как у сборщика и Stripe; «All» — с первого дня, когда в сборщике есть визиты
+  const visitsDays = async (client: VisitsClient) => {
+    const today = localDay(nowSec(), config.timeZones.stripe);
+    const days = await client({ from: config.historyFromDay, to: today, group: null, filters: {} });
+    return { first: days.rows.find((r) => r.count + r.bots > 0)?.day ?? today, today };
   };
 
   // Отчёты экранов: параметры — как в адресе запроса, ответ — JSON экрана. Ими же отвечают инструменты MCP (src/mcp.ts),
@@ -293,6 +313,19 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
       return { ...meta, range, filters, view, ...data };
     },
 
+    // Уникальные визиты на пейволл из сборщика: ?view=time|site|path|device|os. Без провайдера и без кэша дашборда —
+    // данные не из синка, клиент сборщика сам держит ответы минуту
+    async visits(query: Query) {
+      if (!visits) throw new Error('Visit collector is not connected (VISITS_URL)');
+      const { first, today } = await visitsDays(visits);
+      const { granularity, range, meta } = common(query, first, today);
+      const view = VISIT_DIMENSIONS.find((v) => v === query.view) ?? 'time';
+      const filters = parseFilters(query, VISIT_DIMENSIONS);
+      const stats = await visits({ ...range, group: view === 'time' ? null : view, filters });
+      const data = view === 'time' ? { series: visitSeries(stats, { ...range, granularity }), breakdown: [] } : { series: [], breakdown: visitBreakdown(stats) };
+      return { ...meta, time_zone: stats.time_zone, range, filters, view, totals: visitTotals(stats), ...data };
+    },
+
     // eSIM, обзор: заказы, деньги, новые клиенты и неоплаченные заказы по дню; ?view=time|decline_reason|destination|…
     esimOverview(query: Query) {
       const { now, granularity, range, meta } = common(query, esimFirstDay());
@@ -322,10 +355,21 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
     // Значения одного фильтра: ?mode=…&dimension=…&provider&period&from&to&<остальные фильтры>. Учитывают период и остальные
     // фильтры — кроме своего, иначе в списке осталось бы только выбранное. Число у значения — то же, что во вкладке-разрезе
     // экрана (триалы, платежи, попытки, новые клиенты); значений, которых при такой выборке нет, в списке нет
-    values(query: Query) {
+    async values(query: Query) {
       const mode = String(query.mode ?? 'conversion');
       const esim = mode.startsWith('esim_');
       if (esim && !esimEnabled) return { values: [] };
+      if (mode === 'visits') {
+        if (!visits) return { values: [] };
+        const dimension = VISIT_DIMENSIONS.find((d) => d === query.dimension);
+        if (!dimension) return { values: [] };
+        const { first, today } = await visitsDays(visits);
+        const { range } = common(query, first, today);
+        const filters = parseFilters(query, VISIT_DIMENSIONS);
+        delete filters[dimension]; // свой фильтр не применяем
+        const rows = visitBreakdown(await visits({ ...range, group: dimension, filters }));
+        return { values: rows.filter((r) => r.visits > 0).map((r) => ({ value: r.value, count: r.visits })) };
+      }
       const { now, range, ...rest } = esim ? common(query, esimFirstDay()) : common(query);
       const provider = esim ? 'all' : rest.provider;
       const base = { now, ...range, timeZones: config.timeZones };
@@ -375,9 +419,19 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
     },
   };
 
-  // Ответ API — отчёт и роль вошедшего (админ или гость)
-  const send = (report: (query: Query) => object): RequestHandler => (req, res) => void res.json({ ...report(req.query), role: res.locals.role });
+  // Ответ API — отчёт и роль вошедшего (админ или гость). Отчёт визитов ходит в сборщик: если тот недоступен — 502
+  // с текстом ошибки, остальные экраны это не задевает
+  const send =
+    (report: (query: Query) => object | Promise<object>): RequestHandler =>
+    async (req, res) => {
+      try {
+        res.json({ ...(await report(req.query)), role: res.locals.role });
+      } catch (error) {
+        res.status(502).json({ error: (error as Error).message });
+      }
+    };
   const esimOnly: RequestHandler = (_req, res, next) => (esimEnabled ? next() : void res.status(404).json({ error: 'eSIM is not connected (ESIM_STRIPE_KEY)' }));
+  const visitsOnly: RequestHandler = (_req, res, next) => (visits ? next() : void res.status(404).json({ error: 'Visit collector is not connected (VISITS_URL)' }));
   app.get('/api/metrics', send(reports.metrics));
   app.get('/api/cancellations', send(reports.cancellations));
   app.get('/api/ltv', send(reports.ltv));
@@ -386,10 +440,11 @@ export function createApp({ store, config, sources = [], sync = inProcessSync(st
   app.get('/api/turnover', send(reports.turnover));
   app.get('/api/esim/overview', esimOnly, send(reports.esimOverview));
   app.get('/api/esim/repeat', esimOnly, send(reports.esimRepeat));
-  app.get('/api/values', (req, res) => void res.json(reports.values(req.query)));
+  app.get('/api/visits', visitsOnly, send(reports.visits));
+  app.get('/api/values', send(reports.values));
 
   // MCP для Claude Code и других клиентов: те же отчёты инструментами, только чтение, вход — как у API (src/mcp.ts)
-  app.post('/mcp', express.json({ inflate: false, limit: '100kb' }), mcpHandler(reports, { esimEnabled }));
+  app.post('/mcp', express.json({ inflate: false, limit: '100kb' }), mcpHandler(reports, { esimEnabled, visitsEnabled: Boolean(visits) }));
   app.all('/mcp', (_req, res) => void res.status(405).set('Allow', 'POST').json({ error: 'Use POST (stateless Streamable HTTP)' }));
 
   // Выгрузка списком (CSV): записи, из которых посчитана цифра, — для текущей выборки, с теми же параметрами, что у экрана.

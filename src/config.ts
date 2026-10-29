@@ -38,6 +38,8 @@ export interface Config {
   // Утренняя сводка в Slack (src/digest.ts): Incoming Webhook канала — секрет; без него сводки нет. Ссылка на дашборд внизу — необязательна
   slackWebhookUrl: string | null;
   dashboardUrl: string | null;
+  // Сборщик визитов на пейволл (visit-collector): адрес и его READ_TOKEN. Без них экрана Visits нет
+  visits: { url: string; token: string } | null;
   dataDir: string;
   port: number;
 }
@@ -92,6 +94,7 @@ export function loadConfig(env: Env = process.env): Config {
     },
     slackWebhookUrl: slackWebhook(env),
     dashboardUrl: env.DASHBOARD_URL?.trim() || null,
+    visits: visitCollector(env),
     dataDir: env.DATA_DIR?.trim() || './data',
     port: positiveInt(env, 'PORT', 3000),
   };
@@ -127,6 +130,16 @@ function slackWebhook(env: Env): string | null {
   if (!value) return null;
   if (!value.startsWith('https://hooks.slack.com/')) throw new Error('SLACK_WEBHOOK_URL должен начинаться с https://hooks.slack.com/');
   return value;
+}
+
+// Адрес и токен сборщика задаются вместе; токен — секрет: в тексте ошибки его нет
+function visitCollector(env: Env): { url: string; token: string } | null {
+  const url = env.VISITS_URL?.trim().replace(/\/+$/, '');
+  const token = env.VISITS_TOKEN?.trim();
+  if (!url && !token) return null;
+  if (!url || !token) throw new Error('VISITS_URL и VISITS_TOKEN задаются вместе');
+  if (!/^https?:\/\//.test(url)) throw new Error('VISITS_URL должен начинаться с http:// или https://');
+  return { url, token };
 }
 
 function timeZone(env: Env, name: string, fallback: string): string {

@@ -64,6 +64,14 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, SLACK_WEBHOOK_URL: 'http://example.com/abc' })).toThrow(/^SLACK_WEBHOOK_URL должен начинаться с https:\/\/hooks\.slack\.com\/$/);
   });
 
+  it('сборщик визитов — адрес и токен вместе; токен — секрет, в ошибку не попадает', () => {
+    expect(loadConfig(base).visits).toBeNull();
+    expect(loadConfig({ ...base, VISITS_URL: ' https://collector.example/ ', VISITS_TOKEN: ' tok-123 ' }).visits).toEqual({ url: 'https://collector.example', token: 'tok-123' });
+    expect(() => loadConfig({ ...base, VISITS_TOKEN: 'tok-123' })).toThrow(/^VISITS_URL и VISITS_TOKEN задаются вместе$/);
+    expect(() => loadConfig({ ...base, VISITS_URL: 'https://collector.example' })).toThrow(/^VISITS_URL и VISITS_TOKEN задаются вместе$/);
+    expect(() => loadConfig({ ...base, VISITS_URL: 'collector.example', VISITS_TOKEN: 'tok-123' })).toThrow(/^VISITS_URL должен начинаться с http:\/\/ или https:\/\/$/);
+  });
+
   it('выгрузка начинается с самой ранней полуночи HISTORY_FROM по часовым поясам провайдеров', () => {
     const ny = { ...base, SOLIDGATE_TIMEZONE: 'America/New_York' };
     expect(loadConfig(ny).historyFrom).toBe(Date.parse('2026-09-01T04:00:00Z') / 1000);

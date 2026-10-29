@@ -1,5 +1,5 @@
 // Billing Dashboard. Выбор хранится в адресе страницы (ссылкой можно поделиться);
-// данные — /api/metrics (конверсия), /api/ltv (деньги от триала), /api/cancellations (отмены), /api/retries (ретраи), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
+// данные — /api/metrics (конверсия), /api/ltv (деньги от триала), /api/cancellations (отмены), /api/retries (ретраи), /api/vamp (Visa VAMP), /api/turnover (оборот), /api/visits (визиты из сборщика), /api/esim/* (eSIM), значения фильтров — /api/values, выгрузка — /api/export.
 
 const DAY_MS = 86_400_000;
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -116,6 +116,22 @@ const MODES = {
     tabs: [['time', 'Trend'], ['mid', 'MID'], ['country', 'Countries'], ['payment_method', 'Payment methods'], ['bank', 'Issuing banks'], ['card_brand', 'Card brands']],
     hints: { time: 'Gross volume — all successful charges by payment date, in USD' },
   },
+  visits: {
+    product: 'vpn',
+    kind: 'visits',
+    label: 'Visits',
+    tip: 'Уникальные визиты на пейволл: браузер считается один раз, когда впервые увидел пейволл',
+    title: 'Paywall visits',
+    api: '/api/visits',
+    charts: 'visits-charts',
+    dimensions: ['site', 'path', 'device', 'os'],
+    tabs: [['time', 'Trend'], ['site', 'Sites'], ['path', 'Pages'], ['device', 'Devices'], ['os', 'OS']],
+    hints: {
+      time: 'Unique visits — browsers that saw the paywall for the first time, by day (New York). Bots are counted apart and not included',
+    },
+    collector: true, // экран есть, только если подключён сборщик визитов
+    noExport: true, // сборщик хранит только счётчики — выгружать списком нечего
+  },
   esim_overview: {
     product: 'esim',
     kind: 'overview',
@@ -151,7 +167,7 @@ const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
   destination: 'Destination', package: 'Package', risk: 'Radar risk score', merchant: 'Visa merchant', funding: 'Card type',
-  trial_type: 'Trial type', trial_length: 'Trial length',
+  trial_type: 'Trial type', trial_length: 'Trial length', site: 'Site', path: 'Page', device: 'Device', os: 'OS',
   payment_number: 'Payment number', reason: 'Reason', days_to_report: 'Days to report', utm_source: 'Traffic source', campaign: 'Campaign', landing_domain: 'Landing domain',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
@@ -180,6 +196,10 @@ const TAB_TIPS = {
   utm_source: 'Источник трафика клиента Stripe (utm_source в metadata клиента)',
   campaign: 'Кампания клиента Stripe — по campaign_id, подписана campaign_name',
   landing_domain: 'Домен лендинга, с которого пришёл клиент Stripe',
+  site: 'Домен лендинга',
+  path: 'Путь страницы — без параметров адреса (utm, fbclid…)',
+  device: 'Телефон, планшет или компьютер — по User-Agent',
+  os: 'Операционная система — по User-Agent',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
 };
@@ -240,6 +260,7 @@ const product = () => MODES[state.mode].product;
 const kind = () => MODES[state.mode].kind;
 const isTurnover = () => kind() === 'turnover';
 let products = ['vpn']; // из ответа сервера: eSIM — если подключён его Stripe-аккаунт
+let collectorConnected = false; // из ответа сервера: экран Visits — если подключён сборщик визитов
 const dimensions = () => MODES[state.mode].dimensions;
 
 let lastData = null;
@@ -317,9 +338,11 @@ function valueName(dimension, value) {
     return `${kind === 'fraud' ? 'Fraud report' : 'Chargeback'} · ${REASON_NAMES[code] ?? code.replaceAll('_', ' ')}`;
   }
   if (dimension === 'days_to_report') return `${value} days`;
-  if (dimension === 'utm_source') return value[0].toUpperCase() + value.slice(1);
+  if (dimension === 'utm_source' || dimension === 'device') return value[0].toUpperCase() + value.slice(1);
+  if (dimension === 'os') return OS_NAMES[value] ?? value;
   return value;
 }
+const OS_NAMES = { ios: 'iOS', android: 'Android', windows: 'Windows', macos: 'macOS', linux: 'Linux', other: 'Other' };
 const PAYMENT_NUMBERS = {
   trial_fee: 'Trial fee', 1: '1st after trial', 2: '2nd', 3: '3rd', 4: '4th', '5+': '5th and later', before_history: 'Subscription older than history',
 };
@@ -365,13 +388,15 @@ async function load(kind = 'data') {
     const res = await api(`${MODES[state.mode].api}?${query()}`);
     if (seq !== loadSeq) return; // пока ждали ответа, выбрали другое
     if (res.status === 401) return location.assign('/login');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`);
     lastData = await res.json();
     if (seq !== loadSeq) return;
     render(lastData);
     if (lastData.sync_running) pollTimer = setTimeout(() => load('silent'), 10_000);
   } catch (error) {
-    if (seq === loadSeq) $('status').textContent = `Failed to load data: ${error.message}`;
+    if (seq !== loadSeq) return;
+    $('status').textContent = `Failed to load data: ${error.message}`;
+    if (kind !== 'silent') showFailed();
   } finally {
     clearTimeout(loader);
     if (seq === loadSeq) {
@@ -379,6 +404,20 @@ async function load(kind = 'data') {
       document.body.classList.remove('is-loading', 'is-loading-data');
     }
   }
+}
+
+// Экран не загрузился (например, недоступен сборщик визитов): его заголовок и пустая таблица, а не цифры прошлого экрана
+function showFailed() {
+  $('title').textContent = MODES[state.mode].title;
+  document.title = `${MODES[state.mode].title} · Billing Dashboard`;
+  $('subtitle').textContent = '';
+  renderFilters();
+  $('kpis').innerHTML = '';
+  table = null;
+  $('thead').innerHTML = '';
+  $('rows').innerHTML = '<tr><td class="muted">No data — see the error above</td></tr>';
+  $('more').hidden = true;
+  showCharts(false);
 }
 
 // Лоадер: полоска сверху, скелетон таблицы и графиков; при смене цифр мерцают и карточки
@@ -411,10 +450,11 @@ function markControls() {
   $('product-group').hidden = list.length < 2;
   $('product').innerHTML = list.map((p) => `<button data-v="${p}" class="${p === product() ? 'on' : ''}">${PRODUCT_NAMES[p]}</button>`).join('');
   $('mode').innerHTML = Object.entries(MODES)
-    .filter(([, m]) => m.product === product())
+    .filter(([v, m]) => m.product === product() && (!m.collector || collectorConnected || v === state.mode))
     .map(([v, m]) => `<button data-v="${v}" class="${v === state.mode ? 'on' : ''}" data-tip="${m.tip}">${m.label}</button>`)
     .join('');
-  $('provider-group').hidden = product() !== 'vpn';
+  $('provider-group').hidden = product() !== 'vpn' || kind() === 'visits'; // у визитов провайдера нет
+  $('export').hidden = Boolean(MODES[state.mode].noExport);
   for (const id of ['provider', 'granularity']) {
     document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset.v === state[id]));
   }
@@ -444,9 +484,11 @@ function loadValues(dimension) {
 
 function render(data) {
   products = data.products ?? ['vpn'];
+  collectorConnected = Boolean(data.visits);
   renderSidebar(data);
   renderHeader(data);
   if (kind() === 'turnover') renderTurnoverKpis(data.totals, data.range);
+  else if (kind() === 'visits') renderVisitsKpis(data.totals, data.range);
   else if (kind() === 'repeat') renderRepeatKpis(data);
   else if (kind() === 'overview') renderOverviewKpis(data);
   else if (kind() === 'cancellations') renderCancelKpis(data);
@@ -463,6 +505,11 @@ function renderSidebar(data) {
   markControls();
   const presetName = PRESETS.find(([v]) => v === state.preset)?.[1] ?? 'Custom';
   $('period').innerHTML = `<span class="text"><span class="label">${presetName}</span><span class="value">${fullDay(data.range.from)} — ${fullDay(data.range.to)}</span></span>${ICONS.calendar}`;
+  renderFilters();
+  $('role').textContent = data.role === 'admin' ? 'Admin' : 'Guest';
+}
+
+function renderFilters() {
   $('filters').innerHTML = dimensions()
     .map((d) => {
       const labels = (state.filters[d] ?? []).map((v) => valueLabel(d, v));
@@ -473,7 +520,6 @@ function renderSidebar(data) {
     })
     .join('');
   $('reset-filters').hidden = Object.keys(state.filters).length === 0;
-  $('role').textContent = data.role === 'admin' ? 'Admin' : 'Guest';
 }
 
 function renderHeader(data) {
@@ -486,6 +532,8 @@ function renderHeader(data) {
       ? 'Estimate · calendar months, UTC · Visa only · thresholds apply to a whole Visa merchant'
       : product() === 'esim'
       ? `Day boundaries: ${zone(data.time_zones.stripe)} · Stripe account Toggle eSim`
+      : kind() === 'visits'
+      ? `Day boundaries: ${zone(data.time_zone)} · from the paywall visit collector · not linked to trials`
       : `Day boundaries: Stripe — ${zone(data.time_zones.stripe)}, Solidgate — ${zone(data.time_zones.solidgate)}`;
   const errors = data.sync
     .filter((s) => s.last_status === 'error')
@@ -533,6 +581,16 @@ function renderTurnoverKpis(t, range) {
     ['Refunds', usd(t.refunded), t.gross ? `${pct(t.refunded / t.gross)} of gross` : '—', 'Сколько денег вернули клиентам'],
     ['Successful payments', num(t.payments), 'successful charges', 'Число успешных списаний'],
     ['Avg. transaction value', usdAverage(t.average), 'gross ÷ payments', 'Средний чек: оборот ÷ число платежей'],
+  ]);
+}
+
+function renderVisitsKpis(t, range) {
+  const days = Math.round((Date.parse(range.to) - Date.parse(range.from)) / DAY_MS) + 1;
+  const all = t.visits + t.bots;
+  kpiCards([
+    ['Unique visits', num(t.visits), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Браузеры, впервые увидевшие пейволл: повторные заходы и перезагрузки не считаются'],
+    ['Avg. per day', num(Math.round(t.visits / days)), `over ${num(days)} ${days === 1 ? 'day' : 'days'}`, 'Уникальные визиты за период ÷ число дней'],
+    ['Bots filtered', num(t.bots), all ? `${pct(t.bots / all)} of all hits` : '—', 'Известные боты и запросы без User-Agent — в визиты не входят'],
   ]);
 }
 
@@ -737,6 +795,11 @@ const TURNOVER_COLUMNS = [
   { key: 'refunded', title: 'Refunds', tip: 'Сколько денег вернули клиентам', sort: (p) => p.refunded, cell: (p) => `<td>${usd(p.refunded)}</td>` },
   { key: 'net', title: 'Net volume', tip: 'Оборот за вычетом рефандов', sort: (p) => p.net, cell: (p) => `<td>${usd(p.net)}</td>` },
 ];
+const VISIT_COLUMNS = [
+  { key: 'visits', title: 'Unique visits', tip: 'Браузеры, впервые увидевшие пейволл', sort: (p) => p.visits, cell: (p) => `<td>${num(p.visits)}</td>` },
+  { key: 'bots', title: 'Bots', tip: 'Отсеянные боты — в визиты не входят', sort: (p) => p.bots, cell: (p) => `<td>${num(p.bots)}</td>` },
+];
+const VISIT_SHARE_COLUMN = { key: 'share', title: 'Share of visits', tip: 'Доля в уникальных визитах за период', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
 const SHARE_COLUMN = { key: 'share', title: 'Share of gross', tip: 'Доля в обороте за период', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
 const REASON_COLUMNS = [
   {
@@ -983,22 +1046,25 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'No d
   const sorted = sortRows(rows, columns);
   const shown = limit && !state.showAll ? sorted.slice(0, ROW_LIMIT) : sorted;
   table = { columns, rows, link, limit, empty, shown };
+  const canExport = !MODES[state.mode].noExport;
   $('thead').innerHTML = `<tr>${columns
     .map((c) => {
       const on = sort?.key === c.key;
       const arrow = on && sort.dir === 'asc' ? '↑' : '↓';
       return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sort" data-sort="${c.key}"${c.tip ? ` data-tip="${esc(c.tip)}"` : ''}>${c.title}<span class="arrow">${arrow}</span></button></th>`;
     })
-    .join('')}<th class="export-cell"></th></tr>`;
+    .join('')}${canExport ? '<th class="export-cell"></th>' : ''}</tr>`;
   const exportCell = (i) =>
-    `<td class="export-cell"><button class="row-export" data-row="${i}" data-tip="Выгрузить записи этой строки списком (CSV)" aria-label="Export rows">${ICONS.download}</button></td>`;
+    canExport
+      ? `<td class="export-cell"><button class="row-export" data-row="${i}" data-tip="Выгрузить записи этой строки списком (CSV)" aria-label="Export rows">${ICONS.download}</button></td>`
+      : '';
   $('rows').innerHTML =
     shown
       .map((r, i) => {
         const cls = [link && 'link', r.anomaly && 'anomaly'].filter(Boolean).join(' '); // anomaly — строка VAMP с ratio заметно выше среднего
         return `<tr${cls ? ` class="${cls}"` : ''}${link ? ` data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}${exportCell(i)}</tr>`;
       })
-      .join('') || `<tr><td colspan="${columns.length + 1}" class="muted">${empty}</td></tr>`;
+      .join('') || `<tr><td colspan="${columns.length + Number(canExport)}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
   $('show-all').textContent = `Show all (${num(rows.length)})`;
   buildFloatHead();
@@ -1117,6 +1183,15 @@ function renderView(data) {
       renderTable(CANCEL_REASON_COLUMNS, data.reasons, { empty: 'No cancellations for this period' });
     } else {
       renderTable([valueColumn(), ...CANCEL_COLUMNS], data.breakdown, breakdown);
+    }
+    return;
+  }
+  if (kind() === 'visits') {
+    if (isTime) {
+      renderTable([periodColumn(timeHead('Date')), ...VISIT_COLUMNS], data.series);
+      renderVisitsChart(data.series);
+    } else {
+      renderTable([valueColumn(), VISIT_SHARE_COLUMN, ...VISIT_COLUMNS], data.breakdown, { ...breakdown, empty: 'No visits for this period' });
     }
     return;
   }
@@ -1421,7 +1496,7 @@ function renderModeCharts(data) {
   if (kind() === 'retries') return renderRetryChart(data);
   if (kind() === 'ltv') return renderLtvChart(data);
   if (kind() === 'vamp') return renderVampChart(data);
-  ({ conversion: renderCharts, turnover: renderTurnoverChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](data.series);
+  ({ conversion: renderCharts, turnover: renderTurnoverChart, visits: renderVisitsChart, repeat: renderRepeatChart, overview: renderOverviewChart })[kind()](data.series);
 }
 
 function renderTurnoverChart(series) {
@@ -1439,6 +1514,25 @@ function renderTurnoverChart(series) {
         tooltip: chartTooltip(series, (c) => ` Gross volume: ${usd(series[c.dataIndex].gross)} · payments: ${num(series[c.dataIndex].payments)}`),
       },
       scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, callback: (v) => usdCompact.format(v) } } },
+    },
+  });
+}
+
+function renderVisitsChart(series) {
+  const { muted, grid, x, common } = chartBase();
+  charts.visits = new Chart($('visits-chart'), {
+    type: 'bar',
+    data: {
+      labels: chartLabels(series),
+      datasets: [{ label: 'Unique visits', data: series.map((p) => p.visits), backgroundColor: css('--s-converted'), borderRadius: 4, borderSkipped: 'bottom', maxBarThickness: 28 }],
+    },
+    options: {
+      ...common,
+      plugins: {
+        legend: { display: false },
+        tooltip: chartTooltip(series, (c) => ` Unique visits: ${num(series[c.dataIndex].visits)} · bots: ${num(series[c.dataIndex].bots)}`),
+      },
+      scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, precision: 0 } } },
     },
   });
 }

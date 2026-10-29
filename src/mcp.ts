@@ -9,19 +9,21 @@ import { OVERVIEW_DIMENSIONS, REPEAT_DIMENSIONS } from './esim.js';
 import { DIMENSIONS } from './metrics.js';
 import { TURNOVER_DIMENSIONS } from './turnover.js';
 import { VAMP_DIMENSIONS, VAMP_FILTERS } from './vamp.js';
+import { VISIT_DIMENSIONS } from './visits.js';
 
 // MCP-сервер дашборда (POST /mcp, Streamable HTTP без сессий): отчёты экранов — инструментами для Claude Code и других
 // клиентов. Только чтение и только агрегаты: синка и выгрузки с ID клиентов здесь нет. Вход — как у API (cookie или Basic).
 // Инструменты зовут те же функции, что и экраны (src/server.ts → reports), поэтому цифры совпадают с дашбордом
 
-type Report = (query: Record<string, unknown>) => object;
-export type Reports = Record<'metrics' | 'cancellations' | 'ltv' | 'retries' | 'vamp' | 'turnover' | 'esimOverview' | 'esimRepeat' | 'values', Report>;
+type Report = (query: Record<string, unknown>) => object | Promise<object>;
+export type Reports = Record<'metrics' | 'cancellations' | 'ltv' | 'retries' | 'vamp' | 'turnover' | 'visits' | 'esimOverview' | 'esimRepeat' | 'values', Report>;
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const METHODOLOGY = { vpn: 'methodology-vpn.md', esim: 'methodology-esim.md', data_sources: 'data-sources.md' };
 
 const INSTRUCTIONS = `Toggle billing dashboard, read-only.
 VPN — subscriptions with a trial (Stripe accounts and Solidgate); most metrics are cohorts by trial start day. eSIM — one-off purchases.
+Visits — unique paywall visitors from the landing (visit collector), America/New_York days; not linked to trials.
 Days are provider-local, as in the provider's dashboard: Stripe — America/New_York, Solidgate — UTC. VAMP — UTC calendar months.
 final_first / final_retry / final = false means the number is not final yet (shown with ≈ on screens) and will still grow — do not compare it with closed periods.
 Money is in USD cents unless a field name says otherwise; rates are shares from 0 to 1.
@@ -54,6 +56,7 @@ interface Tool {
   description: string;
   input: z.ZodRawShape;
   esim?: boolean; // только если подключён eSIM
+  visits?: boolean; // только если подключён сборщик визитов
 }
 const TOOLS: Tool[] = [
   {
@@ -105,6 +108,15 @@ const TOOLS: Tool[] = [
     input: { ...provider, ...period, ...granularity, ...filters(TURNOVER_DIMENSIONS), ...view(['time', ...TURNOVER_DIMENSIONS], 'time series or breakdown') },
   },
   {
+    name: 'visits',
+    report: 'visits',
+    description:
+      'Unique paywall visitors from the landing (visit collector): a browser counts once, when the paywall is first shown; bots are counted apart. ' +
+      'By day (America/New_York); breakdown by site, page path, device or OS. Not linked to trials — there is no visit-to-trial rate',
+    input: { ...period, ...granularity, ...filters(VISIT_DIMENSIONS), ...view(['time', ...VISIT_DIMENSIONS], 'time series or breakdown') },
+    visits: true,
+  },
+  {
     name: 'esim_overview',
     report: 'esimOverview',
     description: 'eSIM by day: revenue, paid orders, new and repeat customers, paid share of orders, lost revenue; view=decline_reason — why orders were not paid',
@@ -125,9 +137,9 @@ const TOOLS: Tool[] = [
       'Values of one filter dimension for the current selection (period, provider, other filters) with counts — trials, payments, VAMP events or customers, as on that screen. ' +
       'Use it to get exact values for filters',
     input: {
-      mode: z.enum(['conversion', 'cancellations', 'ltv', 'retries', 'vamp', 'turnover', 'esim_overview', 'esim_repeat']).describe('Screen the filter belongs to; turnover — the volume tool'),
+      mode: z.enum(['conversion', 'cancellations', 'ltv', 'retries', 'vamp', 'turnover', 'visits', 'esim_overview', 'esim_repeat']).describe('Screen the filter belongs to; turnover — the volume tool'),
       dimension: z.string().describe('Dimension, e.g. country, bank, account, campaign'),
-      ...provider, ...period, ...filters([...new Set([...DIMENSIONS, ...VAMP_FILTERS, ...TURNOVER_DIMENSIONS, ...OVERVIEW_DIMENSIONS])]),
+      ...provider, ...period, ...filters([...new Set([...DIMENSIONS, ...VAMP_FILTERS, ...TURNOVER_DIMENSIONS, ...VISIT_DIMENSIONS, ...OVERVIEW_DIMENSIONS])]),
     },
   },
 ];
@@ -153,14 +165,19 @@ function trim(data: object, rows: number) {
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data) }] });
 
-function createServer(reports: Reports, { esimEnabled }: { esimEnabled: boolean }) {
+interface Options {
+  esimEnabled: boolean;
+  visitsEnabled: boolean;
+}
+
+function createServer(reports: Reports, { esimEnabled, visitsEnabled }: Options) {
   const server = new McpServer({ name: 'billing-dashboard', version: '1.0.0' }, { instructions: INSTRUCTIONS });
-  for (const tool of TOOLS.filter((t) => !t.esim || esimEnabled)) {
+  for (const tool of TOOLS.filter((t) => (!t.esim || esimEnabled) && (!t.visits || visitsEnabled))) {
     server.registerTool(
       tool.name,
       { description: tool.description, inputSchema: { ...tool.input, ...limit }, annotations: { readOnlyHint: true, openWorldHint: false } },
       async ({ filters, limit: rows, ...params }: Record<string, unknown>) =>
-        json(trim(reports[tool.report]({ ...params, ...(filters as object | undefined) }), (rows as number | undefined) ?? ROW_LIMIT)),
+        json(trim(await reports[tool.report]({ ...params, ...(filters as object | undefined) }), (rows as number | undefined) ?? ROW_LIMIT)),
     );
   }
   server.registerTool(
@@ -176,7 +193,7 @@ function createServer(reports: Reports, { esimEnabled }: { esimEnabled: boolean 
 }
 
 // Без сессий: на каждый запрос — свой сервер и транспорт, ответ — обычным JSON (без потока SSE)
-export function mcpHandler(reports: Reports, options: { esimEnabled: boolean }): RequestHandler {
+export function mcpHandler(reports: Reports, options: Options): RequestHandler {
   return async (req, res) => {
     const server = createServer(reports, options);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
