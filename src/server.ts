@@ -217,7 +217,8 @@ export function createApp({
     const today = localDay(nowSec(), config.timeZones.stripe);
     const all = await client({ from: config.historyFromDay, to: today, group: live ? 'site' : null, filters });
     const days = (live ? liveVisits(all) : all).rows.filter((r) => r.count > 0).map((r) => r.day);
-    return { first: days.length ? days.reduce((a, b) => (a < b ? a : b)) : today, today };
+    // first — null, пока визитов нет совсем
+    return { first: days.length ? days.reduce((a, b) => (a < b ? a : b)) : null, today };
   };
 
   // Какие визиты сравнивать с триалами выборки Conversion. У визита есть только аккаунт пейволла — провайдер и аккаунт Stripe
@@ -271,7 +272,7 @@ export function createApp({
         const byPeriod = new Map(visitSeries(stats, { ...range, granularity }).map((p) => [p.period, p.visits]));
         // группа, начавшаяся раньше первого дня визитов, неполная — визитов у неё нет, а не ноль
         const series = report.series.map((p) => {
-          const count = p.period < first ? null : (byPeriod.get(p.period) ?? 0);
+          const count = first === null || p.period < first ? null : (byPeriod.get(p.period) ?? 0);
           return { ...p, visits: count, visit_to_trial: count ? p.started / count : null };
         });
         return { ...report, series, visits_status: 'ok' };
@@ -366,7 +367,7 @@ export function createApp({
     async visits(query: Query) {
       if (!visits) throw new Error('Visit collector is not connected (VISITS_URL)');
       const { first, today } = await visitsDays(visits);
-      const { granularity, range, meta } = common(query, first, today);
+      const { granularity, range, meta } = common(query, first ?? today, today);
       const view = VISIT_DIMENSIONS.find((v) => v === query.view) ?? 'time';
       const filters = parseFilters(query, VISIT_DIMENSIONS);
       const stats = await visits({ ...range, group: view === 'time' ? null : view, filters });
@@ -412,7 +413,7 @@ export function createApp({
         const dimension = VISIT_DIMENSIONS.find((d) => d === query.dimension);
         if (!dimension) return { values: [] };
         const { first, today } = await visitsDays(visits);
-        const { range } = common(query, first, today);
+        const { range } = common(query, first ?? today, today);
         const filters = parseFilters(query, VISIT_DIMENSIONS);
         delete filters[dimension]; // свой фильтр не применяем
         const rows = visitBreakdown(await visits({ ...range, group: dimension, filters }));

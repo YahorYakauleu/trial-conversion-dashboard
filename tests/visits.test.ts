@@ -115,6 +115,8 @@ describe('экран Visits', () => {
     const visits = async (q: VisitQuery): Promise<VisitStats> => {
       queries.push(q);
       if (fail) throw new Error('Visit collector is unavailable: fetch failed');
+      // у Solidgate — только визиты тестовой сборки лендинга
+      if (q.filters.account?.includes('solidgate')) return { time_zone: NY, rows: [day('2026-10-20', 7, 'dev-www.example')] };
       // по сайтам: боевые a и b и тестовая сборка лендинга dev-www — её визиты не входят в Visit → Trial
       if (q.group === 'site') return { time_zone: NY, rows: [day('2026-10-19', 3, 'a.example'), day('2026-10-20', 2, 'a.example'), day('2026-10-20', 2, 'b.example'), day('2026-10-20', 50, 'dev-www.example')] };
       return { time_zone: NY, rows: [day('2026-10-19', 3), day('2026-10-20', 54)] };
@@ -206,6 +208,13 @@ describe('экран Visits', () => {
       expect([narrowed, res.visits_status, res.series[0].visits]).toEqual([narrowed, 'filtered', undefined]);
     }
     expect((await (await get(url, `/api/metrics?${range}&view=country`)).json()).visits_status).toBeUndefined(); // в разрезах визитов нет
+  });
+
+  it('Conversion, пока боевых визитов нет совсем (только тестовые сайты): визиты — пусто, а не ноль', async () => {
+    const { url } = await start();
+    // только dev-сборка лендинга — для Visit → Trial это «визитов ещё нет»
+    const data = await (await get(url, '/api/metrics?period=custom&from=2026-10-18&to=2026-10-20&provider=solidgate')).json();
+    expect(data.series.map((p: { visits: number | null }) => p.visits)).toEqual([null, null, null]);
   });
 
   it('Conversion при недоступном сборщике открывается — без визитов, с причиной', async () => {
