@@ -112,7 +112,7 @@ const TOOLS: Tool[] = [
     report: 'visits',
     description:
       'Unique paywall visitors from the landing (visit collector): a browser counts once, when the paywall is first shown; known bots are not counted. ' +
-      'By day (America/New_York); breakdown by landing domain (site), device or OS. Not linked to trials — there is no visit-to-trial rate',
+      'By day (America/New_York); breakdown by landing domain (site), device, OS or browser (social in-app browsers — facebook, instagram, tiktok, snapchat — separately; webview — other in-app windows). Not linked to trials — there is no visit-to-trial rate',
     input: { ...period, ...granularity, ...filters(VISIT_DIMENSIONS), ...view(['time', ...VISIT_DIMENSIONS], 'time series or breakdown') },
     visits: true,
   },

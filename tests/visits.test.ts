@@ -122,19 +122,19 @@ describe('экран Visits', () => {
 
   it('тренд — с первого дня, когда в сборщике есть визиты; фильтры уходят в сборщик, неверные отбрасываются', async () => {
     const { url, queries } = await start();
-    const data = await (await get(url, '/api/visits?period=custom&from=2026-10-01&to=2026-10-21&site=a.example&device=phone')).json();
+    const data = await (await get(url, '/api/visits?period=custom&from=2026-10-01&to=2026-10-21&site=a.example&device=phone&browser=facebook')).json();
     expect(data).toMatchObject({
       visits: true,
       time_zone: NY,
       range: { from: '2026-10-19', to: '2026-10-21' }, // раньше 19.10 визитов нет
-      filters: { site: ['a.example'] }, // device=phone — не значение сборщика
+      filters: { site: ['a.example'], browser: ['facebook'] }, // device=phone — не значение сборщика
       view: 'time',
       totals: { visits: 7 },
       breakdown: [],
       role: 'admin',
     });
     expect(data.series.map((p: { visits: number }) => p.visits)).toEqual([3, 4, 0]);
-    expect(queries.at(-1)).toEqual({ from: '2026-10-19', to: '2026-10-21', group: null, filters: { site: ['a.example'] } });
+    expect(queries.at(-1)).toEqual({ from: '2026-10-19', to: '2026-10-21', group: null, filters: { site: ['a.example'], browser: ['facebook'] } });
   });
 
   it('разбивка по сайту и значения фильтра — без своего фильтра; в общем ответе экранов флаг visits', async () => {

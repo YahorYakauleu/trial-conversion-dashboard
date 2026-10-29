@@ -103,6 +103,7 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   site: /^[a-z0-9.:-]{1,80}$/, // Visits: домен лендинга, у локального — с портом
   device: /^(mobile|tablet|desktop)$/,
   os: /^[a-z]{1,16}$/,
+  browser: /^[a-z]{1,16}$/, // Visits: браузер по User-Agent — safari, chrome, facebook (встроенный)…
 };
 
 // Несколько значений одного фильтра — повторяющимся параметром: ?country=US&country=SA

@@ -124,8 +124,8 @@ const MODES = {
     title: 'Paywall visits',
     api: '/api/visits',
     charts: 'visits-charts',
-    dimensions: ['site', 'device', 'os'],
-    tabs: [['time', 'Trend'], ['site', 'Domains'], ['device', 'Devices'], ['os', 'OS']],
+    dimensions: ['site', 'device', 'os', 'browser'],
+    tabs: [['time', 'Trend'], ['site', 'Domains'], ['device', 'Devices'], ['os', 'OS'], ['browser', 'Browsers']],
     hints: {
       time: 'Unique visits — browsers that saw the paywall for the first time, by day (New York)',
     },
@@ -167,7 +167,7 @@ const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
   destination: 'Destination', package: 'Package', risk: 'Radar risk score', merchant: 'Visa merchant', funding: 'Card type',
-  trial_type: 'Trial type', trial_length: 'Trial length', site: 'Domain', device: 'Device', os: 'OS',
+  trial_type: 'Trial type', trial_length: 'Trial length', site: 'Domain', device: 'Device', os: 'OS', browser: 'Browser',
   payment_number: 'Payment number', reason: 'Reason', days_to_report: 'Days to report', utm_source: 'Traffic source', campaign: 'Campaign', landing_domain: 'Landing domain',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
@@ -199,6 +199,7 @@ const TAB_TIPS = {
   site: 'Домен лендинга',
   device: 'Телефон, планшет или компьютер — по User-Agent',
   os: 'Операционная система — по User-Agent',
+  browser: 'Браузер по User-Agent. Встроенные браузеры Facebook, Instagram, TikTok, Snapchat — отдельно: там иначе работают Apple Pay и Google Pay',
   destination: 'Страна или регион пакета eSIM',
   package: 'Объём и срок пакета eSIM',
 };
@@ -339,9 +340,14 @@ function valueName(dimension, value) {
   if (dimension === 'days_to_report') return `${value} days`;
   if (dimension === 'utm_source' || dimension === 'device') return value[0].toUpperCase() + value.slice(1);
   if (dimension === 'os') return OS_NAMES[value] ?? value;
+  if (dimension === 'browser') return BROWSER_NAMES[value] ?? value;
   return value;
 }
 const OS_NAMES = { ios: 'iOS', android: 'Android', windows: 'Windows', macos: 'macOS', linux: 'Linux', other: 'Other' };
+const BROWSER_NAMES = {
+  safari: 'Safari', chrome: 'Chrome', samsung: 'Samsung Internet', edge: 'Edge', opera: 'Opera', yandex: 'Yandex Browser', firefox: 'Firefox',
+  facebook: 'Facebook (in-app)', instagram: 'Instagram (in-app)', tiktok: 'TikTok (in-app)', snapchat: 'Snapchat (in-app)', webview: 'Other in-app (WebView)', other: 'Other',
+};
 const PAYMENT_NUMBERS = {
   trial_fee: 'Trial fee', 1: '1st after trial', 2: '2nd', 3: '3rd', 4: '4th', '5+': '5th and later', before_history: 'Subscription older than history',
 };
