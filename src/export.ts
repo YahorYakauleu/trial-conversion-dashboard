@@ -212,7 +212,7 @@ export function exportCustomers(db: Db, o: EsimOptions): ExportTable {
   return {
     columns: [
       'customer_id', 'first_purchase_utc', 'first_order_id', 'destination', 'package', 'card_country', 'payment_method', 'card_brand', 'issuing_bank',
-      'returned_within_30_days', 'second_purchase_utc', 'revenue_90_days_usd', 'customer_link',
+      'returned_within_30_days', 'second_purchase_utc', 'revenue_14_days_usd', 'revenue_90_days_usd', 'customer_link',
     ],
     rows: rows.map((c) => {
       const first = Number(c.paid_at);
@@ -221,7 +221,7 @@ export function exportCustomers(db: Db, o: EsimOptions): ExportTable {
       const returned = second !== null && second < first + 30 * DAY ? 'yes' : o.now < first + 30 * DAY ? 'not yet' : 'no';
       return [
         text(c.customer_id), utc(first), text(c.intent_id ?? c.payment_id), text(c.destination), text(c.package), text(c.country), text(c.payment_method), text(c.card_brand), text(c.bank),
-        returned, utc(second), dollars(c.revenue_90 as number), stripeLink('stripe', 'esim', 'customers', c.customer_id as string),
+        returned, utc(second), dollars(c.revenue_14 as number), dollars(c.revenue_90 as number), stripeLink('stripe', 'esim', 'customers', c.customer_id as string),
       ];
     }),
     truncated,

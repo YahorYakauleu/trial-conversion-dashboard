@@ -66,8 +66,9 @@ describe('eSIM: повторные покупки', () => {
   it('когорты по первой покупке: повтор за 30 и 90 дней, пополнения, выручка на клиента, дни до второй покупки', () => {
     const { totals, series } = getRepeat(seeded().db, { ...opts, granularity: 'day' });
     expect(totals).toMatchObject({
-      customers: 3, repeat_30: 1, repeat_90: 2, topup_30: 1, revenue_30: 800 + 500 + 1000 + 800, revenue_90: 1300 + 1000 + 1600,
-      repeat_rate_30: 1 / 3, repeat_rate_90: 2 / 3, topup_rate_30: 1 / 3, revenue_per_customer_90: 1300, final_30: true, final_90: true,
+      customers: 3, repeat_30: 1, repeat_90: 2, topup_30: 1, revenue_14: 800 + 500 + 1000 + 800, revenue_30: 800 + 500 + 1000 + 800, revenue_90: 1300 + 1000 + 1600,
+      repeat_rate_30: 1 / 3, repeat_rate_90: 2 / 3, topup_rate_30: 1 / 3, revenue_per_customer_14: 1033, revenue_per_customer_90: 1300,
+      final_14: true, final_30: true, final_90: true,
     });
     expect(totals.avg_days_to_second).toBeCloseTo((9 + 48) / 2, 2); // первая успешная покупка A — в 10:02
     // самая ранняя и самая поздняя первые покупки — у A и D; у пустых дней — 0
@@ -76,7 +77,10 @@ describe('eSIM: повторные покупки', () => {
     expect(series.find((p) => p.period === '2026-10-01')).toMatchObject({ customers: 1, repeat_30: 1, topup_30: 1 });
     // окна ещё открыты — цифры неокончательные
     const fresh = getRepeat(seeded().db, { ...opts, now: ts('2026-11-15T00:00:00Z'), granularity: 'month' }).totals;
-    expect([fresh.final_30, fresh.final_90]).toEqual([true, false]);
+    expect([fresh.final_14, fresh.final_30, fresh.final_90]).toEqual([true, true, false]);
+    // 14 дней: пополнение A на 9-й день — в окне, вторая покупка D на 48-й — нет
+    const day = (from: string) => getRepeat(seeded().db, { ...opts, from, to: from, granularity: 'day' }).totals;
+    expect([day('2026-10-01').revenue_per_customer_14, day('2026-10-03').revenue_per_customer_14]).toEqual([1300, 800]);
   });
 
   it('разбивка по первой покупке и фильтры', () => {

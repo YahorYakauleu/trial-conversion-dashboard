@@ -667,6 +667,7 @@ function renderRepeatKpis({ totals: t, range }) {
   kpiCards([
     ['New customers', num(t.customers), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Клиенты, впервые купившие eSIM в эти дни'],
     ['Returned within 30 days', approxPct(t.repeat_rate_30, t.final_30), `${num(t.repeat_30)} of ${num(t.customers)}`, 'Доля клиентов, купивших снова — пополнение или новый пакет — в течение 30 дней после первой покупки'],
+    ['Revenue per customer, 14 days', `${t.final_14 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_14)}`, 'net of refunds', 'Сколько клиент принёс за 14 дней с первой покупки — включая её, за вычетом рефандов'],
     ['Revenue per customer, 90 days', `${t.final_90 ? '' : '≈ '}${usdAverage(t.revenue_per_customer_90)}`, 'net of refunds', 'Сколько клиент принёс за 90 дней с первой покупки — включая её, за вычетом рефандов'],
   ]);
 }
@@ -983,6 +984,13 @@ const REPEAT_COLUMNS = [
     tip: 'Купили снова — пополнение или новый пакет — в течение 30 дней после первой покупки',
     sort: (p) => p.repeat_rate_30,
     cell: (p) => rateCell(p.repeat_rate_30, p.repeat_30, p.final_30, '', windowTip(p, 30)),
+  },
+  {
+    key: 'revenue_per_customer_14',
+    title: 'Revenue per customer, 14 days',
+    tip: 'Сколько клиент принёс за 14 дней с первой покупки — включая её, за вычетом рефандов',
+    sort: (p) => p.revenue_per_customer_14,
+    cell: (p) => pendingCell(usdAverage(p.revenue_per_customer_14), p.final_14, '', windowTip(p, 14)),
   },
   {
     key: 'revenue_per_customer_90',

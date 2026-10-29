@@ -126,7 +126,7 @@ const TOOLS: Tool[] = [
   {
     name: 'esim_retention',
     report: 'esimRepeat',
-    description: 'eSIM cohorts by the first purchase day: returned within 30 days, revenue per customer within 90 days',
+    description: 'eSIM cohorts by the first purchase day: returned within 30 days, revenue per customer within 14 and 90 days',
     input: { ...period, ...granularity, ...filters(REPEAT_DIMENSIONS), ...view(['time', ...REPEAT_DIMENSIONS], 'time series or breakdown') },
     esim: true,
   },
