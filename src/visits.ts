@@ -6,7 +6,8 @@ import { addDays } from './time.js';
 // по READ_TOKEN сборщика; токен остаётся на сервере, в браузер не попадает
 // site — домен лендинга (на экране — Domain). Пути страниц сборщик тоже хранит, но он почти всегда «/» — на экране его нет;
 // страны нет: сборщик не за Cloudflare
-export const VISIT_DIMENSIONS = ['site', 'device', 'os', 'browser'] as const;
+// account — платёжный аккаунт пейволла, как в дашборде: stripe:org… или solidgate (лендинг знает его до оплаты)
+export const VISIT_DIMENSIONS = ['site', 'device', 'os', 'browser', 'account'] as const;
 export type VisitDimension = (typeof VISIT_DIMENSIONS)[number];
 // Фильтр — список значений, 'none' — «не определено» (как на других экранах)
 export type VisitFilters = Partial<Record<VisitDimension, string[]>>;

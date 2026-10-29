@@ -66,7 +66,17 @@ import {
   VAMP_FILTERS,
   type VampDimension,
 } from './vamp.js';
-import { createVisitsClient, liveVisits, VISIT_DIMENSIONS, visitBreakdown, visitSeries, visitTotals, type VisitDimension, type VisitsClient } from './visits.js';
+import {
+  createVisitsClient,
+  liveVisits,
+  VISIT_DIMENSIONS,
+  visitBreakdown,
+  visitSeries,
+  visitTotals,
+  type VisitDimension,
+  type VisitFilters,
+  type VisitsClient,
+} from './visits.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -81,7 +91,7 @@ const SYNC_CACHE_TTL_MS = 2 * 60_000;
 // Допустимые значения фильтров: код страны, способ оплаты / платёжная система (латиница), банк — любое название
 type AnyDimension = Dimension | TurnoverDimension | OverviewDimension | VampDimension | VisitDimension;
 const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
-  account: /^(stripe|solidgate):[A-Za-z0-9_]{1,32}$/,
+  account: /^((stripe|solidgate):[A-Za-z0-9_]{1,32}|solidgate)$/, // solidgate без канала — у визитов: sg и sgH2H решает кнопка оплаты
   mid: /^(stripe|solidgate):[A-Za-z0-9_-]{1,64}$/, // у Solidgate MID — UUID
   country: /^[A-Z]{2}$/,
   payment_method: /^[a-z_]{1,32}$/,
@@ -202,12 +212,29 @@ export function createApp({
   };
 
   // Визиты: сутки — по Нью-Йорку, как у сборщика и Stripe; «All» — с первого дня, когда в сборщике есть визиты
-  // live — только боевые сайты, без тестовых сборок лендинга (для Visit → Trial на Conversion)
-  const visitsDays = async (client: VisitsClient, live = false) => {
+  // live — только боевые сайты, без тестовых сборок лендинга (для Visit → Trial на Conversion); filters — как у визитов в запросе
+  const visitsDays = async (client: VisitsClient, live = false, filters: VisitFilters = {}) => {
     const today = localDay(nowSec(), config.timeZones.stripe);
-    const all = await client({ from: config.historyFromDay, to: today, group: live ? 'site' : null, filters: {} });
+    const all = await client({ from: config.historyFromDay, to: today, group: live ? 'site' : null, filters });
     const days = (live ? liveVisits(all) : all).rows.filter((r) => r.count > 0).map((r) => r.day);
     return { first: days.length ? days.reduce((a, b) => (a < b ? a : b)) : today, today };
+  };
+
+  // Какие визиты сравнивать с триалами выборки Conversion. У визита есть только аккаунт пейволла — провайдер и аккаунт Stripe
+  // переносятся на визиты, остальные фильтры (страна, банк, способ оплаты…) — нет. Solidgate визит не делится на sg и sgH2H:
+  // это решает кнопка оплаты. null — визиты с выборкой не сравнить; {} — все визиты
+  const visitFilters = (provider: ProviderFilter, filters: Filters): VisitFilters | null => {
+    if (Object.keys(filters).some((d) => d !== 'account')) return null;
+    let accounts: string[] | null = null;
+    if (provider === 'stripe') accounts = config.stripeAccounts.map((a) => `stripe:${a.account}`);
+    if (provider === 'solidgate') accounts = ['solidgate'];
+    const chosen = filters.account;
+    if (chosen) {
+      if (chosen.some((a) => !a.startsWith('stripe:'))) return null;
+      accounts = accounts ? accounts.filter((a) => chosen.includes(a)) : chosen;
+    }
+    if (accounts === null) return {};
+    return accounts.length ? { account: accounts } : null;
   };
 
   // Отчёты экранов: параметры — как в адресе запроса, ответ — JSON экрана. Ими же отвечают инструменты MCP (src/mcp.ts),
@@ -233,12 +260,14 @@ export function createApp({
       });
       const report = { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, reason, ...data };
       if (view !== 'time' || !visits) return report;
-      // Визиты и Visit → Trial в тренде — только без фильтров и по всем провайдерам: визиты не делятся по аккаунту, стране, банку.
+      // Визиты и Visit → Trial в тренде — по всем провайдерам или с фильтром провайдера / аккаунта Stripe (visitFilters).
       // Сборщик недоступен — экран всё равно открывается, без визитов
-      if (provider !== 'all' || Object.keys(filters).length > 0) return { ...report, visits_status: 'filtered' };
+      const forVisits = visitFilters(provider, filters);
+      if (!forVisits) return { ...report, visits_status: 'filtered' };
       try {
-        const { first } = await visitsDays(visits, true);
-        const stats = liveVisits(await visits({ ...range, group: 'site', filters: {} }));
+        // первый день — с теми же фильтрами: аккаунт лендинг шлёт не с первого визита
+        const { first } = await visitsDays(visits, true, forVisits);
+        const stats = liveVisits(await visits({ ...range, group: 'site', filters: forVisits }));
         const byPeriod = new Map(visitSeries(stats, { ...range, granularity }).map((p) => [p.period, p.visits]));
         // группа, начавшаяся раньше первого дня визитов, неполная — визитов у неё нет, а не ноль
         const series = report.series.map((p) => {

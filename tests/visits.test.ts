@@ -149,6 +149,8 @@ describe('экран Visits', () => {
     });
     expect(data.series.map((p: { visits: number }) => p.visits)).toEqual([3, 54, 0]);
     expect(queries.at(-1)).toEqual({ from: '2026-10-19', to: '2026-10-21', group: null, filters: { site: ['a.example'], browser: ['facebook'] } });
+    const byAccount = await (await get(url, '/api/visits?account=solidgate&account=stripe:org&account=org')).json();
+    expect(byAccount.filters).toEqual({ account: ['solidgate', 'stripe:org'] }); // «org» — не формат аккаунта
   });
 
   it('разбивка по сайту и значения фильтра — без своего фильтра; в общем ответе экранов флаг visits', async () => {
@@ -177,8 +179,8 @@ describe('экран Visits', () => {
     expect((await (await get(plainUrl, '/api/values?mode=visits&dimension=site')).json()).values).toEqual([]);
   });
 
-  it('Conversion: визиты и Visit → Trial в тренде — без тестовых сайтов; до первого дня визитов — пусто; с фильтром или провайдером — без визитов', async () => {
-    const { url } = await start();
+  it('Conversion: визиты и Visit → Trial в тренде — без тестовых сайтов; до первого дня визитов — пусто; провайдер и аккаунт Stripe — по аккаунту пейволла, другие фильтры — без визитов', async () => {
+    const { url, queries } = await start();
     const range = 'period=custom&from=2026-10-18&to=2026-10-20';
     const data = await (await get(url, `/api/metrics?${range}`)).json();
     expect(data.visits_status).toBe('ok');
@@ -190,9 +192,18 @@ describe('экран Visits', () => {
     // неделя с понедельника 19.10 — целиком после первого дня визитов
     const week = await (await get(url, `/api/metrics?period=custom&from=2026-10-19&to=2026-10-25&granularity=week`)).json();
     expect(week.series.map((p: { visits: number; visit_to_trial: number }) => [p.visits, p.visit_to_trial])).toEqual([[7, 1 / 7]]);
-    for (const narrowed of [`${range}&country=US`, `${range}&provider=stripe`]) {
-      const res = await (await get(url, `/api/metrics?${narrowed}`)).json();
-      expect([res.visits_status, res.series[0].visits]).toEqual(['filtered', undefined]);
+    // провайдер и аккаунт Stripe переносятся на визиты — по аккаунту пейволла
+    const sentTo = async (q: string) => {
+      const res = await (await get(url, `/api/metrics?${range}&${q}`)).json();
+      return [res.visits_status, res.visits_status === 'ok' ? queries.at(-1)!.filters : null];
+    };
+    expect(await sentTo('provider=stripe')).toEqual(['ok', { account: ['stripe:org'] }]); // аккаунты Stripe из STRIPE_KEYS
+    expect(await sentTo('provider=solidgate')).toEqual(['ok', { account: ['solidgate'] }]);
+    expect(await sentTo('account=stripe:org')).toEqual(['ok', { account: ['stripe:org'] }]);
+    // визит не знает страну, банк, способ оплаты и канал Solidgate (форма или Apple / Google Pay)
+    for (const narrowed of ['country=US', 'account=solidgate:sgH2H', 'provider=solidgate&account=stripe:org']) {
+      const res = await (await get(url, `/api/metrics?${range}&${narrowed}`)).json();
+      expect([narrowed, res.visits_status, res.series[0].visits]).toEqual([narrowed, 'filtered', undefined]);
     }
     expect((await (await get(url, `/api/metrics?${range}&view=country`)).json()).visits_status).toBeUndefined(); // в разрезах визитов нет
   });

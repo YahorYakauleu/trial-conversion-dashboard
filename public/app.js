@@ -124,8 +124,8 @@ const MODES = {
     title: 'Paywall visits',
     api: '/api/visits',
     charts: 'visits-charts',
-    dimensions: ['site', 'device', 'os', 'browser'],
-    tabs: [['time', 'Trend'], ['site', 'Domains'], ['device', 'Devices'], ['os', 'OS'], ['browser', 'Browsers']],
+    dimensions: ['site', 'account', 'device', 'os', 'browser'],
+    tabs: [['time', 'Trend'], ['site', 'Domains'], ['account', 'Accounts'], ['device', 'Devices'], ['os', 'OS'], ['browser', 'Browsers']],
     hints: {
       time: 'Unique visits — browsers that saw the paywall for the first time, by day (New York)',
     },
@@ -209,6 +209,7 @@ const ACCOUNT_NAMES = {
   'stripe:inc': 'Stripe · Toggle Inc',
   'stripe:incorp': 'Stripe · Toggle Incorp',
   'stripe:eu': 'Stripe · Toggle EU',
+  solidgate: 'Solidgate', // у визитов: канал (форма или Apple / Google Pay) решает кнопка оплаты
   'solidgate:sg': 'Solidgate · Payment form',
   'solidgate:sgH2H': 'Solidgate · H2H (Apple / Google Pay)',
 };
@@ -1388,7 +1389,7 @@ function renderView(data) {
     const withVisits = data.visits_status === 'ok' || data.visits_status === 'unavailable';
     renderTable([periodColumn(timeHead('Trial start date')), ...(withVisits ? [VISITS_COLUMN, trials, VISIT_TO_TRIAL_COLUMN, ...rest] : CONVERSION_COLUMNS)], data.series);
     renderCharts(data.series);
-    if (data.visits_status === 'filtered') $('hint').textContent += '. Visits and Visit → Trial are shown only without filters and for all providers: visits are not split by account, country or bank';
+    if (data.visits_status === 'filtered') $('hint').textContent += '. Visits and Visit → Trial are shown without filters or with provider and Stripe account filters only: a visit has no country, bank or payment method, and Solidgate visits are not split into payment form and Apple / Google Pay';
     if (data.visits_status === 'unavailable') $('hint').textContent += `. Visits are unavailable: ${data.visits_error}`;
   } else if (state.view === 'decline_reason' && data.reason_banks) {
     renderTable(DECLINE_BANK_COLUMNS, data.reason_banks, { limit: true, empty: 'No declines for this reason in this period' });
