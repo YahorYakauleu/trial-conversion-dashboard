@@ -212,7 +212,7 @@ export function createApp({
   // поэтому цифры там те же, что на экранах
   const reports = {
     // Конверсия VPN: ?view=time|<измерение>|decline_reason&reason=<причина> (банки отказов этой причины)
-    metrics(query: Query) {
+    async metrics(query: Query) {
       const { now, provider, granularity, range, meta } = common(query);
       const view = [...DIMENSIONS, 'decline_reason'].find((v) => v === query.view) ?? 'time';
       const filters: Filters = parseFilters(query, DIMENSIONS);
@@ -229,7 +229,24 @@ export function createApp({
         const banks = view === 'decline_reason' && reason ? getDeclineBanks(store.db, options, reason) : null;
         return { totals, series: view === 'time' ? series : [], breakdown: [], reasons, reason_banks: banks };
       });
-      return { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, reason, ...data };
+      const report = { ...meta, retry_window_days: config.retryWindowDays, range, filters, view, reason, ...data };
+      if (view !== 'time' || !visits) return report;
+      // Визиты и Visit → Trial в тренде — только без фильтров и по всем провайдерам: визиты не делятся по аккаунту, стране, банку.
+      // Сборщик недоступен — экран всё равно открывается, без визитов
+      if (provider !== 'all' || Object.keys(filters).length > 0) return { ...report, visits_status: 'filtered' };
+      try {
+        const { first } = await visitsDays(visits);
+        const stats = await visits({ ...range, group: null, filters: {} });
+        const byPeriod = new Map(visitSeries(stats, { ...range, granularity }).map((p) => [p.period, p.visits]));
+        // группа, начавшаяся раньше первого дня визитов, неполная — визитов у неё нет, а не ноль
+        const series = report.series.map((p) => {
+          const count = p.period < first ? null : (byPeriod.get(p.period) ?? 0);
+          return { ...p, visits: count, visit_to_trial: count ? p.started / count : null };
+        });
+        return { ...report, series, visits_status: 'ok' };
+      } catch (error) {
+        return { ...report, visits_status: 'unavailable', visits_error: (error as Error).message };
+      }
     },
 
     // Отмены VPN: ?view=time|<измерение>|cancel_reason. Когорты по дню оформления триала

@@ -793,6 +793,21 @@ const CONVERSION_COLUMNS = [
     cell: (p) => `<td title="${num(p.vamp_events)} VAMP events">${decimal(p.vamp_per_100)}</td>`,
   },
 ];
+// Визиты на пейволл из сборщика — на тренде Conversion. Visit → Trial — оценка: в триалах есть и подписки мимо пейволла
+const VISITS_COLUMN = {
+  key: 'visits',
+  title: 'Visits',
+  tip: 'Уникальные визиты на пейволл в эти дни — из сборщика визитов. «—» — визитов ещё не собирали',
+  sort: (p) => p.visits ?? null,
+  cell: (p) => `<td>${p.visits === null || p.visits === undefined ? '—' : num(p.visits)}</td>`,
+};
+const VISIT_TO_TRIAL_COLUMN = {
+  key: 'visit_to_trial',
+  title: 'Visit → Trial',
+  tip: 'Триалы ÷ уникальные визиты. Оценка, завышенная: в триалах есть и подписки мимо пейволла (Funnelfox), а визит и триал одного человека бывают в разные дни — по неделям и месяцам ровнее',
+  sort: (p) => p.visit_to_trial ?? null,
+  cell: (p) => `<td>${pct(p.visit_to_trial)}</td>`,
+};
 const TURNOVER_COLUMNS = [
   { key: 'gross', title: 'Gross volume', tip: 'Сумма успешных списаний', sort: (p) => p.gross, cell: (p) => `<td>${usd(p.gross)}</td>` },
   { key: 'payments', title: 'Payments', tip: 'Число успешных списаний', sort: (p) => p.payments, cell: (p) => `<td>${num(p.payments)}</td>` },
@@ -1245,8 +1260,13 @@ function renderView(data) {
     return;
   }
   if (isTime) {
-    renderTable([periodColumn(timeHead('Trial start date')), ...CONVERSION_COLUMNS], data.series);
+    // визиты — первой колонкой, Visit → Trial — сразу после триалов; без фильтров и по всем провайдерам (src/server.ts)
+    const [trials, ...rest] = CONVERSION_COLUMNS;
+    const withVisits = data.visits_status === 'ok' || data.visits_status === 'unavailable';
+    renderTable([periodColumn(timeHead('Trial start date')), ...(withVisits ? [VISITS_COLUMN, trials, VISIT_TO_TRIAL_COLUMN, ...rest] : CONVERSION_COLUMNS)], data.series);
     renderCharts(data.series);
+    if (data.visits_status === 'filtered') $('hint').textContent += '. Visits and Visit → Trial are shown only without filters and for all providers: visits are not split by account, country or bank';
+    if (data.visits_status === 'unavailable') $('hint').textContent += `. Visits are unavailable: ${data.visits_error}`;
   } else if (state.view === 'decline_reason' && data.reason_banks) {
     renderTable(DECLINE_BANK_COLUMNS, data.reason_banks, { limit: true, empty: 'No declines for this reason in this period' });
     $('hint').innerHTML = `<button class="link-btn" id="drill-back">← All decline reasons</button> · ${esc(data.reason)}: declines by the issuing bank of the trial's card`;

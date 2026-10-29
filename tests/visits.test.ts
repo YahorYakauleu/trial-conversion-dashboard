@@ -112,7 +112,14 @@ describe('экран Visits', () => {
       if (q.group === 'site') return { time_zone: NY, rows: [day('2026-10-20', 2, 'b.example'), day('2026-10-20', 5, 'a.example')] };
       return { time_zone: NY, rows: [day('2026-10-19', 3), day('2026-10-20', 4)] };
     };
-    const app = createApp({ store: openStore(':memory:'), config: loadConfig(env), visits });
+    const store = openStore(':memory:');
+    // триал 20.10 по Нью-Йорку — для Visit → Trial на экране Conversion
+    const started = Date.parse('2026-10-20T15:00:00Z') / 1000;
+    store.upsertTrial({
+      provider: 'stripe', account: 'org', subscription_id: 'sub_1', trial_started_at: started, trial_ended_at: started + 3 * 86_400, first_invoice_id: null,
+      first_attempt_succeeded: null, paid_at: null, country: 'US', payment_method: 'apple_pay', card_brand: 'visa', bank: null, mid: 'org',
+    });
+    const app = createApp({ store, config: loadConfig(env), visits });
     const server = app.listen(0);
     await new Promise((resolve) => server.once('listening', resolve));
     closers.push(() => server.close());
@@ -160,6 +167,33 @@ describe('экран Visits', () => {
     expect((await get(plainUrl, '/api/visits')).status).toBe(404);
     expect((await (await get(plainUrl, '/api/turnover')).json()).visits).toBe(false);
     expect((await (await get(plainUrl, '/api/values?mode=visits&dimension=site')).json()).values).toEqual([]);
+  });
+
+  it('Conversion: визиты и Visit → Trial в тренде; до первого дня визитов — пусто; с фильтром или провайдером — без визитов', async () => {
+    const { url } = await start();
+    const range = 'period=custom&from=2026-10-18&to=2026-10-20';
+    const data = await (await get(url, `/api/metrics?${range}`)).json();
+    expect(data.visits_status).toBe('ok');
+    expect(data.series.map((p: { period: string; started: number; visits: number | null; visit_to_trial: number | null }) => [p.period, p.started, p.visits, p.visit_to_trial])).toEqual([
+      ['2026-10-18', 0, null, null], // раньше первого дня визитов
+      ['2026-10-19', 0, 3, 0],
+      ['2026-10-20', 1, 4, 0.25],
+    ]);
+    // неделя с понедельника 19.10 — целиком после первого дня визитов
+    const week = await (await get(url, `/api/metrics?period=custom&from=2026-10-19&to=2026-10-25&granularity=week`)).json();
+    expect(week.series.map((p: { visits: number; visit_to_trial: number }) => [p.visits, p.visit_to_trial])).toEqual([[7, 1 / 7]]);
+    for (const narrowed of [`${range}&country=US`, `${range}&provider=stripe`]) {
+      const res = await (await get(url, `/api/metrics?${narrowed}`)).json();
+      expect([res.visits_status, res.series[0].visits]).toEqual(['filtered', undefined]);
+    }
+    expect((await (await get(url, `/api/metrics?${range}&view=country`)).json()).visits_status).toBeUndefined(); // в разрезах визитов нет
+  });
+
+  it('Conversion при недоступном сборщике открывается — без визитов, с причиной', async () => {
+    const { url } = await start(true);
+    const res = await get(url, '/api/metrics?period=custom&from=2026-10-18&to=2026-10-20');
+    const data = await res.json();
+    expect([res.status, data.visits_status, data.visits_error, data.totals.started]).toEqual([200, 'unavailable', 'Visit collector is unavailable: fetch failed', 1]);
   });
 
   it('MCP: инструмент visits — с теми же цифрами, что у экрана', async () => {
