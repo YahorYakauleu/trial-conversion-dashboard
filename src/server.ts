@@ -205,7 +205,7 @@ export function createApp({
   const visitsDays = async (client: VisitsClient) => {
     const today = localDay(nowSec(), config.timeZones.stripe);
     const days = await client({ from: config.historyFromDay, to: today, group: null, filters: {} });
-    return { first: days.rows.find((r) => r.count + r.bots > 0)?.day ?? today, today };
+    return { first: days.rows.find((r) => r.count > 0)?.day ?? today, today };
   };
 
   // Отчёты экранов: параметры — как в адресе запроса, ответ — JSON экрана. Ими же отвечают инструменты MCP (src/mcp.ts),

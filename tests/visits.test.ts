@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 const NY = 'America/New_York';
-const day = (d: string, count: number, bots = 0, value: string | null = null) => ({ day: d, value, count, bots });
+const day = (d: string, count: number, value: string | null = null) => ({ day: d, value, count });
 
 describe('клиент сборщика', () => {
   it('спрашивает /api/stats события visit с разрезом и фильтрами, с токеном в заголовке; ответ держит минуту', async () => {
@@ -67,34 +67,34 @@ describe('клиент сборщика', () => {
 });
 
 describe('ряд и разбивка', () => {
-  const stats: VisitStats = { time_zone: NY, rows: [day('2026-10-19', 3, 1), day('2026-10-21', 4), day('2026-10-27', 2, 2)] };
+  const stats: VisitStats = { time_zone: NY, rows: [day('2026-10-19', 3), day('2026-10-21', 4), day('2026-10-27', 2)] };
 
   it('по дням — с нулевыми днями; по неделям с понедельника; по месяцам; итоги', () => {
     const range = { from: '2026-10-19', to: '2026-10-27' };
     const byDay = visitSeries(stats, { ...range, granularity: 'day' });
     expect(byDay).toHaveLength(9);
     expect(byDay.slice(0, 3)).toEqual([
-      { period: '2026-10-19', period_end: '2026-10-19', visits: 3, bots: 1 },
-      { period: '2026-10-20', period_end: '2026-10-20', visits: 0, bots: 0 },
-      { period: '2026-10-21', period_end: '2026-10-21', visits: 4, bots: 0 },
+      { period: '2026-10-19', period_end: '2026-10-19', visits: 3 },
+      { period: '2026-10-20', period_end: '2026-10-20', visits: 0 },
+      { period: '2026-10-21', period_end: '2026-10-21', visits: 4 },
     ]);
     expect(visitSeries(stats, { ...range, granularity: 'week' })).toEqual([
-      { period: '2026-10-19', period_end: '2026-10-25', visits: 7, bots: 1 },
-      { period: '2026-10-26', period_end: '2026-10-27', visits: 2, bots: 2 },
+      { period: '2026-10-19', period_end: '2026-10-25', visits: 7 },
+      { period: '2026-10-26', period_end: '2026-10-27', visits: 2 },
     ]);
-    expect(visitSeries(stats, { ...range, granularity: 'month' })).toEqual([{ period: '2026-10-19', period_end: '2026-10-27', visits: 9, bots: 3 }]);
-    expect(visitTotals(stats)).toEqual({ visits: 9, bots: 3 });
+    expect(visitSeries(stats, { ...range, granularity: 'month' })).toEqual([{ period: '2026-10-19', period_end: '2026-10-27', visits: 9 }]);
+    expect(visitTotals(stats)).toEqual({ visits: 9 });
   });
 
   it('разбивка: дни одного значения складываются; по убыванию, доля — от всех визитов, «не определено» — в конце', () => {
     const bySite: VisitStats = {
       time_zone: NY,
-      rows: [day('2026-10-20', 2, 0, 'b.example'), day('2026-10-20', 1, 0, null), day('2026-10-20', 3, 1, 'a.example'), day('2026-10-21', 2, 0, 'b.example')],
+      rows: [day('2026-10-20', 2, 'b.example'), day('2026-10-20', 1, null), day('2026-10-20', 3, 'a.example'), day('2026-10-21', 2, 'b.example')],
     };
     expect(visitBreakdown(bySite)).toEqual([
-      { value: 'b.example', visits: 4, bots: 0, share: 0.5 },
-      { value: 'a.example', visits: 3, bots: 1, share: 0.375 },
-      { value: null, visits: 1, bots: 0, share: 0.125 },
+      { value: 'b.example', visits: 4, share: 0.5 },
+      { value: 'a.example', visits: 3, share: 0.375 },
+      { value: null, visits: 1, share: 0.125 },
     ]);
   });
 });
@@ -109,8 +109,8 @@ describe('экран Visits', () => {
     const visits = async (q: VisitQuery): Promise<VisitStats> => {
       queries.push(q);
       if (fail) throw new Error('Visit collector is unavailable: fetch failed');
-      if (q.group === 'site') return { time_zone: NY, rows: [day('2026-10-20', 2, 0, 'b.example'), day('2026-10-20', 5, 1, 'a.example')] };
-      return { time_zone: NY, rows: [day('2026-10-19', 3), day('2026-10-20', 4, 1)] };
+      if (q.group === 'site') return { time_zone: NY, rows: [day('2026-10-20', 2, 'b.example'), day('2026-10-20', 5, 'a.example')] };
+      return { time_zone: NY, rows: [day('2026-10-19', 3), day('2026-10-20', 4)] };
     };
     const app = createApp({ store: openStore(':memory:'), config: loadConfig(env), visits });
     const server = app.listen(0);
@@ -129,7 +129,7 @@ describe('экран Visits', () => {
       range: { from: '2026-10-19', to: '2026-10-21' }, // раньше 19.10 визитов нет
       filters: { site: ['a.example'] }, // device=phone — не значение сборщика
       view: 'time',
-      totals: { visits: 7, bots: 1 },
+      totals: { visits: 7 },
       breakdown: [],
       role: 'admin',
     });

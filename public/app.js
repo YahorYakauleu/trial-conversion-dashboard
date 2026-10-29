@@ -127,7 +127,7 @@ const MODES = {
     dimensions: ['site', 'path', 'device', 'os'],
     tabs: [['time', 'Trend'], ['site', 'Sites'], ['path', 'Pages'], ['device', 'Devices'], ['os', 'OS']],
     hints: {
-      time: 'Unique visits — browsers that saw the paywall for the first time, by day (New York). Bots are counted apart and not included',
+      time: 'Unique visits — browsers that saw the paywall for the first time, by day (New York)',
     },
     collector: true, // экран есть, только если подключён сборщик визитов
     noExport: true, // сборщик хранит только счётчики — выгружать списком нечего
@@ -586,11 +586,9 @@ function renderTurnoverKpis(t, range) {
 
 function renderVisitsKpis(t, range) {
   const days = Math.round((Date.parse(range.to) - Date.parse(range.from)) / DAY_MS) + 1;
-  const all = t.visits + t.bots;
   kpiCards([
     ['Unique visits', num(t.visits), `${fullDay(range.from)} — ${fullDay(range.to)}`, 'Браузеры, впервые увидевшие пейволл: повторные заходы и перезагрузки не считаются'],
     ['Avg. per day', num(Math.round(t.visits / days)), `over ${num(days)} ${days === 1 ? 'day' : 'days'}`, 'Уникальные визиты за период ÷ число дней'],
-    ['Bots filtered', num(t.bots), all ? `${pct(t.bots / all)} of all hits` : '—', 'Известные боты и запросы без User-Agent — в визиты не входят'],
   ]);
 }
 
@@ -799,7 +797,6 @@ const TURNOVER_COLUMNS = [
 ];
 const VISIT_COLUMNS = [
   { key: 'visits', title: 'Unique visits', tip: 'Браузеры, впервые увидевшие пейволл', sort: (p) => p.visits, cell: (p) => `<td>${num(p.visits)}</td>` },
-  { key: 'bots', title: 'Bots', tip: 'Отсеянные боты — в визиты не входят', sort: (p) => p.bots, cell: (p) => `<td>${num(p.bots)}</td>` },
 ];
 const VISIT_SHARE_COLUMN = { key: 'share', title: 'Share of visits', tip: 'Доля в уникальных визитах за период', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
 const SHARE_COLUMN = { key: 'share', title: 'Share of gross', tip: 'Доля в обороте за период', sort: (r) => r.share, cell: (r) => shareCell(r.share) };
@@ -1568,7 +1565,7 @@ function renderVisitsChart(series) {
       ...common,
       plugins: {
         legend: { display: false },
-        tooltip: chartTooltip(series, (c) => ` Unique visits: ${num(series[c.dataIndex].visits)} · bots: ${num(series[c.dataIndex].bots)}`),
+        tooltip: chartTooltip(series, (c) => ` Unique visits: ${num(series[c.dataIndex].visits)}`),
       },
       scales: { x, y: { min: 0, grid: { color: grid }, border: { display: false }, ticks: { color: muted, precision: 0 } } },
     },

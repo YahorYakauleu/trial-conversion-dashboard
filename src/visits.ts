@@ -9,9 +9,9 @@ export type VisitDimension = (typeof VISIT_DIMENSIONS)[number];
 // Фильтр — список значений, 'none' — «не определено» (как на других экранах)
 export type VisitFilters = Partial<Record<VisitDimension, string[]>>;
 
+// Боты сборщик отсекает сам и считает отдельно — на экране их нет
 export interface VisitCounts {
   visits: number; // уникальные визиты
-  bots: number; // отсеянные боты — в визиты не входят
 }
 
 export interface VisitPoint extends VisitCounts {
@@ -34,7 +34,7 @@ export interface VisitQuery {
 // Ответ сборщика: строки по дням (и значению разреза), сутки — по его часовому поясу
 export interface VisitStats {
   time_zone: string;
-  rows: { day: string; value: string | null; count: number; bots: number }[];
+  rows: { day: string; value: string | null; count: number }[];
 }
 
 export type VisitsClient = (query: VisitQuery) => Promise<VisitStats>;
@@ -61,9 +61,9 @@ export function createVisitsClient(collector: { url: string; token: string }, tt
   };
 }
 
-const zero = (): VisitCounts => ({ visits: 0, bots: 0 });
-const add = (a: VisitCounts, b: VisitCounts): VisitCounts => ({ visits: a.visits + b.visits, bots: a.bots + b.bots });
-const counts = (r: VisitStats['rows'][number]): VisitCounts => ({ visits: r.count, bots: r.bots });
+const zero = (): VisitCounts => ({ visits: 0 });
+const add = (a: VisitCounts, b: VisitCounts): VisitCounts => ({ visits: a.visits + b.visits });
+const counts = (r: VisitStats['rows'][number]): VisitCounts => ({ visits: r.count });
 
 export const visitTotals = (stats: VisitStats): VisitCounts => stats.rows.reduce((s, r) => add(s, counts(r)), zero());
 
