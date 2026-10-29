@@ -33,12 +33,12 @@ describe('клиент сборщика', () => {
     const url = await listen(collector);
     closers.push(() => collector.close());
     const client = createVisitsClient({ url, token: 'tok-123' });
-    const query: VisitQuery = { from: '2026-10-20', to: '2026-10-21', group: 'path', filters: { site: ['a.example', 'b.example'], device: ['mobile'] } };
+    const query: VisitQuery = { from: '2026-10-20', to: '2026-10-21', group: 'os', filters: { site: ['a.example', 'b.example'], device: ['mobile'] } };
 
     expect(await client(query)).toEqual({ time_zone: NY, rows: [day('2026-10-20', 5)] });
     await client(query); // второй раз — из памяти
     expect(seen).toEqual([
-      { url: '/api/stats?from=2026-10-20&to=2026-10-21&event=visit&group=path&site=a.example&site=b.example&device=mobile', auth: 'Bearer tok-123' },
+      { url: '/api/stats?from=2026-10-20&to=2026-10-21&event=visit&group=os&site=a.example&site=b.example&device=mobile', auth: 'Bearer tok-123' },
     ]);
   });
 

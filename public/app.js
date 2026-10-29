@@ -124,8 +124,8 @@ const MODES = {
     title: 'Paywall visits',
     api: '/api/visits',
     charts: 'visits-charts',
-    dimensions: ['site', 'path', 'device', 'os'],
-    tabs: [['time', 'Trend'], ['site', 'Sites'], ['path', 'Pages'], ['device', 'Devices'], ['os', 'OS']],
+    dimensions: ['site', 'device', 'os'],
+    tabs: [['time', 'Trend'], ['site', 'Domains'], ['device', 'Devices'], ['os', 'OS']],
     hints: {
       time: 'Unique visits — browsers that saw the paywall for the first time, by day (New York)',
     },
@@ -167,7 +167,7 @@ const PRODUCT_NAMES = { vpn: 'VPN', esim: 'eSIM' };
 const DIMENSION_TITLES = {
   account: 'Account', mid: 'MID', country: 'Country', payment_method: 'Payment method', bank: 'Issuing bank', card_brand: 'Card brand',
   destination: 'Destination', package: 'Package', risk: 'Radar risk score', merchant: 'Visa merchant', funding: 'Card type',
-  trial_type: 'Trial type', trial_length: 'Trial length', site: 'Site', path: 'Page', device: 'Device', os: 'OS',
+  trial_type: 'Trial type', trial_length: 'Trial length', site: 'Domain', device: 'Device', os: 'OS',
   payment_number: 'Payment number', reason: 'Reason', days_to_report: 'Days to report', utm_source: 'Traffic source', campaign: 'Campaign', landing_domain: 'Landing domain',
 };
 // Интерфейс — на английском, с общепринятыми названиями метрик; при наведении — короткое пояснение по-русски (data-tip)
@@ -197,7 +197,6 @@ const TAB_TIPS = {
   campaign: 'Кампания клиента Stripe — по campaign_id, подписана campaign_name',
   landing_domain: 'Домен лендинга, с которого пришёл клиент Stripe',
   site: 'Домен лендинга',
-  path: 'Путь страницы — без параметров адреса (utm, fbclid…)',
   device: 'Телефон, планшет или компьютер — по User-Agent',
   os: 'Операционная система — по User-Agent',
   destination: 'Страна или регион пакета eSIM',

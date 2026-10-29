@@ -101,7 +101,6 @@ const FILTER_FORMAT: Record<AnyDimension, RegExp> = {
   campaign: /^.{1,120}$/, // VAMP: ID кампании
   landing_domain: /^[a-z0-9.-]{1,120}$/, // VAMP: домен лендинга
   site: /^[a-z0-9.:-]{1,80}$/, // Visits: домен лендинга, у локального — с портом
-  path: /^(\/.{0,63}|\(other\))$/, // Visits: путь страницы; «(other)» — пути сверх лимита сборщика
   device: /^(mobile|tablet|desktop)$/,
   os: /^[a-z]{1,16}$/,
 };
