@@ -66,7 +66,7 @@ import {
   VAMP_FILTERS,
   type VampDimension,
 } from './vamp.js';
-import { createVisitsClient, VISIT_DIMENSIONS, visitBreakdown, visitSeries, visitTotals, type VisitDimension, type VisitsClient } from './visits.js';
+import { createVisitsClient, liveVisits, VISIT_DIMENSIONS, visitBreakdown, visitSeries, visitTotals, type VisitDimension, type VisitsClient } from './visits.js';
 
 // одинаково работает из src/ (tsx, vitest) и из dist/ (prod)
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -202,10 +202,12 @@ export function createApp({
   };
 
   // Визиты: сутки — по Нью-Йорку, как у сборщика и Stripe; «All» — с первого дня, когда в сборщике есть визиты
-  const visitsDays = async (client: VisitsClient) => {
+  // live — только боевые сайты, без тестовых сборок лендинга (для Visit → Trial на Conversion)
+  const visitsDays = async (client: VisitsClient, live = false) => {
     const today = localDay(nowSec(), config.timeZones.stripe);
-    const days = await client({ from: config.historyFromDay, to: today, group: null, filters: {} });
-    return { first: days.rows.find((r) => r.count > 0)?.day ?? today, today };
+    const all = await client({ from: config.historyFromDay, to: today, group: live ? 'site' : null, filters: {} });
+    const days = (live ? liveVisits(all) : all).rows.filter((r) => r.count > 0).map((r) => r.day);
+    return { first: days.length ? days.reduce((a, b) => (a < b ? a : b)) : today, today };
   };
 
   // Отчёты экранов: параметры — как в адресе запроса, ответ — JSON экрана. Ими же отвечают инструменты MCP (src/mcp.ts),
@@ -235,8 +237,8 @@ export function createApp({
       // Сборщик недоступен — экран всё равно открывается, без визитов
       if (provider !== 'all' || Object.keys(filters).length > 0) return { ...report, visits_status: 'filtered' };
       try {
-        const { first } = await visitsDays(visits);
-        const stats = await visits({ ...range, group: null, filters: {} });
+        const { first } = await visitsDays(visits, true);
+        const stats = liveVisits(await visits({ ...range, group: 'site', filters: {} }));
         const byPeriod = new Map(visitSeries(stats, { ...range, granularity }).map((p) => [p.period, p.visits]));
         // группа, начавшаяся раньше первого дня визитов, неполная — визитов у неё нет, а не ноль
         const series = report.series.map((p) => {

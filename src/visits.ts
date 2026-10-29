@@ -63,6 +63,11 @@ export function createVisitsClient(collector: { url: string; token: string }, tt
   };
 }
 
+// Тестовые сборки лендинга (dev-…, stage-…, локальная) шлют визиты в тот же сборщик. На экране Visits они видны — по ним
+// проверяют лендинг, — а в Visit → Trial не входят: триалы оформляют на боевых лендингах
+const TEST_SITE = /^(dev|stage)-|^localhost(:|$)|^127\.0\.0\.1(:|$)|\.pages\.dev$/;
+export const liveVisits = (stats: VisitStats): VisitStats => ({ ...stats, rows: stats.rows.filter((r) => !TEST_SITE.test(r.value ?? '')) });
+
 const zero = (): VisitCounts => ({ visits: 0 });
 const add = (a: VisitCounts, b: VisitCounts): VisitCounts => ({ visits: a.visits + b.visits });
 const counts = (r: VisitStats['rows'][number]): VisitCounts => ({ visits: r.count });
