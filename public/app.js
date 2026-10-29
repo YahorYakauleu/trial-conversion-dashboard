@@ -233,6 +233,8 @@ const ICONS = {
   right: svg('<path d="m9 18 6-6-6-6"/>'),
   check: svg('<path d="M5 12.5 10 17.5 19 7"/>', 3),
   download: svg('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
+  eyeOff: svg('<path d="M9.9 9.9a3 3 0 1 0 4.2 4.2"/><path d="M10.7 5.1A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13 13 0 0 1-1.7 2.7"/><path d="M6.6 6.6A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="m2 2 20 20"/>'),
+  marker: svg('<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>'),
 };
 
 // --- состояние из адреса страницы
@@ -1074,33 +1076,97 @@ function sortRows(rows, columns) {
 
 let table = null; // текущие колонки и строки — для пересортировки без запроса
 
+// Скрытые колонки — по экранам, в этом браузере. Нет доступа к хранилищу (приватный режим) — помним до перезагрузки
+const HIDDEN_KEY = 'hidden-columns';
+const hiddenColumns = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? '{}');
+    return saved && typeof saved === 'object' ? saved : {};
+  } catch {
+    return {};
+  }
+})();
+const hiddenSet = () => new Set(hiddenColumns[state.mode] ?? []);
+function saveHidden(keys) {
+  if (keys.length) hiddenColumns[state.mode] = keys;
+  else delete hiddenColumns[state.mode];
+  try {
+    localStorage.setItem(HIDDEN_KEY, JSON.stringify(hiddenColumns));
+  } catch {}
+}
+
+// Выделение для фокуса: закреплённые колонки (по ключу) и строки (по периоду или значению) живут, пока открыт этот экран и вкладка
+const pins = { scope: '', columns: new Set(), rows: new Set() };
+const rowKey = (r) => String(r.period ?? r.value ?? r.reason ?? r.code ?? r.outcome ?? r.attempt ?? r.day ?? '');
+let hoverColumn = 0; // номер колонки под курсором (с 1), 0 — нет
+
 function renderTable(columns, rows, { link = false, limit = false, empty = 'No data for this period' } = {}) {
   const sort = state.sort ?? defaultSort();
   const sorted = sortRows(rows, columns);
   const shown = limit && !state.showAll ? sorted.slice(0, ROW_LIMIT) : sorted;
-  table = { columns, rows, link, limit, empty, shown };
+  const hidden = hiddenSet();
+  // первая колонка — дата или значение разреза — не скрывается
+  const visible = columns.filter((c, i) => i === 0 || !hidden.has(c.key));
+  const scope = `${state.mode}|${state.view}|${state.drill ?? ''}`;
+  if (pins.scope !== scope) Object.assign(pins, { scope, columns: new Set(), rows: new Set() });
+  table = { columns, rows, link, limit, empty, shown, visible };
   const canExport = !MODES[state.mode].noExport;
-  $('thead').innerHTML = `<tr>${columns
-    .map((c) => {
+  const tools = (c) =>
+    `<span class="col-tools"><button class="col-tool${pins.columns.has(c.key) ? ' on' : ''}" data-mark-col="${c.key}" data-tip="Выделить колонку" aria-label="Highlight column">${ICONS.marker}</button><button class="col-tool" data-hide-col="${c.key}" data-tip="Скрыть колонку — вернуть можно в Columns" aria-label="Hide column">${ICONS.eyeOff}</button></span>`;
+  $('thead').innerHTML = `<tr>${visible
+    .map((c, i) => {
       const on = sort?.key === c.key;
       const arrow = on && sort.dir === 'asc' ? '↑' : '↓';
-      return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button class="sort" data-sort="${c.key}"${c.tip ? ` data-tip="${esc(c.tip)}"` : ''}>${c.title}<span class="arrow">${arrow}</span></button></th>`;
+      return `<th class="${on ? 'sorted' : ''}" aria-sort="${on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}">${i ? tools(c) : ''}<button class="sort" data-sort="${c.key}"${c.tip ? ` data-tip="${esc(c.tip)}"` : ''}>${c.title}<span class="arrow">${arrow}</span></button></th>`;
     })
     .join('')}${canExport ? '<th class="export-cell"></th>' : ''}</tr>`;
   const exportCell = (i) =>
     canExport
       ? `<td class="export-cell"><button class="row-export" data-row="${i}" data-tip="Выгрузить записи этой строки списком (CSV)" aria-label="Export rows">${ICONS.download}</button></td>`
       : '';
+  // маркер выделения строки — в начале первой ячейки, виден при наведении
+  const rowMark = (i) => `<button class="row-mark" data-mark-row="${i}" data-tip="Выделить строку" aria-label="Highlight row">${ICONS.marker}</button>`;
   $('rows').innerHTML =
     shown
       .map((r, i) => {
-        const cls = [link && 'link', r.anomaly && 'anomaly'].filter(Boolean).join(' '); // anomaly — строка VAMP с ratio заметно выше среднего
-        return `<tr${cls ? ` class="${cls}"` : ''}${link ? ` data-value="${esc(r.value ?? 'none')}"` : ''}>${columns.map((c) => c.cell(r)).join('')}${exportCell(i)}</tr>`;
+        const cls = [link && 'link', r.anomaly && 'anomaly', pins.rows.has(rowKey(r)) && 'hl'].filter(Boolean).join(' '); // anomaly — строка VAMP с ratio заметно выше среднего
+        const cells = visible.map((c, j) => (j ? c.cell(r) : c.cell(r).replace(/^<td([^>]*)>/, `<td$1>${rowMark(i)}`))).join('');
+        return `<tr${cls ? ` class="${cls}"` : ''}${link ? ` data-value="${esc(r.value ?? 'none')}"` : ''}>${cells}${exportCell(i)}</tr>`;
       })
-      .join('') || `<tr><td colspan="${columns.length + Number(canExport)}" class="muted">${empty}</td></tr>`;
+      .join('') || `<tr><td colspan="${visible.length + Number(canExport)}" class="muted">${empty}</td></tr>`;
   $('more').hidden = !limit || rows.length <= ROW_LIMIT || state.showAll;
   $('show-all').textContent = `Show all (${num(rows.length)})`;
+  const hiddenCount = columns.length - visible.length;
+  $('columns').querySelector('span').textContent = hiddenCount ? `Columns · ${hiddenCount} hidden` : 'Columns';
+  $('columns').classList.toggle('active', hiddenCount > 0);
   buildFloatHead();
+  paintHighlights();
+}
+
+// Подсветка колонок — одним правилом CSS на колонку (по номеру среди видимых), а не классами на тысячах ячеек
+function paintHighlights() {
+  const cells = (n) => `.table-wrap tr > :nth-child(${n})::before, .float-head tr > :nth-child(${n})::before`;
+  const layer = (n, color) => `${cells(n)} { content: ''; position: absolute; inset: 0; pointer-events: none; background: ${color}; }`;
+  const rules = [];
+  if (hoverColumn) rules.push(layer(hoverColumn, 'var(--hl-hover)'));
+  for (const key of pins.columns) {
+    const n = (table?.visible ?? []).findIndex((c) => c.key === key) + 1;
+    if (n) rules.push(layer(n, 'var(--hl)'));
+  }
+  $('highlight-style').textContent = rules.join('\n');
+  $('clear-highlights').hidden = !pins.columns.size && !pins.rows.size;
+}
+
+function hideColumn(key) {
+  saveHidden([...hiddenSet(), key]);
+  pins.columns.delete(key);
+  renderTable(table.columns, table.rows, table);
+}
+
+function toggleColumnPin(key) {
+  if (pins.columns.has(key)) pins.columns.delete(key);
+  else pins.columns.add(key);
+  renderTable(table.columns, table.rows, table);
 }
 
 // Шапка таблицы при прокрутке страницы. У таблицы своя прокрутка вбок, а с ней CSS sticky не работает, поэтому —
@@ -1149,6 +1215,63 @@ function syncScroll(source) {
   }
 }
 for (const el of scrollers) el.addEventListener('scroll', () => syncScroll(el), { passive: true });
+
+// Перекрестие: колонка под курсором подсвечивается вместе со строкой (строку подсвечивает CSS)
+tableWrap.addEventListener('mouseover', (event) => {
+  const cell = event.target.closest('td, th');
+  const n = cell && !cell.classList.contains('export-cell') && cell.colSpan === 1 ? cell.cellIndex + 1 : 0;
+  if (n === hoverColumn) return;
+  hoverColumn = n;
+  paintHighlights();
+});
+tableWrap.addEventListener('mouseleave', () => {
+  hoverColumn = 0;
+  paintHighlights();
+});
+
+$('clear-highlights').addEventListener('click', () => {
+  pins.columns.clear();
+  pins.rows.clear();
+  renderTable(table.columns, table.rows, table);
+});
+
+// Колонки таблицы: какие показывать. Галочка меняет таблицу сразу; выбор запоминается для этого экрана
+$('columns').addEventListener('click', () => {
+  if (!table) return;
+  const options = table.columns.slice(1);
+  openPopover($('columns'), (el) => {
+    el.style.width = '260px';
+    const draw = () => {
+      const hidden = hiddenSet();
+      el.innerHTML = `
+        <div class="options" role="listbox" aria-multiselectable="true">${options
+          .map((c) => {
+            const on = !hidden.has(c.key);
+            return `<button class="option check${on ? ' on' : ''}" role="option" aria-selected="${on}" data-key="${c.key}"><span class="box">${ICONS.check}</span><span class="name">${c.title}</span></button>`;
+          })
+          .join('')}</div>
+        <div class="pop-foot"><button class="link-btn" data-show-all>Show all</button><span class="muted">${hidden.size ? `Hidden: ${options.filter((c) => hidden.has(c.key)).length}` : 'All shown'}</span><button class="btn primary" data-done>Done</button></div>`;
+    };
+    draw();
+    el.addEventListener('click', (event) => {
+      const option = event.target.closest('.option');
+      if (option) {
+        const hidden = hiddenSet();
+        if (hidden.has(option.dataset.key)) hidden.delete(option.dataset.key);
+        else hidden.add(option.dataset.key);
+        saveHidden([...hidden]);
+        renderTable(table.columns, table.rows, table);
+        draw();
+      }
+      if (event.target.closest('[data-show-all]')) {
+        saveHidden([]);
+        renderTable(table.columns, table.rows, table);
+        draw();
+      }
+      if (event.target.closest('[data-done]')) closePopover();
+    });
+  });
+});
 
 window.addEventListener('scroll', placeFloatHead, { passive: true });
 tableWrap.addEventListener('scroll', placeFloatHead, { passive: true });
@@ -1857,12 +1980,28 @@ function sortByHeader(event) {
   saveUrl();
   renderTable(table.columns, table.rows, table);
 }
-$('thead').addEventListener('click', sortByHeader);
-floatHead.addEventListener('click', sortByHeader);
+// Шапка: значки «выделить» и «скрыть» у колонки, иначе — сортировка
+function onHeadClick(event) {
+  const hide = event.target.closest('[data-hide-col]');
+  if (hide) return hideColumn(hide.dataset.hideCol);
+  const mark = event.target.closest('[data-mark-col]');
+  if (mark) return toggleColumnPin(mark.dataset.markCol);
+  sortByHeader(event);
+}
+$('thead').addEventListener('click', onHeadClick);
+floatHead.addEventListener('click', onHeadClick);
 
 $('rows').addEventListener('click', (event) => {
   const exportButton = event.target.closest('.row-export');
   if (exportButton) return void exportCsv(rowPatch(table.shown[+exportButton.dataset.row]), exportButton);
+  const markButton = event.target.closest('.row-mark');
+  if (markButton) {
+    const key = rowKey(table.shown[+markButton.dataset.markRow]);
+    if (pins.rows.has(key)) pins.rows.delete(key);
+    else pins.rows.add(key);
+    markButton.closest('tr').classList.toggle('hl', pins.rows.has(key));
+    return void paintHighlights();
+  }
   const row = event.target.closest('tr.link');
   if (loading || !row) return; // строки старой вкладки, пока грузится новая
   if (kind() === 'conversion' && state.view === 'decline_reason' && !state.drill) return void openReason(row.dataset.value);

@@ -22,6 +22,7 @@
 <body>
 <!-- Копия шапки таблицы, закреплённая у верха экрана (app.js → buildFloatHead): вне панелей — у них backdrop-filter,
      внутри него position: fixed считается от панели, а не от окна -->
+<style id="highlight-style"></style>
 <div class="float-head" id="float-head" hidden aria-hidden="true"><table><thead></thead></table><div class="x-scroll"><div></div></div></div>
 <div class="layout">
   <!-- Панель выборки: экран, провайдер, период и фильтры по измерениям -->
@@ -107,6 +108,11 @@
           <button data-v="day">Day</button><button data-v="week">Week</button><button data-v="month">Month</button>
         </div>
         <span class="hint" id="hint"></span>
+        <button class="link-btn" id="clear-highlights" hidden>Clear highlights</button>
+        <button class="btn" id="columns" data-tip="Какие колонки показывать в таблице. Скрыть колонку можно и значком в её названии">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>
+          <span>Columns</span>
+        </button>
         <button class="btn" id="export" data-tip="Выгрузить записи текущей выборки списком (CSV): ID в Stripe и Solidgate, ссылки на Stripe">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
           <span>Export CSV</span>

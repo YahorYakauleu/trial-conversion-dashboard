@@ -126,6 +126,7 @@ button, select, input { font: inherit; color: var(--text); }
 .btn.spinning svg { animation: spin 1s linear infinite; }
 .btn.primary { background: var(--accent); border-color: transparent; color: var(--on-accent); font-weight: 600; justify-content: center; }
 .btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+.btn.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 @keyframes spin { to { transform: rotate(360deg); } }
 .seg {
   display: inline-flex; padding: 3px; gap: 2px; border-radius: 11px;
@@ -292,6 +293,23 @@ tbody tr:hover .row-export, .row-export:focus-visible { opacity: 1; }
 .x-scroll::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
 .x-scroll::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--muted) 70%, transparent); }
 .float-head .x-scroll { margin: 0; }
+/* Выделение для фокуса: --hl — закреплённые колонки и строки, --hl-hover — колонка под курсором (строку подсвечивает
+   обычный hover). Колонки красит одно правило на колонку из app.js (paintHighlights), слоем ::before поверх фона ячейки,
+   строки — ::after: на пересечении слои складываются и подсветка ярче */
+:root { --hl: color-mix(in srgb, var(--accent) 16%, transparent); --hl-hover: color-mix(in srgb, var(--accent) 7%, transparent); }
+.table-wrap th, .table-wrap td, .float-head th { position: relative; }
+.table-wrap tr.hl > td::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: var(--hl); }
+/* Значки в названии колонки — «выделить» и «скрыть»: в зазоре между соседними названиями, видны при наведении */
+.col-tools { position: absolute; left: -15px; top: 50%; transform: translateY(-50%); z-index: 2; display: flex; gap: 2px; }
+.col-tool, .row-mark { all: unset; box-sizing: border-box; display: grid; place-items: center; border-radius: 3px; color: var(--muted); cursor: pointer; opacity: 0; }
+.col-tool { width: 14px; height: 14px; background: var(--surface-solid); }
+.col-tool svg, .row-mark svg { width: 12px; height: 12px; }
+.col-tool:hover, .row-mark:hover { color: var(--text); }
+.col-tool.on, tr.hl .row-mark { color: var(--accent); }
+th:hover .col-tool, .col-tool.on, .col-tool:focus-visible, tbody tr:hover .row-mark, tr.hl .row-mark, .row-mark:focus-visible { opacity: 1; }
+.col-tool:focus-visible, .row-mark:focus-visible { outline: 2px solid var(--accent); }
+/* маркер строки — у левого края первой ячейки */
+.row-mark { position: absolute; left: 2px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; z-index: 2; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 th, td { padding: 10px 16px; text-align: right; white-space: nowrap; border-top: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
