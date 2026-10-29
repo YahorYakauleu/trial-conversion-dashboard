@@ -1083,6 +1083,8 @@ function renderTable(columns, rows, { link = false, limit = false, empty = 'No d
 // Колонки — той же ширины, что у настоящей, сдвиг вбок — вместе с таблицей
 const floatHead = $('float-head');
 const tableWrap = $('thead').closest('.table-wrap');
+// Полосы прокрутки вбок над таблицей и под копией шапки — двигаются вместе с таблицей
+const scrollers = [tableWrap, $('x-scroll'), floatHead.querySelector('.x-scroll')];
 
 function placeFloatHead() {
   const { top, bottom, left } = tableWrap.getBoundingClientRect();
@@ -1091,6 +1093,8 @@ function placeFloatHead() {
   floatHead.style.left = `${left}px`;
   floatHead.style.width = `${tableWrap.clientWidth}px`;
   floatHead.firstElementChild.style.transform = `translateX(${-tableWrap.scrollLeft}px)`;
+  const first = floatHead.querySelector('th');
+  if (first) first.style.transform = `translateX(${tableWrap.scrollLeft}px)`; // первый столбец — на месте, как в таблице
 }
 
 function buildFloatHead() {
@@ -1100,8 +1104,26 @@ function buildFloatHead() {
   copy.style.width = `${tableWrap.querySelector('table').offsetWidth}px`;
   const widths = [...$('thead').querySelectorAll('th')].map((th) => th.getBoundingClientRect().width);
   copy.querySelectorAll('th').forEach((th, i) => (th.style.width = `${widths[i]}px`));
+  const overflow = tableWrap.scrollWidth > tableWrap.clientWidth + 1;
+  for (const bar of scrollers.slice(1)) {
+    bar.hidden = !overflow;
+    bar.firstElementChild.style.width = `${tableWrap.scrollWidth}px`;
+  }
   placeFloatHead();
 }
+
+// Прокрутили одну полосу — остальные следом. Выставленное здесь значение запоминается: событие прокрутки от него приходит
+// позже, и без этого оно вернуло бы ведущую полосу назад, пока её ещё тянут. Допуск — scrollLeft бывает дробным
+const syncedTo = new Map();
+function syncScroll(source) {
+  if (syncedTo.get(source) === source.scrollLeft) return void syncedTo.delete(source);
+  for (const el of scrollers) {
+    if (el === source || Math.abs(el.scrollLeft - source.scrollLeft) < 1) continue;
+    el.scrollLeft = source.scrollLeft;
+    syncedTo.set(el, el.scrollLeft);
+  }
+}
+for (const el of scrollers) el.addEventListener('scroll', () => syncScroll(el), { passive: true });
 
 window.addEventListener('scroll', placeFloatHead, { passive: true });
 tableWrap.addEventListener('scroll', placeFloatHead, { passive: true });

@@ -86,7 +86,7 @@ button, select, input { font: inherit; color: var(--text); }
   display: flex; flex-direction: column; gap: 20px; padding: 20px 16px 16px;
   background: var(--sidebar); border-right: 1px solid var(--border); backdrop-filter: var(--blur);
 }
-.content { min-width: 0; width: 100%; max-width: 1240px; padding: 20px 28px 64px; }
+.content { min-width: 0; width: 100%; padding: 20px 28px 64px; }
 
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-mark { width: 32px; height: 32px; flex: none; display: block; filter: drop-shadow(0 6px 16px var(--accent-soft)); }
@@ -279,6 +279,19 @@ tbody tr:hover .row-export, .row-export:focus-visible { opacity: 1; }
 .table-wrap { overflow-x: auto; margin: -4px -16px -16px; }
 .float-head { position: fixed; top: 0; z-index: 5; overflow: hidden; background: var(--surface-solid); box-shadow: 0 1px 0 var(--border), var(--shadow); }
 .float-head table { table-layout: fixed; }
+/* Первый столбец — название строки (банк, страна…) — не уезжает при прокрутке вбок. Фон непрозрачный: иначе под ним
+   просвечивают соседние ячейки. В копии шапки его на месте держит сдвиг из app.js (placeFloatHead) */
+.table-wrap th:first-child, .table-wrap td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface-solid); box-shadow: inset -1px 0 0 var(--border); }
+.float-head th:first-child { position: relative; z-index: 1; background: var(--surface-solid); box-shadow: inset -1px 0 0 var(--border); }
+/* Полоса прокрутки вбок — над таблицей и под прилипшей шапкой, чтобы не листать к низу таблицы. Ей задан свой вид
+   (::-webkit-scrollbar): иначе на macOS полоса без содержимого видна только во время прокрутки. Стандартные scrollbar-width
+   и scrollbar-color не задаём — с ними Chrome отключает ::-webkit-scrollbar */
+.x-scroll { overflow-x: auto; overflow-y: hidden; margin: -8px -16px 8px; }
+.x-scroll > div { height: 1px; }
+.x-scroll::-webkit-scrollbar { height: 10px; }
+.x-scroll::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+.x-scroll::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--muted) 70%, transparent); }
+.float-head .x-scroll { margin: 0; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 th, td { padding: 10px 16px; text-align: right; white-space: nowrap; border-top: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; }
@@ -288,8 +301,10 @@ td .n { color: var(--muted); margin-left: 6px; }
 tr.link { cursor: pointer; }
 /* VAMP: ratio строки заметно выше среднего — подсказка цветом, само значение «× avg» всегда текстом */
 tr.anomaly td { background: color-mix(in srgb, var(--danger) 6%, transparent); }
+.table-wrap tr.anomaly td:first-child { background: linear-gradient(color-mix(in srgb, var(--danger) 6%, transparent), color-mix(in srgb, var(--danger) 6%, transparent)), var(--surface-solid); }
 td.lift-high { color: var(--danger); font-weight: 600; }
 tbody tr:hover td { background: var(--surface-sunken); }
+.table-wrap tbody tr:hover td:first-child { background: linear-gradient(var(--surface-sunken), var(--surface-sunken)), var(--surface-solid); }
 .pending { color: var(--muted); }
 /* статус VAMP: название всегда текстом, цвет — только подсказка */
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 1.5; }

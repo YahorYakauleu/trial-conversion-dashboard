@@ -22,7 +22,7 @@
 <body>
 <!-- Копия шапки таблицы, закреплённая у верха экрана (app.js → buildFloatHead): вне панелей — у них backdrop-filter,
      внутри него position: fixed считается от панели, а не от окна -->
-<div class="float-head" id="float-head" hidden aria-hidden="true"><table><thead></thead></table></div>
+<div class="float-head" id="float-head" hidden aria-hidden="true"><table><thead></thead></table><div class="x-scroll"><div></div></div></div>
 <div class="layout">
   <!-- Панель выборки: экран, провайдер, период и фильтры по измерениям -->
   <aside class="sidebar" id="sidebar" aria-label="Filters">
@@ -114,6 +114,7 @@
       </div>
 
       <section class="panel">
+        <div class="x-scroll" id="x-scroll" hidden aria-hidden="true"><div></div></div>
         <div class="table-wrap">
           <table>
             <thead id="thead"></thead>
